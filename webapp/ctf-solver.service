@@ -1,0 +1,15 @@
+[Unit]
+Description=CTF Solver Web App
+After=network.target
+
+[Service]
+Type=exec
+WorkingDirectory=/root/all-things-ai/webapp
+ExecStart=/bin/bash /root/all-things-ai/webapp/start.sh
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/root
+Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.cargo/bin:/opt/ida-pro-9.3:/opt/jadx-1.5.5/bin
+
+[Install]
+WantedBy=multi-user.target

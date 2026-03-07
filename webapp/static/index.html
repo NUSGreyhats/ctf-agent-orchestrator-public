@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CTF Solver</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- Login -->
+  <div id="login-view" class="view">
+    <div class="login-box">
+      <h1>CTF Solver</h1>
+      <p class="subtitle">AI-powered CTF challenge solver</p>
+      <form id="login-form">
+        <input type="password" id="login-password" placeholder="Password" autofocus>
+        <button type="submit">Login</button>
+      </form>
+      <p id="login-error" class="error hidden"></p>
+    </div>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="dashboard-view" class="view hidden">
+    <header>
+      <h1>CTF Solver</h1>
+      <div class="header-actions">
+        <div class="default-agent-toggle">
+          <span class="toggle-label">Agent:</span>
+          <button id="btn-agent-claude" class="agent-toggle-btn active" data-agent="claude">Claude</button>
+          <button id="btn-agent-copilot" class="agent-toggle-btn" data-agent="copilot">Copilot</button>
+        </div>
+        <button id="btn-new-challenge" class="btn-primary">+ New Challenge</button>
+        <button id="btn-bulk-upload" class="btn-ghost">Bulk Upload</button>
+        <button id="btn-usage" class="btn-ghost">Usage</button>
+        <button id="btn-logout" class="btn-ghost">Logout</button>
+      </div>
+    </header>
+    <div id="challenges-list"></div>
+    <div id="empty-state" class="empty-state hidden">
+      <div class="empty-icon">?</div>
+      <p>No challenges yet</p>
+      <p class="text-muted">Click "New Challenge" to get started</p>
+    </div>
+  </div>
+
+  <!-- Usage View -->
+  <div id="usage-view" class="view hidden">
+    <header>
+      <button id="btn-usage-back" class="btn-ghost">&larr; Back</button>
+      <h1>Usage</h1>
+      <div class="header-actions">
+        <button id="btn-usage-refresh" class="btn-ghost">Refresh</button>
+      </div>
+    </header>
+    <div class="usage-page">
+      <div class="usage-grid">
+        <!-- Claude Card -->
+        <div class="usage-card" id="usage-claude">
+          <div class="usage-card-header">
+            <span class="usage-agent-name">Claude</span>
+            <span id="claude-auth-badge" class="badge badge-pending">not connected</span>
+          </div>
+          <div id="claude-auth-info" class="usage-auth-info"></div>
+          <div id="claude-stats" class="usage-stats"></div>
+          <div id="claude-challenge-stats" class="usage-challenge-stats"></div>
+        </div>
+
+        <!-- Copilot Card -->
+        <div class="usage-card" id="usage-copilot">
+          <div class="usage-card-header">
+            <span class="usage-agent-name">Copilot</span>
+            <span id="copilot-auth-badge" class="badge badge-pending">not connected</span>
+          </div>
+          <div id="copilot-auth-info" class="usage-auth-info"></div>
+          <div id="copilot-stats" class="usage-stats"></div>
+          <div id="copilot-challenge-stats" class="usage-challenge-stats"></div>
+        </div>
+      </div>
+
+      <!-- Daily Activity Chart (Claude) -->
+      <div id="usage-daily" class="usage-section hidden">
+        <h2 class="usage-section-title">Daily Activity (Claude)</h2>
+        <div id="daily-chart" class="daily-chart"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- New Challenge Modal -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>New Challenge</h2>
+        <button id="modal-close" class="btn-icon">&times;</button>
+      </div>
+      <form id="challenge-form">
+        <div class="form-row">
+          <div class="form-group flex-2">
+            <label for="challenge-name">Name</label>
+            <input type="text" id="challenge-name" placeholder="e.g. Secret Image">
+          </div>
+          <div class="form-group flex-1">
+            <label for="challenge-agent">Agent</label>
+            <select id="challenge-agent">
+              <option value="claude" selected>Claude</option>
+              <option value="copilot">Copilot</option>
+              <option value="both">Both (parallel)</option>
+            </select>
+          </div>
+          <div class="form-group flex-1" id="model-group">
+            <label for="challenge-model">Model</label>
+            <select id="challenge-model"></select>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="challenge-desc">Description</label>
+          <textarea id="challenge-desc" rows="3"
+            placeholder="Paste the challenge description here..."></textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="challenge-flag">Flag Format</label>
+          <input type="text" id="challenge-flag" placeholder="e.g. flag{...} or CTF{...}">
+        </div>
+
+        <div class="form-group form-group-inline">
+          <label class="checkbox-label">
+            <input type="checkbox" id="challenge-autonomous">
+            <span>Autonomous mode</span>
+          </label>
+          <span class="checkbox-hint">Keep trying until the flag is found</span>
+        </div>
+
+        <div class="form-group">
+          <label>Challenge Files</label>
+          <div id="drop-zone" class="drop-zone">
+            <p>Drop files here or click to browse</p>
+            <input type="file" id="challenge-files" multiple>
+          </div>
+          <div id="file-list" class="file-list"></div>
+        </div>
+
+        <button type="submit" class="btn-primary btn-full">Create & Solve</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Bulk Upload Modal -->
+  <div id="bulk-overlay" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Bulk Upload</h2>
+        <button id="bulk-close" class="btn-icon">&times;</button>
+      </div>
+      <p class="bulk-hint">Upload a zip file with one folder per challenge. Each folder becomes a challenge using its name. Place a <code>description.txt</code> inside a folder to set the challenge description.</p>
+      <form id="bulk-form">
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label for="bulk-agent">Agent</label>
+            <select id="bulk-agent">
+              <option value="claude" selected>Claude</option>
+              <option value="copilot">Copilot</option>
+              <option value="both">Both (parallel)</option>
+            </select>
+          </div>
+          <div class="form-group flex-1" id="bulk-model-group">
+            <label for="bulk-model">Model</label>
+            <select id="bulk-model"></select>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="bulk-flag">Flag Format</label>
+          <input type="text" id="bulk-flag" placeholder="e.g. flag{...} or CTF{...}">
+        </div>
+
+        <div class="form-group form-group-inline">
+          <label class="checkbox-label">
+            <input type="checkbox" id="bulk-autonomous">
+            <span>Autonomous mode</span>
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label>Zip File</label>
+          <div id="bulk-drop-zone" class="drop-zone">
+            <p>Drop zip file here or click to browse</p>
+            <input type="file" id="bulk-file" accept=".zip">
+          </div>
+          <div id="bulk-file-name" class="file-list"></div>
+        </div>
+
+        <button type="submit" class="btn-primary btn-full">Upload & Create Challenges</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Challenge Detail - Multi-panel layout -->
+  <div id="detail-view" class="view hidden">
+    <header>
+      <button id="btn-back" class="btn-ghost">&larr; Back</button>
+      <div class="challenge-header-info">
+        <h1 id="detail-name"></h1>
+        <span id="detail-status" class="badge"></span>
+        <span id="detail-model" class="badge badge-model"></span>
+        <span id="detail-timer" class="header-stat"></span>
+        <span id="detail-cost" class="header-stat"></span>
+      </div>
+      <div class="header-actions">
+        <button id="btn-retry" class="btn-primary hidden">Retry</button>
+        <button id="btn-stop" class="btn-danger hidden">Stop</button>
+        <button id="btn-sidebar-toggle" class="btn-ghost btn-sidebar-toggle">Panel</button>
+        <button id="btn-delete" class="btn-ghost btn-ghost-danger">Delete</button>
+      </div>
+    </header>
+    <div id="error-banner" class="error-banner hidden"></div>
+
+    <div class="panels">
+      <!-- Left: Agent activity stream -->
+      <div class="panel panel-main">
+        <div class="panel-header">
+          <span class="panel-title">Agent Activity</span>
+          <span id="ws-status" class="ws-indicator ws-disconnected" title="Disconnected"></span>
+          <span id="step-counter" class="step-counter"></span>
+          <div class="panel-header-actions">
+            <button id="btn-toggle-tools" class="btn-ghost btn-xs" title="Expand/collapse all tools">Expand all</button>
+            <button id="btn-export" class="btn-ghost btn-xs" title="Export as markdown">Export</button>
+          </div>
+        </div>
+        <div id="agent-tabs" class="agent-tabs">
+          <button class="agent-tab active" data-agent="main">Main</button>
+        </div>
+        <div id="agent-feeds" class="agent-feeds">
+          <div id="feed-main" class="panel-body agent-feed active"></div>
+          <button id="btn-scroll-bottom" class="btn-scroll-bottom hidden" title="Scroll to bottom">&#8595; Latest</button>
+        </div>
+        <div id="steer-bar" class="steer-bar">
+          <input type="text" id="steer-input" placeholder="Send guidance to the agent..." autocomplete="off">
+          <button id="btn-steer" class="btn-primary btn-sm">Send</button>
+        </div>
+      </div>
+
+      <!-- Right sidebar -->
+      <div class="panel-sidebar">
+        <!-- Tabs -->
+        <div class="sidebar-tabs">
+          <button class="sidebar-tab active" data-tab="tab-info">Info</button>
+          <button class="sidebar-tab" data-tab="tab-tools">Tools <span id="tool-counter" class="tab-badge">0</span></button>
+          <button class="sidebar-tab" data-tab="tab-files">Files <span id="file-counter" class="tab-badge">0</span></button>
+        </div>
+
+        <!-- Info tab -->
+        <div id="tab-info" class="sidebar-content active">
+          <div class="panel-body panel-body-compact">
+            <div id="detail-desc" class="info-desc"></div>
+            <div id="detail-flag-format" class="info-meta"></div>
+            <div id="detail-files" class="info-meta"></div>
+            <div id="flags-section" class="flags-section hidden">
+              <div class="flags-header">Flags Found</div>
+              <div id="flags-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tools tab -->
+        <div id="tab-tools" class="sidebar-content">
+          <div id="tool-log" class="panel-body panel-body-scroll"></div>
+        </div>
+
+        <!-- Files tab -->
+        <div id="tab-files" class="sidebar-content">
+          <div class="panel-body panel-body-scroll">
+            <div id="files-toolbar">
+              <button id="btn-refresh-files" class="btn-ghost btn-sm">Refresh</button>
+            </div>
+            <div id="files-tree"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- File Viewer Modal -->
+  <div id="file-viewer-overlay" class="modal-overlay hidden">
+    <div class="file-viewer-modal">
+      <div class="file-viewer-header">
+        <span id="file-viewer-name" class="file-viewer-title"></span>
+        <span id="file-viewer-size" class="file-viewer-meta"></span>
+        <a id="file-viewer-download" class="btn-ghost btn-sm" href="#" download>Download</a>
+        <button id="file-viewer-close" class="btn-icon">&times;</button>
+      </div>
+      <div id="file-viewer-content" class="file-viewer-body"></div>
+    </div>
+  </div>
+
+  <!-- Auth Warning Modal -->
+  <div id="auth-warning-overlay" class="modal-overlay hidden">
+    <div class="modal auth-warning-modal">
+      <div class="modal-header">
+        <h2>Agent Setup Required</h2>
+        <button id="auth-warning-close" class="btn-icon">&times;</button>
+      </div>
+      <p class="auth-warning-intro">The following agents are not authenticated. SSH into the machine and run the commands below to set them up.</p>
+      <div id="auth-warning-items"></div>
+      <button id="auth-warning-dismiss" class="btn-primary btn-full">Got it</button>
+    </div>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

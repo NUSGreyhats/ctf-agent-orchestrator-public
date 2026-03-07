@@ -1,0 +1,1598 @@
+/* CTF Solver - Frontend */
+const $ = (sel) => document.querySelector(sel);
+let ws = null;
+let currentChallengeId = null;
+let autoScroll = true;
+let toolCount = 0;
+let stepCount = 0;
+let defaultAgent = "claude";
+let csrfToken = null;
+
+const pendingTools = new Map();
+
+// Subagent tracking: Map<toolUseId, {feed, tab, desc, status}>
+const agentFeeds = new Map();
+let activeAgentTab = "main";
+
+// Timer & cost tracking
+let timerStart = null;
+let timerInterval = null;
+let totalCostUsd = 0;
+let totalTokens = 0;
+let challengeFlagFormat = "";
+let lastThinkingEl = null;
+
+const views = {
+  login: $("#login-view"),
+  dashboard: $("#dashboard-view"),
+  detail: $("#detail-view"),
+  usage: $("#usage-view"),
+};
+
+function showView(name) {
+  Object.values(views).forEach((v) => v.classList.add("hidden"));
+  views[name].classList.remove("hidden");
+}
+
+async function api(path, opts = {}) {
+  const headers = { ...opts.headers };
+  if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
+  // Only set Content-Type for non-FormData bodies
+  if (!(opts.body instanceof FormData)) {
+    headers["Content-Type"] = headers["Content-Type"] || "application/json";
+  }
+  const res = await fetch(path, { ...opts, headers });
+  if (res.status === 401) { showView("login"); csrfToken = null; return null; }
+  return res;
+}
+
+// === Login ===
+$("#login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const res = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: $("#login-password").value }),
+  });
+  if (res.ok) {
+    const data = await res.json();
+    csrfToken = data.csrf_token;
+    showView("dashboard"); loadChallenges(); loadDefaultAgent(); checkAgentAuth();
+  } else {
+    const data = await res.json().catch(() => ({}));
+    $("#login-error").textContent = data.error || "Invalid password";
+    $("#login-error").classList.remove("hidden");
+  }
+});
+
+$("#btn-logout").addEventListener("click", async () => {
+  await api("/api/logout", { method: "POST" });
+  showView("login");
+});
+
+// === Default Agent Toggle ===
+async function loadDefaultAgent() {
+  const res = await api("/api/settings");
+  if (!res) return;
+  const settings = await res.json();
+  defaultAgent = settings.default_agent || "claude";
+  updateAgentToggleUI();
+}
+
+function updateAgentToggleUI() {
+  document.querySelectorAll(".agent-toggle-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.agent === defaultAgent);
+  });
+}
+
+document.querySelectorAll(".agent-toggle-btn").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    defaultAgent = btn.dataset.agent;
+    updateAgentToggleUI();
+    await api("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ default_agent: defaultAgent }),
+    });
+  });
+});
+
+// === Agent Auth Check ===
+async function checkAgentAuth() {
+  const res = await api("/api/usage");
+  if (!res) return;
+  const data = await res.json();
+
+  const missing = [];
+  if (!data.claude) {
+    missing.push({
+      name: "Claude Code",
+      command: "claude auth login",
+    });
+  }
+  if (!data.copilot) {
+    missing.push({
+      name: "GitHub Copilot CLI",
+      command: "copilot login",
+    });
+  }
+
+  if (missing.length === 0) return;
+
+  const container = $("#auth-warning-items");
+  container.innerHTML = missing.map((m) => `
+    <div class="auth-warning-item">
+      <span class="auth-warning-agent">${esc(m.name)}</span>
+      <code class="auth-warning-cmd">${esc(m.command)}</code>
+    </div>
+  `).join("");
+
+  $("#auth-warning-overlay").classList.remove("hidden");
+}
+
+$("#auth-warning-close").addEventListener("click", () => {
+  $("#auth-warning-overlay").classList.add("hidden");
+});
+$("#auth-warning-dismiss").addEventListener("click", () => {
+  $("#auth-warning-overlay").classList.add("hidden");
+});
+$("#auth-warning-overlay").addEventListener("click", (e) => {
+  if (e.target === $("#auth-warning-overlay"))
+    $("#auth-warning-overlay").classList.add("hidden");
+});
+
+// === Dashboard ===
+async function loadChallenges() {
+  const res = await api("/api/challenges");
+  if (!res) return;
+  const challenges = await res.json();
+  const list = $("#challenges-list");
+  const empty = $("#empty-state");
+
+  if (!challenges.length) {
+    list.innerHTML = "";
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  list.innerHTML = challenges.map((c) => {
+    const agentLabel = c.agent === "copilot"
+      ? "copilot"
+      : esc(c.model || "opus");
+    return `
+    <div class="challenge-card" data-id="${c.id}">
+      <span class="badge badge-${c.status}">${c.status}</span>
+      <span class="card-name">${esc(c.name)}</span>
+      <span class="card-desc">${esc(c.description || "")}</span>
+      <span class="card-agent card-agent-${c.agent || "claude"}">${agentLabel}</span>
+      <span class="card-files">${c.files.length} file${c.files.length !== 1 ? "s" : ""}</span>
+      <span class="card-duration">${formatDuration(c.duration_ms)}</span>
+      <button class="btn-card-delete" data-id="${c.id}" title="Delete">&times;</button>
+    </div>`;
+  }).join("");
+
+  list.querySelectorAll(".challenge-card").forEach((card) =>
+    card.addEventListener("click", (e) => {
+      if (e.target.classList.contains("btn-card-delete")) return;
+      openChallenge(card.dataset.id);
+    })
+  );
+  list.querySelectorAll(".btn-card-delete").forEach((btn) =>
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm("Delete this challenge?")) return;
+      await api(`/api/challenges/${btn.dataset.id}`, { method: "DELETE" });
+      loadChallenges();
+    })
+  );
+}
+
+setInterval(() => {
+  if (!views.dashboard.classList.contains("hidden")) loadChallenges();
+}, 5000);
+
+// === Modal ===
+$("#btn-new-challenge").addEventListener("click", () => {
+  $("#challenge-agent").value = defaultAgent;
+  updateModelOptions();
+  $("#challenge-autonomous").checked = defaultAgent === "copilot";
+  $("#modal-overlay").classList.remove("hidden");
+  $("#challenge-name").focus();
+});
+$("#modal-close").addEventListener("click", closeModal);
+$("#modal-overlay").addEventListener("click", (e) => {
+  if (e.target === $("#modal-overlay")) closeModal();
+});
+
+function closeModal() {
+  $("#modal-overlay").classList.add("hidden");
+  $("#challenge-form").reset();
+  $("#file-list").innerHTML = "";
+  updateModelOptions();
+}
+
+const dropZone = $("#drop-zone");
+const fileInput = $("#challenge-files");
+dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault(); dropZone.classList.remove("dragover");
+  fileInput.files = e.dataTransfer.files; updateFileList();
+});
+fileInput.addEventListener("change", updateFileList);
+
+function updateFileList() {
+  $("#file-list").innerHTML = Array.from(fileInput.files)
+    .map((f) => `<span>${esc(f.name)}</span>`).join("");
+}
+
+const agentModels = {
+  claude: [
+    { value: "opus", label: "Opus" },
+    { value: "sonnet", label: "Sonnet" },
+    { value: "haiku", label: "Haiku" },
+  ],
+  copilot: [
+    { value: "claude-opus-4.6", label: "Claude Opus 4.6" },
+    { value: "claude-sonnet-4.6", label: "Claude Sonnet 4.6" },
+    { value: "claude-haiku-4.5", label: "Claude Haiku 4.5" },
+    { value: "gpt-5.4", label: "GPT-5.4" },
+    { value: "gpt-5.2", label: "GPT-5.2" },
+    { value: "gpt-5.1", label: "GPT-5.1" },
+    { value: "gemini-3-pro-preview", label: "Gemini 3 Pro" },
+  ],
+};
+
+function updateModelOptions() {
+  const agent = $("#challenge-agent").value;
+  const models = agent === "both" ? agentModels.claude : (agentModels[agent] || agentModels.claude);
+  const sel = $("#challenge-model");
+  sel.innerHTML = models.map((m) =>
+    `<option value="${m.value}">${esc(m.label)}</option>`
+  ).join("");
+}
+
+$("#challenge-agent").addEventListener("change", () => {
+  updateModelOptions();
+  const agent = $("#challenge-agent").value;
+  $("#challenge-autonomous").checked = agent === "copilot" || agent === "both";
+});
+updateModelOptions();
+
+$("#challenge-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData();
+  fd.append("name", $("#challenge-name").value);
+  fd.append("description", $("#challenge-desc").value);
+  fd.append("flag_format", $("#challenge-flag").value);
+  fd.append("agent", $("#challenge-agent").value);
+  fd.append("model", $("#challenge-model").value);
+  fd.append("autonomous", $("#challenge-autonomous").checked ? "true" : "false");
+  for (const file of fileInput.files) fd.append("files", file);
+
+  const res = await api("/api/challenges", { method: "POST", body: fd });
+  if (res.ok) {
+    const data = await res.json();
+    closeModal(); loadChallenges();
+    if (data.id) {
+      openChallenge(data.id);
+    } else if (data.created) {
+      openChallenge(data.created[0].id);
+    }
+  }
+});
+
+// === Bulk Upload ===
+const bulkOverlay = $("#bulk-overlay");
+const bulkFileInput = $("#bulk-file");
+const bulkDropZone = $("#bulk-drop-zone");
+
+$("#btn-bulk-upload").addEventListener("click", () => {
+  $("#bulk-agent").value = defaultAgent;
+  updateBulkModels();
+  $("#bulk-autonomous").checked = defaultAgent === "copilot";
+  bulkOverlay.classList.remove("hidden");
+});
+$("#bulk-close").addEventListener("click", closeBulkModal);
+bulkOverlay.addEventListener("click", (e) => {
+  if (e.target === bulkOverlay) closeBulkModal();
+});
+
+function closeBulkModal() {
+  bulkOverlay.classList.add("hidden");
+  $("#bulk-form").reset();
+  $("#bulk-file-name").innerHTML = "";
+}
+
+function updateBulkModels() {
+  const agent = $("#bulk-agent").value;
+  const models = agent === "both"
+    ? [{ value: "opus", label: "Opus (default)" }]
+    : (agentModels[agent] || agentModels.claude);
+  const sel = $("#bulk-model");
+  sel.innerHTML = models.map((m) =>
+    `<option value="${m.value}">${esc(m.label)}</option>`
+  ).join("");
+}
+
+$("#bulk-agent").addEventListener("change", () => {
+  updateBulkModels();
+  const agent = $("#bulk-agent").value;
+  $("#bulk-autonomous").checked = agent === "copilot" || agent === "both";
+});
+updateBulkModels();
+
+bulkDropZone.addEventListener("dragover", (e) => { e.preventDefault(); bulkDropZone.classList.add("dragover"); });
+bulkDropZone.addEventListener("dragleave", () => bulkDropZone.classList.remove("dragover"));
+bulkDropZone.addEventListener("drop", (e) => {
+  e.preventDefault(); bulkDropZone.classList.remove("dragover");
+  bulkFileInput.files = e.dataTransfer.files;
+  updateBulkFileName();
+});
+bulkFileInput.addEventListener("change", updateBulkFileName);
+
+function updateBulkFileName() {
+  const f = bulkFileInput.files[0];
+  $("#bulk-file-name").innerHTML = f ? `<span>${esc(f.name)}</span>` : "";
+}
+
+$("#bulk-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!bulkFileInput.files.length) {
+    showToast("Please select a zip file", "error"); return;
+  }
+  const agent = $("#bulk-agent").value;
+  const fd = new FormData();
+  fd.append("zipfile", bulkFileInput.files[0]);
+  fd.append("flag_format", $("#bulk-flag").value);
+  fd.append("agent", agent);
+  fd.append("model", $("#bulk-model").value);
+  fd.append("autonomous", $("#bulk-autonomous").checked ? "true" : "false");
+
+  const btn = e.target.querySelector("button[type=submit]");
+  btn.disabled = true;
+  btn.textContent = "Uploading...";
+  try {
+    const res = await api("/api/challenges/bulk", { method: "POST", body: fd });
+    if (!res.ok) {
+      const err = await res.json();
+      showToast(err.error || "Upload failed", "error"); return;
+    }
+    const data = await res.json();
+    showToast(`Created ${data.created.length} challenge(s)`, "success");
+    closeBulkModal();
+    loadChallenges();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Upload & Create Challenges";
+  }
+});
+
+// === Detail View ===
+async function openChallenge(id) {
+  currentChallengeId = id;
+  toolCount = 0;
+  stepCount = 0;
+  pendingTools.clear();
+  foundFlags.clear();
+  $("#flags-list").innerHTML = "";
+  $("#flags-section").classList.add("hidden");
+
+  const res = await api("/api/challenges");
+  if (!res) return;
+  const challenges = await res.json();
+  const c = challenges.find((x) => x.id === id);
+  if (!c) return;
+
+  $("#detail-name").textContent = c.name;
+  updateStatusBadge(c.status);
+  const agentBadge = $("#detail-model");
+  if (c.agent === "copilot") {
+    agentBadge.textContent = "copilot";
+    agentBadge.className = "badge badge-agent-copilot";
+  } else {
+    agentBadge.textContent = c.model || "opus";
+    agentBadge.className = "badge badge-model";
+  }
+  $("#detail-desc").textContent = c.description || "No description";
+  $("#detail-flag-format").textContent = c.flag_format ? `Flag: ${c.flag_format}` : "";
+  $("#detail-files").textContent = c.files.length ? `Files: ${c.files.join(", ")}` : "No files";
+  challengeFlagFormat = c.flag_format || "";
+
+  const errorBanner = $("#error-banner");
+  if (c.error) {
+    errorBanner.textContent = c.error;
+    errorBanner.classList.remove("hidden");
+  } else {
+    errorBanner.classList.add("hidden");
+  }
+
+  // Reset timer/cost
+  totalCostUsd = 0;
+  totalTokens = 0;
+  lastThinkingEl = null;
+  $("#detail-timer").textContent = "";
+  $("#detail-cost").textContent = "";
+  foundFlags.clear(); $("#flags-list").innerHTML = ""; $("#flags-section").classList.add("hidden");
+  if (c.status === "solving") startTimer();
+  else stopTimer();
+
+  updateButtons(c.status);
+  resetAgentTabs();
+  $("#tool-log").innerHTML = "";
+  $("#files-tree").innerHTML = "";
+  updateCounters();
+  showView("detail");
+  switchTab("tab-info");
+  connectWS(id);
+  loadFiles();
+}
+
+function updateStatusBadge(status) {
+  const b = $("#detail-status");
+  b.textContent = status;
+  b.className = `badge badge-${status}`;
+}
+
+function updateButtons(status) {
+  $("#btn-retry").classList.toggle("hidden", status !== "failed" && status !== "solved");
+  $("#btn-stop").classList.toggle("hidden", status !== "solving");
+}
+
+function updateCounters() {
+  $("#step-counter").textContent = stepCount ? `${stepCount} steps` : "";
+  $("#tool-counter").textContent = toolCount;
+}
+
+$("#btn-back").addEventListener("click", () => {
+  disconnectWS(); stopTimer(); currentChallengeId = null;
+  showView("dashboard"); loadChallenges();
+});
+
+$("#btn-retry").addEventListener("click", async () => {
+  if (!currentChallengeId) return;
+  resetAgentTabs();
+  $("#tool-log").innerHTML = "";
+  $("#error-banner").classList.add("hidden");
+  foundFlags.clear(); $("#flags-list").innerHTML = ""; $("#flags-section").classList.add("hidden");
+  toolCount = 0; stepCount = 0; totalCostUsd = 0; totalTokens = 0;
+  lastThinkingEl = null;
+  $("#detail-cost").textContent = "";
+  pendingTools.clear(); updateCounters();
+  const res = await api(`/api/challenges/${currentChallengeId}/solve`, { method: "POST" });
+  if (res && res.ok) { updateStatusBadge("solving"); updateButtons("solving"); startTimer(); }
+});
+
+$("#btn-stop").addEventListener("click", async () => {
+  if (!currentChallengeId) return;
+  await api(`/api/challenges/${currentChallengeId}/stop`, { method: "POST" });
+});
+
+$("#btn-delete").addEventListener("click", async () => {
+  if (!currentChallengeId) return;
+  if (!confirm("Delete this challenge?")) return;
+  await api(`/api/challenges/${currentChallengeId}`, { method: "DELETE" });
+  disconnectWS(); stopTimer(); currentChallengeId = null;
+  showView("dashboard"); loadChallenges();
+});
+
+// === WebSocket ===
+function setWsStatus(status) {
+  const el = $("#ws-status");
+  if (!el) return;
+  el.className = `ws-indicator ws-${status}`;
+  el.title = status === "connected" ? "Connected"
+    : status === "reconnecting" ? "Reconnecting..." : "Disconnected";
+}
+
+function connectWS(challengeId) {
+  disconnectWS();
+  setWsStatus("reconnecting");
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws/${challengeId}`);
+  ws.onopen = () => setWsStatus("connected");
+  ws.onmessage = (e) => renderEvent(JSON.parse(e.data));
+  ws.onclose = () => {
+    setWsStatus("reconnecting");
+    if (currentChallengeId === challengeId)
+      setTimeout(() => { if (currentChallengeId === challengeId) connectWS(challengeId); }, 2000);
+  };
+}
+
+function disconnectWS() {
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+  setWsStatus("disconnected");
+}
+
+// === Scroll ===
+function getActiveFeed() {
+  return document.getElementById(`feed-${activeAgentTab}`);
+}
+
+function setupFeedScroll(feedEl) {
+  feedEl.addEventListener("scroll", () => {
+    autoScroll = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 50;
+    updateScrollBtn();
+  });
+}
+
+function updateScrollBtn() {
+  const btn = $("#btn-scroll-bottom");
+  if (btn) btn.classList.toggle("hidden", autoScroll);
+}
+setupFeedScroll(document.getElementById("feed-main"));
+
+function scrollBottom() {
+  const f = getActiveFeed();
+  if (autoScroll && f) f.scrollTop = f.scrollHeight;
+}
+
+// === Agent Tabs ===
+function resetAgentTabs() {
+  agentFeeds.clear();
+  activeAgentTab = "main";
+  const tabBar = $("#agent-tabs");
+  tabBar.innerHTML = '<button class="agent-tab active" data-agent="main">Main</button>';
+  const feedsEl = $("#agent-feeds");
+  feedsEl.innerHTML = '<div id="feed-main" class="panel-body agent-feed active"></div>';
+  setupFeedScroll(document.getElementById("feed-main"));
+  tabBar.querySelector('[data-agent="main"]').addEventListener("click", () => switchAgentTab("main"));
+}
+
+function getFeedFor(event) {
+  const parentId = event.parent_tool_use_id;
+  if (!parentId) return document.getElementById("feed-main");
+  const info = agentFeeds.get(parentId);
+  return info ? info.feed : document.getElementById("feed-main");
+}
+
+function createSubagentTab(toolUseId, description) {
+  if (agentFeeds.has(toolUseId)) return;
+  const shortDesc = truncate(description || "Subagent", 24);
+  const tabBar = $("#agent-tabs");
+  const feedsEl = $("#agent-feeds");
+
+  const btn = document.createElement("button");
+  btn.className = "agent-tab";
+  btn.dataset.agent = toolUseId;
+  btn.innerHTML = `<span class="agent-tab-dot dot-running"></span>${esc(shortDesc)}`;
+  btn.addEventListener("click", () => switchAgentTab(toolUseId));
+  tabBar.appendChild(btn);
+
+  const feed = document.createElement("div");
+  feed.id = `feed-${toolUseId}`;
+  feed.className = "panel-body agent-feed";
+  feedsEl.appendChild(feed);
+  setupFeedScroll(feed);
+
+  agentFeeds.set(toolUseId, { feed, tab: btn, desc: description, status: "running" });
+}
+
+function finishSubagentTab(toolUseId, isError) {
+  const info = agentFeeds.get(toolUseId);
+  if (!info) return;
+  info.status = isError ? "error" : "done";
+  const dot = info.tab.querySelector(".agent-tab-dot");
+  if (dot) dot.className = `agent-tab-dot ${isError ? "dot-error" : "dot-done"}`;
+}
+
+function switchAgentTab(agentId) {
+  activeAgentTab = agentId;
+  document.querySelectorAll(".agent-tab").forEach((t) => t.classList.remove("active"));
+  document.querySelectorAll(".agent-feed").forEach((f) => f.classList.remove("active"));
+  const btn = document.querySelector(`[data-agent="${agentId}"]`);
+  if (btn) btn.classList.add("active");
+  const feed = document.getElementById(`feed-${agentId}`);
+  if (feed) { feed.classList.add("active"); autoScroll = true; scrollBottom(); }
+  // Only show steer bar for main agent
+  $("#steer-bar").classList.toggle("hidden", agentId !== "main");
+}
+
+// === Markdown ===
+function renderMarkdown(text) {
+  let h = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  // Fenced code blocks
+  h = h.replace(/```(\w*)\n([\s\S]*?)```/g,
+    '<pre class="md-codeblock"><code>$2</code></pre>');
+
+  // Inline code
+  h = h.replace(/`([^`\n]+)`/g, '<code class="md-code">$1</code>');
+
+  // Bold
+  h = h.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
+  // Italic
+  h = h.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+
+  // Headers
+  h = h.replace(/^### (.+)$/gm, '<div class="md-h3">$1</div>');
+  h = h.replace(/^## (.+)$/gm, '<div class="md-h2">$1</div>');
+  h = h.replace(/^# (.+)$/gm, '<div class="md-h1">$1</div>');
+
+  // Unordered lists
+  h = h.replace(/^[*-] (.+)$/gm, '<li>$1</li>');
+
+  // Numbered lists
+  h = h.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+
+  // Wrap consecutive <li> in <ul>
+  h = h.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul class="md-list">$1</ul>');
+
+  // Paragraphs (double newline)
+  h = h.replace(/\n\n/g, '</p><p>');
+  h = '<p>' + h + '</p>';
+  h = h.replace(/<p><\/p>/g, '');
+
+  // Clean up <p> wrapping block elements
+  h = h.replace(/<p>(<(?:pre|ul|div|h\d)[^>]*>)/g, '$1');
+  h = h.replace(/(<\/(?:pre|ul|div|h\d)>)<\/p>/g, '$1');
+
+  return h;
+}
+
+// === Copy to Clipboard ===
+function copyToClipboard(text, btnEl) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btnEl.textContent;
+    btnEl.textContent = "Copied!";
+    btnEl.classList.add("copied");
+    setTimeout(() => { btnEl.textContent = orig; btnEl.classList.remove("copied"); }, 1200);
+  });
+}
+
+function makeCopyBtn(getText) {
+  const btn = document.createElement("button");
+  btn.className = "btn-copy";
+  btn.textContent = "Copy";
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    copyToClipboard(typeof getText === "function" ? getText() : getText, btn);
+  });
+  return btn;
+}
+
+// === Flag Detection ===
+function checkForFlag(text) {
+  const patterns = [
+    /flag\{[^}]+\}/gi,
+    /FLAG\{[^}]+\}/g,
+    /CTF\{[^}]+\}/g,
+    /HTB\{[^}]+\}/g,
+    /picoCTF\{[^}]+\}/g,
+  ];
+  if (challengeFlagFormat) {
+    const prefix = challengeFlagFormat.replace(/\{.*/, "");
+    if (prefix.length >= 2) {
+      patterns.push(
+        new RegExp(prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+          + "\\{[^}]+\\}", "g")
+      );
+    }
+  }
+  for (const pat of patterns) {
+    const m = text.match(pat);
+    if (m) return m[0];
+  }
+  return null;
+}
+
+const foundFlags = new Set();
+
+function showFlagBanner(flag) {
+  if (foundFlags.has(flag)) return;
+  foundFlags.add(flag);
+
+  const section = $("#flags-section");
+  const list = $("#flags-list");
+  section.classList.remove("hidden");
+
+  const item = document.createElement("div");
+  item.className = "flag-item";
+  const span = document.createElement("span");
+  span.className = "flag-text";
+  span.textContent = flag;
+  const btn = document.createElement("button");
+  btn.className = "btn-copy-flag";
+  btn.textContent = "Copy";
+  btn.addEventListener("click", () => copyToClipboard(flag, btn));
+  item.append(span, btn);
+  list.appendChild(item);
+}
+
+// === Timer ===
+function startTimer() {
+  stopTimer();
+  timerStart = Date.now();
+  timerInterval = setInterval(updateTimer, 1000);
+  updateTimer();
+}
+
+function stopTimer() {
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+}
+
+function updateTimer() {
+  if (!timerStart) return;
+  const elapsed = Math.floor((Date.now() - timerStart) / 1000);
+  const m = Math.floor(elapsed / 60);
+  const s = elapsed % 60;
+  const h = Math.floor(m / 60);
+  const display = h > 0
+    ? `${h}:${String(m % 60).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+    : `${m}:${String(s).padStart(2, "0")}`;
+  $("#detail-timer").textContent = display;
+}
+
+function updateCost() {
+  if (totalCostUsd > 0) {
+    $("#detail-cost").textContent = `$${totalCostUsd.toFixed(4)}`;
+  }
+  if (totalTokens > 0) {
+    const k = (totalTokens / 1000).toFixed(1);
+    const costText = totalCostUsd > 0
+      ? `$${totalCostUsd.toFixed(4)} / ${k}k tok`
+      : `${k}k tok`;
+    $("#detail-cost").textContent = costText;
+  }
+}
+
+// === Toasts ===
+function showToast(message, type = "info") {
+  const container = $("#toast-container");
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add("toast-visible"));
+  setTimeout(() => {
+    toast.classList.remove("toast-visible");
+    setTimeout(() => toast.remove(), 300);
+  }, 4000);
+}
+
+// === Rendering ===
+function renderEvent(event) {
+  if (event.type === "status") {
+    updateStatusBadge(event.status);
+    updateButtons(event.status);
+    if (event.status === "solving") startTimer();
+    if (event.status === "solved" || event.status === "failed") {
+      stopTimer();
+      // Toast if not viewing this challenge
+      if (views.detail.classList.contains("hidden")) {
+        showToast(
+          event.status === "solved" ? "Challenge solved!" : "Challenge failed",
+          event.status === "solved" ? "success" : "error"
+        );
+      }
+    }
+    if (event.error) {
+      $("#error-banner").textContent = event.error;
+      $("#error-banner").classList.remove("hidden");
+    }
+    return;
+  }
+
+  // Handle subagent lifecycle via system events
+  if (event.type === "system" && event.subtype === "task_started") {
+    createSubagentTab(event.tool_use_id, event.description || "Subagent");
+    switchAgentTab(event.tool_use_id);
+    return;
+  }
+  if (event.type === "system" && event.subtype === "task_notification") {
+    finishSubagentTab(event.tool_use_id, event.status !== "completed");
+    if (activeAgentTab === event.tool_use_id) switchAgentTab("main");
+    return;
+  }
+
+  // Route to correct feed based on parent_tool_use_id
+  const feed = getFeedFor(event);
+
+  if (event.type === "error") {
+    appendMsg(feed, event.message, "error-msg");
+    scrollBottom(); return;
+  }
+  if (event.type === "system") {
+    if (event.subtype === "init") return;
+    if (event.message) appendMsg(feed, event.message, "system-msg");
+    scrollBottom(); return;
+  }
+  if (event.type === "user_steer") {
+    const div = document.createElement("div");
+    div.className = "user-steer-msg";
+    div.innerHTML = `<div class="user-steer-label">You</div>`;
+    const text = document.createElement("div");
+    text.textContent = event.message;
+    div.appendChild(text);
+    feed.appendChild(div);
+    scrollBottom(); return;
+  }
+  if (event.type === "rate_limit_event") {
+    const info = event.rate_limit_info;
+    if (info && info.utilization > 0.5) {
+      appendMsg(feed, `Rate limit: ${Math.round(info.utilization * 100)}% used`, "rate-limit-msg");
+      scrollBottom();
+    }
+    return;
+  }
+
+  if (event.type === "assistant" && event.message) {
+    renderAssistant(feed, event.message);
+    scrollBottom(); return;
+  }
+
+  if (event.type === "user" && event.message) {
+    renderToolResults(event, feed);
+    scrollBottom(); return;
+  }
+
+  if (event.type === "raw" && event.text) {
+    appendMsg(feed, event.text, "raw-msg");
+    const flag = checkForFlag(event.text);
+    if (flag) showFlagBanner(flag);
+    scrollBottom(); return;
+  }
+
+  if (event.type === "result") {
+    if (event.total_cost_usd) { totalCostUsd = event.total_cost_usd; updateCost(); }
+    if (event.result) {
+      const block = document.createElement("div");
+      block.className = "result-block";
+      block.innerHTML = `<div class="result-label">Result</div><div class="result-text"></div>`;
+      block.querySelector(".result-text").innerHTML = renderMarkdown(event.result);
+      feed.appendChild(block);
+      const flag = checkForFlag(event.result);
+      if (flag) showFlagBanner(flag);
+      scrollBottom();
+    }
+    return;
+  }
+}
+
+function renderAssistant(feed, msg) {
+  if (!msg.content || !msg.content.length) return;
+
+  // Track tokens from usage
+  if (msg.usage) {
+    totalTokens += (msg.usage.input_tokens || 0) + (msg.usage.output_tokens || 0);
+    updateCost();
+  }
+
+  const step = document.createElement("div");
+  step.className = "step";
+  let hasContent = false;
+
+  for (const block of msg.content) {
+    if (block.type === "thinking" && block.thinking) {
+      // Collapse previous thinking block
+      if (lastThinkingEl) lastThinkingEl.removeAttribute("open");
+
+      const details = document.createElement("details");
+      details.className = "step-thinking";
+      details.open = true;
+      const summary = document.createElement("summary");
+      const label = document.createElement("span");
+      label.className = "thinking-label";
+      label.textContent = "Thinking";
+      const preview = document.createElement("span");
+      preview.className = "thinking-preview";
+      preview.textContent = " " + truncate(block.thinking, 100);
+      summary.appendChild(label);
+      summary.appendChild(preview);
+      details.appendChild(summary);
+      const body = document.createElement("div");
+      body.className = "thinking-body";
+      body.textContent = block.thinking;
+      details.appendChild(body);
+      step.appendChild(details);
+      lastThinkingEl = details;
+      hasContent = true;
+    }
+    else if (block.type === "text" && block.text) {
+      const div = document.createElement("div");
+      div.className = "step-text";
+      div.innerHTML = renderMarkdown(block.text);
+      // Add copy buttons to code blocks
+      div.querySelectorAll(".md-codeblock").forEach((pre) => {
+        pre.style.position = "relative";
+        pre.appendChild(makeCopyBtn(() => pre.textContent));
+      });
+      step.appendChild(div);
+
+      // Check for flags
+      const flag = checkForFlag(block.text);
+      if (flag) showFlagBanner(flag);
+
+      hasContent = true;
+    }
+    else if (block.type === "tool_use") {
+      const toolEl = buildToolUse(block);
+      step.appendChild(toolEl);
+      pendingTools.set(block.id, toolEl);
+      addToolLogEntry(block);
+      toolCount++;
+      updateCounters();
+      hasContent = true;
+    }
+  }
+
+  if (hasContent) {
+    // Add timestamp
+    if (timerStart) {
+      const elapsed = Math.floor((Date.now() - timerStart) / 1000);
+      const ts = document.createElement("span");
+      ts.className = "step-timestamp";
+      const m = Math.floor(elapsed / 60);
+      const s = elapsed % 60;
+      ts.textContent = `${m}:${String(s).padStart(2, "0")}`;
+      step.prepend(ts);
+    }
+    feed.appendChild(step);
+    stepCount++;
+    updateCounters();
+  }
+}
+
+function buildToolUse(block) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "step-tool";
+  wrapper.id = `tool-${block.id}`;
+
+  // Bar
+  const bar = document.createElement("div");
+  bar.className = "tool-bar";
+
+  const icon = document.createElement("span");
+  icon.className = `tool-icon ${iconClass(block.name)}`;
+  icon.textContent = iconLetter(block.name);
+
+  const name = document.createElement("span");
+  name.className = "tool-name";
+  name.textContent = block.name;
+
+  const desc = document.createElement("span");
+  desc.className = "tool-desc";
+  desc.textContent = toolSummary(block.name, block.input);
+
+  const status = document.createElement("span");
+  status.className = "tool-status tool-status-running";
+  status.textContent = "running";
+
+  bar.append(icon, name, desc, status);
+
+  // Detail
+  const detail = document.createElement("div");
+  detail.className = "tool-detail";
+
+  const inputText = toolInputDisplay(block.name, block.input);
+  if (inputText) {
+    const sec = document.createElement("div");
+    sec.className = "tool-input-section";
+    sec.textContent = inputText;
+    detail.appendChild(sec);
+  }
+
+  const outSec = document.createElement("div");
+  outSec.className = "tool-output-section";
+  outSec.textContent = "Waiting for output...";
+  detail.appendChild(outSec);
+
+  bar.addEventListener("click", () => detail.classList.toggle("open"));
+  wrapper.append(bar, detail);
+
+  wrapper._statusEl = status;
+  wrapper._outputEl = outSec;
+  return wrapper;
+}
+
+function renderToolResults(event, feed) {
+  const msg = event.message;
+  if (!msg || !msg.content) return;
+
+  for (const block of msg.content) {
+    if (block.type !== "tool_result") continue;
+
+    const toolEl = pendingTools.get(block.tool_use_id);
+    if (!toolEl) continue;
+
+    let output = "";
+    // Agent tool results: extract content text
+    if (event.tool_use_result && event.tool_use_result.content) {
+      output = event.tool_use_result.content
+        .map((c) => c.text || "").filter(Boolean).join("\n");
+    }
+    if (!output && event.tool_use_result) {
+      const r = event.tool_use_result;
+      if (r.stdout) output = r.stdout;
+      if (r.stderr) output += (output ? "\n" : "") + r.stderr;
+      if (r.matches) output = r.matches.join(", ");
+    }
+    if (!output && typeof block.content === "string") output = block.content;
+    if (!output && Array.isArray(block.content))
+      output = block.content.map((c) => c.text || c.tool_name || JSON.stringify(c)).join("\n");
+
+    const isError = block.is_error === true;
+    toolEl._statusEl.className = `tool-status ${isError ? "tool-status-error" : "tool-status-done"}`;
+    toolEl._statusEl.textContent = isError ? "error" : "done";
+    toolEl._outputEl.textContent = output || "(no output)";
+    if (isError) toolEl._outputEl.classList.add("tool-output-error");
+
+    // Add copy button to output
+    if (output) {
+      const copyBtn = makeCopyBtn(output);
+      toolEl._outputEl.style.position = "relative";
+      toolEl._outputEl.appendChild(copyBtn);
+    }
+
+    updateToolLogStatus(block.tool_use_id, isError);
+    pendingTools.delete(block.tool_use_id);
+  }
+}
+
+// === Tool Log Sidebar ===
+function addToolLogEntry(block) {
+  const log = $("#tool-log");
+  const item = document.createElement("div");
+  item.className = "tool-log-item";
+  item.id = `tlog-${block.id}`;
+
+  const dot = document.createElement("span");
+  dot.className = "tool-log-status dot-running";
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "tool-log-name";
+  nameEl.textContent = block.name;
+
+  const descEl = document.createElement("span");
+  descEl.className = "tool-log-desc";
+  descEl.textContent = toolSummary(block.name, block.input);
+
+  item.append(dot, nameEl, descEl);
+
+  // Click to scroll to tool in main feed
+  item.addEventListener("click", () => {
+    const el = document.getElementById(`tool-${block.id}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.querySelector(".tool-detail")?.classList.add("open");
+      el.style.outline = "1px solid var(--accent)";
+      setTimeout(() => el.style.outline = "", 1500);
+    }
+  });
+
+  log.appendChild(item);
+  log.scrollTop = log.scrollHeight;
+}
+
+function updateToolLogStatus(toolId, isError) {
+  const item = document.getElementById(`tlog-${toolId}`);
+  if (!item) return;
+  const dot = item.querySelector(".tool-log-status");
+  dot.className = `tool-log-status ${isError ? "dot-error" : "dot-done"}`;
+}
+
+// === Helpers ===
+function iconClass(n) {
+  const m = { Bash:"tool-icon-bash", Read:"tool-icon-read", Write:"tool-icon-write",
+    Edit:"tool-icon-edit", Grep:"tool-icon-grep", Glob:"tool-icon-glob", Agent:"tool-icon-agent" };
+  return m[n] || "tool-icon-other";
+}
+
+function iconLetter(n) {
+  const m = { Bash:"$", Read:"R", Write:"W", Edit:"E", Grep:"?", Glob:"*", Agent:"A" };
+  return m[n] || n.charAt(0);
+}
+
+function toolSummary(name, input) {
+  if (!input) return "";
+  switch (name) {
+    case "Bash": return input.description || truncate(input.command || "", 50);
+    case "Read": return shortPath(input.file_path || "");
+    case "Write": return shortPath(input.file_path || "");
+    case "Edit": return shortPath(input.file_path || "");
+    case "Grep": return `"${input.pattern || ""}" ${shortPath(input.path || "")}`;
+    case "Glob": return input.pattern || "";
+    case "ToolSearch": return input.query || "";
+    case "Agent": return input.description || truncate(input.prompt || "", 50);
+    case "Skill": return input.skill_name || JSON.stringify(input);
+    default: return truncate(JSON.stringify(input), 50);
+  }
+}
+
+function toolInputDisplay(name, input) {
+  if (!input) return "";
+  switch (name) {
+    case "Bash": return input.command || "";
+    case "Read": return input.file_path || "";
+    case "Write": return `${input.file_path || ""}\n---\n${truncate(input.content || "", 2000)}`;
+    case "Edit": return `${input.file_path || ""}\n- ${input.old_string || ""}\n+ ${input.new_string || ""}`;
+    case "Grep": return `pattern: ${input.pattern || ""}\npath: ${input.path || ""}`;
+    case "Glob": return `pattern: ${input.pattern || ""}`;
+    case "Agent": return `${input.description || ""}\n${input.prompt || ""}`;
+    case "Skill": return JSON.stringify(input, null, 2);
+    default: return JSON.stringify(input, null, 2);
+  }
+}
+
+function shortPath(p) {
+  if (!p) return "";
+  const parts = p.split("/");
+  return parts.length <= 3 ? p : ".../" + parts.slice(-2).join("/");
+}
+
+function truncate(s, n) { return !s ? "" : s.length > n ? s.slice(0, n) + "..." : s; }
+
+function formatDuration(ms) {
+  if (!ms) return "";
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m >= 60) {
+    const h = Math.floor(m / 60);
+    return `${h}h ${m % 60}m`;
+  }
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function appendMsg(container, text, cls) {
+  const div = document.createElement("div");
+  div.className = cls;
+  div.textContent = text;
+  container.appendChild(div);
+}
+
+function esc(str) {
+  const d = document.createElement("div");
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+// === Sidebar Tabs ===
+document.querySelectorAll(".sidebar-tab").forEach((tab) => {
+  tab.addEventListener("click", () => switchTab(tab.dataset.tab));
+});
+
+function switchTab(tabId) {
+  document.querySelectorAll(".sidebar-tab").forEach((t) => t.classList.remove("active"));
+  document.querySelectorAll(".sidebar-content").forEach((c) => c.classList.remove("active"));
+  const btn = document.querySelector(`[data-tab="${tabId}"]`);
+  if (btn) btn.classList.add("active");
+  const content = document.getElementById(tabId);
+  if (content) content.classList.add("active");
+}
+
+// === Files Browser ===
+let filesRefreshTimer = null;
+
+async function loadFiles() {
+  if (!currentChallengeId) return;
+  const res = await api(`/api/challenges/${currentChallengeId}/files`);
+  if (!res) return;
+  const files = await res.json();
+
+  $("#file-counter").textContent = files.length;
+  const tree = $("#files-tree");
+  tree.innerHTML = "";
+
+  // Group by directory
+  const dirs = new Map();
+  for (const f of files) {
+    const parts = f.path.split("/");
+    const dir = parts.length > 1 ? parts.slice(0, -1).join("/") : ".";
+    if (!dirs.has(dir)) dirs.set(dir, []);
+    dirs.get(dir).push(f);
+  }
+
+  for (const [dir, dirFiles] of dirs) {
+    if (dirs.size > 1 || dir !== ".") {
+      const label = document.createElement("div");
+      label.className = "file-dir-label";
+      label.textContent = dir === "." ? "root" : dir;
+      tree.appendChild(label);
+    }
+    for (const f of dirFiles) {
+      const item = document.createElement("div");
+      item.className = "file-item";
+
+      const icon = document.createElement("span");
+      icon.className = `file-icon file-icon-${f.type}`;
+      icon.textContent = f.type === "image" ? "\uD83D\uDDBC" : f.type === "text" ? "\uD83D\uDCC4" : "\uD83D\uDD37";
+
+      const name = document.createElement("span");
+      name.className = "file-name";
+      name.textContent = f.path.split("/").pop();
+      name.title = f.path;
+
+      const size = document.createElement("span");
+      size.className = "file-size";
+      size.textContent = formatSize(f.size);
+
+      item.append(icon, name, size);
+      item.addEventListener("click", () => viewFile(f.path));
+      tree.appendChild(item);
+    }
+  }
+}
+
+$("#btn-refresh-files").addEventListener("click", loadFiles);
+
+// Auto-refresh files while solving
+setInterval(() => {
+  if (currentChallengeId && !views.detail.classList.contains("hidden")) {
+    loadFiles();
+  }
+}, 8000);
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+// === File Viewer ===
+async function viewFile(path) {
+  if (!currentChallengeId) return;
+  const res = await api(`/api/challenges/${currentChallengeId}/files/${path}`);
+  if (!res) return;
+  const data = await res.json();
+
+  $("#file-viewer-name").textContent = data.name;
+  $("#file-viewer-size").textContent = formatSize(data.size);
+
+  const body = $("#file-viewer-content");
+  body.innerHTML = "";
+
+  if (data.type === "image") {
+    const wrapper = document.createElement("div");
+    wrapper.className = "file-viewer-image";
+    const img = document.createElement("img");
+    img.src = `data:${data.mime};base64,${data.data}`;
+    img.alt = data.name;
+    wrapper.appendChild(img);
+    body.appendChild(wrapper);
+  } else if (data.type === "text") {
+    const pre = document.createElement("pre");
+    pre.className = "file-viewer-code";
+    pre.innerHTML = highlightSyntax(data.content, data.ext);
+    body.appendChild(pre);
+  } else {
+    const pre = document.createElement("pre");
+    pre.className = "file-viewer-hex";
+    pre.textContent = data.hexdump;
+    body.appendChild(pre);
+  }
+
+  // Set download link
+  const dlBtn = $("#file-viewer-download");
+  dlBtn.href = `/api/challenges/${currentChallengeId}/download/${path}`;
+  dlBtn.download = data.name;
+
+  $("#file-viewer-overlay").classList.remove("hidden");
+}
+
+$("#file-viewer-close").addEventListener("click", () => {
+  $("#file-viewer-overlay").classList.add("hidden");
+});
+$("#file-viewer-overlay").addEventListener("click", (e) => {
+  if (e.target === $("#file-viewer-overlay"))
+    $("#file-viewer-overlay").classList.add("hidden");
+});
+
+// === Basic Syntax Highlighting ===
+function highlightSyntax(code, ext) {
+  const escaped = code
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  const langExts = {
+    py: "python", js: "js", ts: "js", c: "c", cpp: "c", h: "c",
+    rs: "rust", go: "go", java: "java", rb: "ruby", sh: "bash",
+    bash: "bash", zsh: "bash", sql: "sql", json: "json",
+  };
+  const lang = langExts[(ext || "").replace(".", "")] || "";
+
+  if (!lang) return escaped;
+
+  let result = escaped;
+
+  // Comments
+  if (["python", "bash", "ruby"].includes(lang)) {
+    result = result.replace(/(#[^\n]*)/g, '<span class="syn-comment">$1</span>');
+  } else if (["c", "js", "rust", "go", "java"].includes(lang)) {
+    result = result.replace(/(\/\/[^\n]*)/g, '<span class="syn-comment">$1</span>');
+  }
+
+  // Strings
+  result = result.replace(/(&quot;[^&]*?&quot;|"[^"]*?"|'[^']*?'|`[^`]*?`)/g,
+    '<span class="syn-string">$1</span>');
+
+  // Numbers
+  result = result.replace(/\b(0x[\da-fA-F]+|\d+\.?\d*)\b/g,
+    '<span class="syn-number">$1</span>');
+
+  // Keywords
+  const keywords = {
+    python: "def|class|import|from|return|if|elif|else|for|while|try|except|finally|with|as|yield|lambda|pass|break|continue|raise|and|or|not|in|is|True|False|None|async|await",
+    js: "function|const|let|var|return|if|else|for|while|try|catch|finally|throw|class|import|export|from|async|await|new|this|true|false|null|undefined|switch|case|default|break|continue",
+    c: "int|char|void|return|if|else|for|while|do|switch|case|break|continue|struct|typedef|enum|const|static|extern|unsigned|signed|long|short|float|double|sizeof|NULL|include|define",
+    rust: "fn|let|mut|const|if|else|for|while|loop|match|return|struct|enum|impl|trait|use|pub|mod|self|super|crate|where|async|await|move|ref|type|true|false|Some|None|Ok|Err",
+    bash: "if|then|else|elif|fi|for|while|do|done|case|esac|function|return|local|export|source|echo|exit|test|set",
+  };
+  const kw = keywords[lang] || keywords.js;
+  if (kw) {
+    result = result.replace(
+      new RegExp(`\\b(${kw})\\b`, "g"),
+      '<span class="syn-keyword">$1</span>'
+    );
+  }
+
+  return result;
+}
+
+// === Keyboard Shortcuts ===
+document.addEventListener("keydown", (e) => {
+  // Ignore when typing in inputs
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA"
+      || e.target.tagName === "SELECT") return;
+
+  // Only in detail view
+  if (views.detail.classList.contains("hidden")) return;
+
+  if (e.key === "Escape") {
+    // Close file viewer if open, otherwise go back
+    if (!$("#file-viewer-overlay").classList.contains("hidden")) {
+      $("#file-viewer-overlay").classList.add("hidden");
+    } else {
+      disconnectWS(); currentChallengeId = null;
+      showView("dashboard"); loadChallenges();
+    }
+    e.preventDefault();
+  }
+  if (e.key === "/" && !e.ctrlKey && !e.metaKey) {
+    $("#steer-input").focus();
+    e.preventDefault();
+  }
+  if (e.key === "1") switchTab("tab-info");
+  if (e.key === "2") switchTab("tab-tools");
+  if (e.key === "3") switchTab("tab-files");
+});
+
+// === Scroll to Bottom Button ===
+$("#btn-scroll-bottom").addEventListener("click", () => {
+  autoScroll = true;
+  const f = getActiveFeed();
+  if (f) f.scrollTop = f.scrollHeight;
+  updateScrollBtn();
+});
+
+// === Expand/Collapse All Tools ===
+$("#btn-toggle-tools").addEventListener("click", () => {
+  const feed = getActiveFeed();
+  if (!feed) return;
+  const details = feed.querySelectorAll(".tool-detail");
+  const anyOpen = Array.from(details).some((d) => d.open);
+  details.forEach((d) => d.open = !anyOpen);
+  $("#btn-toggle-tools").textContent = anyOpen ? "Expand all" : "Collapse all";
+});
+
+// === Export Report ===
+$("#btn-export").addEventListener("click", () => {
+  const feed = getActiveFeed();
+  if (!feed) return;
+  const lines = [];
+  const name = $("#detail-name").textContent;
+  const status = $("#detail-status").textContent;
+  lines.push(`# ${name}`, `**Status:** ${status}`, "");
+
+  feed.querySelectorAll(".step").forEach((step) => {
+    const ts = step.querySelector(".step-timestamp");
+    const prefix = ts ? `[${ts.textContent}] ` : "";
+
+    const thinking = step.querySelector(".thinking-text");
+    if (thinking) {
+      lines.push(`${prefix}**Thinking:**`, thinking.textContent, "");
+      return;
+    }
+
+    const text = step.querySelector(".step-text");
+    if (text) {
+      lines.push(`${prefix}**Assistant:**`, text.textContent, "");
+      return;
+    }
+
+    const tool = step.querySelector(".tool-detail");
+    if (tool) {
+      const summary = tool.querySelector("summary");
+      lines.push(`${prefix}**Tool:** ${summary ? summary.textContent.trim() : "unknown"}`, "");
+      const output = tool.querySelector(".tool-output-section");
+      if (output) {
+        const pre = output.querySelector("pre");
+        lines.push("```", (pre || output).textContent.trim(), "```", "");
+      }
+    }
+  });
+
+  const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${name.replace(/[^a-zA-Z0-9]/g, "_")}_report.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast("Report exported");
+});
+
+// === Mobile Sidebar Toggle ===
+$("#btn-sidebar-toggle").addEventListener("click", () => {
+  const sidebar = document.querySelector(".panel-sidebar");
+  if (sidebar) sidebar.classList.toggle("sidebar-open");
+});
+
+// === Steer ===
+async function sendSteer() {
+  const input = $("#steer-input");
+  const msg = input.value.trim();
+  if (!msg || !currentChallengeId) return;
+  input.value = "";
+
+  const res = await api(`/api/challenges/${currentChallengeId}/steer`, {
+    method: "POST",
+    body: JSON.stringify({ message: msg }),
+  });
+  if (res && res.ok) {
+    updateStatusBadge("solving");
+    updateButtons("solving");
+    startTimer();
+    $("#error-banner").classList.add("hidden");
+  }
+}
+
+$("#btn-steer").addEventListener("click", sendSteer);
+$("#steer-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendSteer(); }
+});
+
+// === Usage Page ===
+$("#btn-usage").addEventListener("click", () => {
+  showView("usage");
+  loadUsage();
+});
+$("#btn-usage-back").addEventListener("click", () => {
+  showView("dashboard");
+  loadChallenges();
+});
+$("#btn-usage-refresh").addEventListener("click", loadUsage);
+
+async function loadUsage() {
+  const res = await api("/api/usage");
+  if (!res) return;
+  const data = await res.json();
+  renderUsage(data);
+}
+
+function renderUsage(data) {
+  // Claude
+  const claudeBadge = $("#claude-auth-badge");
+  const claudeInfo = $("#claude-auth-info");
+  const claudeStats = $("#claude-stats");
+  const claudeChallenge = $("#claude-challenge-stats");
+
+  if (data.claude) {
+    const auth = data.claude.auth;
+    claudeBadge.textContent = "connected";
+    claudeBadge.className = "badge badge-solved";
+    claudeInfo.innerHTML = [
+      `<span class="usage-kv"><span class="usage-k">Account</span> ${esc(auth.email || "")}</span>`,
+      `<span class="usage-kv"><span class="usage-k">Plan</span> ${esc(auth.subscriptionType || "")}</span>`,
+      `<span class="usage-kv"><span class="usage-k">Org</span> ${esc(auth.orgName || "")}</span>`,
+    ].join("");
+
+    const rows = [];
+    if (data.claude.totalSessions) rows.push(kvRow("Sessions", data.claude.totalSessions));
+    if (data.claude.totalMessages) rows.push(kvRow("Messages", data.claude.totalMessages.toLocaleString()));
+    if (data.claude.modelUsage) {
+      for (const [model, u] of Object.entries(data.claude.modelUsage)) {
+        const input = u.inputTokens + (u.cacheReadInputTokens || 0) + (u.cacheCreationInputTokens || 0);
+        const output = u.outputTokens || 0;
+        const total = input + output;
+        rows.push(kvRow(model, `${(total / 1000).toFixed(0)}k tokens (${(input / 1000).toFixed(0)}k in / ${(output / 1000).toFixed(0)}k out)`));
+      }
+    }
+    claudeStats.innerHTML = rows.join("");
+  } else {
+    claudeBadge.textContent = "not connected";
+    claudeBadge.className = "badge badge-pending";
+    claudeInfo.innerHTML = '<span class="text-muted">Run <code>claude auth login</code> to connect</span>';
+    claudeStats.innerHTML = "";
+  }
+
+  // Copilot
+  const copilotBadge = $("#copilot-auth-badge");
+  const copilotInfo = $("#copilot-auth-info");
+  const copilotStats = $("#copilot-stats");
+  const copilotChallenge = $("#copilot-challenge-stats");
+
+  if (data.copilot) {
+    const auth = data.copilot.auth;
+    copilotBadge.textContent = "connected";
+    copilotBadge.className = "badge badge-solved";
+    copilotInfo.innerHTML = [
+      `<span class="usage-kv"><span class="usage-k">User</span> ${esc(auth.login || "")}</span>`,
+      `<span class="usage-kv"><span class="usage-k">Host</span> ${esc(auth.host || "")}</span>`,
+      auth.model ? `<span class="usage-kv"><span class="usage-k">Model</span> ${esc(auth.model)}</span>` : "",
+    ].filter(Boolean).join("");
+
+    const rows = [];
+    if (data.copilot.totalSessions) rows.push(kvRow("Sessions", data.copilot.totalSessions));
+    copilotStats.innerHTML = rows.join("");
+  } else {
+    copilotBadge.textContent = "not connected";
+    copilotBadge.className = "badge badge-pending";
+    copilotInfo.innerHTML = '<span class="text-muted">Run <code>copilot login</code> to connect</span>';
+    copilotStats.innerHTML = "";
+  }
+
+  // Challenge stats per agent
+  const cs = data.challenges || {};
+  claudeChallenge.innerHTML = renderChallengeStats(cs.claude);
+  copilotChallenge.innerHTML = renderChallengeStats(cs.copilot);
+
+  // Daily activity chart
+  const dailySection = $("#usage-daily");
+  if (data.claude && data.claude.dailyActivity && data.claude.dailyActivity.length) {
+    dailySection.classList.remove("hidden");
+    renderDailyChart(data.claude.dailyActivity);
+  } else {
+    dailySection.classList.add("hidden");
+  }
+}
+
+function kvRow(key, value) {
+  return `<span class="usage-kv"><span class="usage-k">${esc(String(key))}</span> ${esc(String(value))}</span>`;
+}
+
+function renderChallengeStats(stats) {
+  if (!stats || stats.total === 0) return '<span class="text-muted">No challenges yet</span>';
+  const avgMs = stats.total > 0 ? Math.round(stats.total_duration_ms / stats.total) : 0;
+  return [
+    kvRow("Challenges", stats.total),
+    kvRow("Solved", stats.solved),
+    kvRow("Failed", stats.failed),
+    kvRow("Avg duration", formatDuration(avgMs)),
+    kvRow("Total time", formatDuration(stats.total_duration_ms)),
+  ].join("");
+}
+
+function renderDailyChart(activity) {
+  const chart = $("#daily-chart");
+  const maxMsg = Math.max(...activity.map((d) => d.messageCount), 1);
+  chart.innerHTML = activity.map((d) => {
+    const pct = Math.round((d.messageCount / maxMsg) * 100);
+    const label = d.date.slice(5); // MM-DD
+    return `<div class="daily-bar-wrap" title="${d.date}: ${d.messageCount} messages, ${d.sessionCount} sessions, ${d.toolCallCount} tools">
+      <div class="daily-bar" style="height:${Math.max(pct, 4)}%"></div>
+      <span class="daily-label">${label}</span>
+      <span class="daily-value">${d.messageCount}</span>
+    </div>`;
+  }).join("");
+}
+
+// === Init ===
+(async () => {
+  const res = await fetch("/api/challenges");
+  if (res.ok) {
+    // Restore CSRF token for existing session
+    const csrfRes = await fetch("/api/csrf-token");
+    if (csrfRes.ok) {
+      const data = await csrfRes.json();
+      csrfToken = data.csrf_token;
+    }
+    showView("dashboard"); loadChallenges(); loadDefaultAgent(); checkAgentAuth();
+  } else {
+    showView("login");
+  }
+})();
