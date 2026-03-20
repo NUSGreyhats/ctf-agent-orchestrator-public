@@ -1,11 +1,11 @@
 output "instance_name" {
-  value = google_compute_instance.ctf.name
+  value = digitalocean_droplet.ctf.name
 }
 
 output "external_ip" {
-  value = google_compute_instance.ctf.network_interface[0].access_config[0].nat_ip
+  value = digitalocean_droplet.ctf.ipv4_address
 }
 
 output "webapp_url" {
-  value = "https://${google_compute_instance.ctf.network_interface[0].access_config[0].nat_ip}:8080"
+  value = "https://${digitalocean_droplet.ctf.ipv4_address}:8080"
 }

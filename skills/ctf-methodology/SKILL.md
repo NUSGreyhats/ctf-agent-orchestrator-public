@@ -66,74 +66,35 @@ ctfgrep reports which encoding the match was found in (PLAINTEXT, BASE64,
 HEX, or XOR with the key), along with the decoded content. This catches
 flags that are trivially obfuscated — a very common CTF technique.
 
-## Step 3: Triage by Challenge Category
+## Step 3: Identify Category and Load Domain Skills
 
-After the quick search, approach the challenge based on its category.
-Each section below references the dedicated skill to use — invoke it
-for the full methodology and tool commands.
+After the quick search, identify the category and **immediately load the required
+skills before doing any analysis**. Do not skip this — the domain skills contain
+the full tool references and techniques. Reading the bullet points below is not
+a substitute for loading the skill.
 
-### Forensics (memory dumps)
-**Skill:** `memory-forensics`
-- Strings triage first (already part of that skill)
-- Identify OS, run volatility plugins (pslist, netscan, filescan, malfind)
-- For Linux dumps without symbols: try mquire first, then download symbols
-- Focus on processes, files, network, and registry
+| Category | Required skills to load NOW |
+|---|---|
+| Memory forensics | `/memory-forensics` |
+| Disk forensics | `/disk-forensics` |
+| File / stego / docs | `/file-forensics` |
+| Network / pcap | `/network-forensics` |
+| Reverse engineering | `/headless-ida-analysis` then `/ctf-reverse` |
+| Binary exploitation / pwn | `/headless-ida-analysis` then `/ctf-pwn` |
+| Kernel exploitation | `/kernel-gef-debugging` |
+| Android / APK | `/apk-analysis` |
+| Cryptography | `/ctf-crypto` |
+| Web | `/ctf-web` |
+| Malware | `/ctf-malware` |
+| Misc | `/ctf-misc` |
+| OSINT | `/ctf-osint` |
 
-### Forensics (disk images)
-**Skill:** `disk-forensics`
-- Identify partitions with `mmls`, inspect filesystems with `fsstat`
-- List and recover files with `fls`/`icat`/`tsk_recover`
-- Carve unallocated space with `foremost`/`photorec`
-- Run `bulk_extractor` for emails, URLs, credit cards, etc.
-- Build a timeline with `fls -m` + `mactime`
+For dynamic analysis, also load one of:
+- `/libdebug-debugging` — scripted automation, exploit development, brute-forcing, pwntools integration (preferred for pwn and RE)
+- `/kernel-gef-debugging` — interactive GDB+GEF session, kernel debugging, remote targets
 
-### Forensics (files — steganography, PDFs, OLE docs, corrupted files)
-**Skill:** `file-forensics`
-- `file` + `exiftool` + `strings` + `binwalk` for initial triage
-- Steganography: `zsteg` (PNG/BMP LSB), `steghide`/`stegseek` (JPEG/WAV)
-- PDF analysis: `pdf-id.py`, `pdf-parser.py`, `cpdf`
-- OLE/Office docs: `oleid`, `olevba`, `oledump.py`, `pcode2code`
-- Corrupted files: repair magic bytes, fix structure
-
-### Forensics (network captures)
-**Skill:** `network-forensics`
-- Protocol hierarchy and endpoint summary with `tshark`
-- Extract HTTP objects: `tshark --export-objects http,output/`
-- Follow and reconstruct TCP/UDP streams
-- DNS analysis — tunneling detection, unusual queries
-- Credential extraction from cleartext protocols
-- File carving from reassembled streams with `tcpflow` + `foremost`
-- TLS analysis — SNI, certificates, JA3 fingerprints
-
-### Reverse Engineering
-**Skills:** `headless-ida-domain-skill` (static), `libdebug-debugging` (dynamic)
-- Static analysis with IDA: disassemble, decompile, xrefs, string analysis
-- Dynamic analysis with libdebug: breakpoints, register/memory inspection,
-  syscall tracing, anti-debug bypass
-- Look for string comparisons, XOR loops, custom crypto
-
-### Android RE
-**Skill:** `apk-analysis`
-- Decompile with `jadx`, decode resources with `apktool`
-- Inspect AndroidManifest.xml, permissions, activities, services
-- Search for hardcoded secrets, API keys, Firebase misconfigs
-- Analyze native `.so` libraries with IDA
-
-### Cryptography
-- Identify the algorithm (RSA, AES, XOR, substitution, etc.)
-- Check for weak parameters (small RSA modulus, ECB mode, reused nonces)
-- Use standard tools: `openssl`, `python3` with pycryptodome, RsaCtfTool
-- Use `z3-solver` or `sympy` for constraint-based problems
-
-### Web
-- Check source code, cookies, headers, robots.txt
-- Test for injection (SQLi, XSS, SSTI, command injection)
-- Check for exposed APIs, admin panels, backup files
-
-### Misc / OSINT
-- Read the description for hidden hints
-- Google unusual strings, check metadata with `exiftool`
-- Look for steganography, encoding puzzles, esoteric languages
+**For any ELF binary: always use IDA (`/headless-ida-analysis`). Never use
+objdump, readelf, or nm as a substitute for disassembly or decompilation.**
 
 ## Step 4: Work Methodically
 

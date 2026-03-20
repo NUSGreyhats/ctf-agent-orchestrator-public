@@ -15,6 +15,7 @@ import secrets
 import shutil
 import subprocess
 import uuid
+import tempfile
 import time as _time
 from collections import defaultdict
 from datetime import datetime
@@ -53,6 +54,21 @@ SETTINGS_FILE = CHALLENGES_DIR / "settings.json"
 
 VALID_AGENTS = {"claude", "copilot"}
 
+# Temporary storage for bulk-upload previews: token -> {base_dir, created_at, folders}
+_bulk_previews: dict[str, dict] = {}
+_PREVIEW_TTL = 3600  # seconds
+
+
+def _cleanup_old_previews() -> None:
+    now = _time.monotonic()
+    expired = [
+        t for t, p in _bulk_previews.items()
+        if now - p["created_at"] > _PREVIEW_TTL
+    ]
+    for token in expired:
+        base_dir = _bulk_previews.pop(token)["base_dir"]
+        shutil.rmtree(base_dir, ignore_errors=True)
+
 
 def load_settings() -> dict:
     """Load global settings from disk."""
@@ -61,7 +77,7 @@ def load_settings() -> dict:
             return json.loads(SETTINGS_FILE.read_text())
         except (json.JSONDecodeError, OSError):
             pass
-    return {"default_agent": "claude"}
+    return {"default_agent": "claude", "default_flag_format": ""}
 
 
 def save_settings(settings: dict) -> None:
@@ -534,17 +550,13 @@ async def create_challenge(request: Request) -> JSONResponse:
     )
 
 
-async def bulk_upload(request: Request) -> JSONResponse:
-    """Upload a zip containing folders, each becoming a challenge.
+async def bulk_preview(request: Request) -> JSONResponse:
+    """Unzip an uploaded archive and return a preview of the challenges found.
 
-    Expected zip structure:
-        challenge-name/
-            description.txt   (optional)
-            file1.pcapng
-            file2.bin
-        another-challenge/
-            description.txt
-            data.img
+    Returns a preview_token (valid for 1 hour) and the list of challenges
+    extracted from the zip's top-level folders. The caller uses the token
+    with POST /api/challenges/bulk to create the actual challenges after
+    the user has reviewed and optionally edited each entry.
     """
     if err := require_auth(request):
         return err
@@ -555,94 +567,193 @@ async def bulk_upload(request: Request) -> JSONResponse:
     import io
 
     form = await request.form()
-    flag_format = form.get("flag_format", "").strip()
-    agent = form.get("agent", "").strip() or "claude"
-    model = form.get("model", "").strip() or "opus"
-    autonomous = form.get("autonomous", "").strip() == "true"
-
     zip_field = form.get("zipfile")
     if not zip_field or not hasattr(zip_field, "read"):
         return JSONResponse(
-            {"error": "No zip file uploaded"}, status_code=400
+            {"error": "No archive uploaded"}, status_code=400
         )
 
     zip_bytes = await zip_field.read()
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    except zipfile.BadZipFile:
-        return JSONResponse(
-            {"error": "Invalid zip file"}, status_code=400
-        )
+    original_name = (getattr(zip_field, "filename", None) or "").lower()
+    is_7z = original_name.endswith(".7z")
 
-    # Group files by top-level folder
+    _cleanup_old_previews()
+    token = uuid.uuid4().hex[:16]
+    base_dir = Path(tempfile.mkdtemp(prefix=f"ctf-bulk-{token}-"))
+
+    archive_files: dict[str, bytes] = {}
+    try:
+        if is_7z:
+            tmp_archive = base_dir / "_archive.7z"
+            tmp_archive.write_bytes(zip_bytes)
+            extract_dir = base_dir / "_extract"
+            extract_dir.mkdir()
+            result = subprocess.run(
+                ["7z", "x", f"-o{extract_dir}", "-y", str(tmp_archive)],
+                capture_output=True, text=True,
+            )
+            tmp_archive.unlink(missing_ok=True)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr or result.stdout)
+            for p in extract_dir.rglob("*"):
+                if p.is_file():
+                    archive_files[p.relative_to(extract_dir).as_posix()] = p.read_bytes()
+        else:
+            try:
+                zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+            except zipfile.BadZipFile:
+                shutil.rmtree(base_dir, ignore_errors=True)
+                return JSONResponse({"error": "Invalid zip file"}, status_code=400)
+            archive_files = {
+                name: zf.read(name)
+                for name in zf.namelist()
+                if not name.endswith("/")
+            }
+    except Exception as exc:
+        shutil.rmtree(base_dir, ignore_errors=True)
+        return JSONResponse({"error": f"Failed to read archive: {exc}"}, status_code=400)
+
+    # Group entries by top-level folder
     folders: dict[str, list[str]] = {}
-    for entry in zf.namelist():
-        if entry.startswith("__MACOSX") or entry.startswith("."):
+    for path in archive_files:
+        if path.startswith("__MACOSX") or path.startswith("."):
             continue
-        parts = entry.split("/", 1)
+        parts = path.split("/", 1)
         if len(parts) < 2 or not parts[1]:
             continue
-        folder = parts[0]
-        filename = parts[1]
-        # Skip nested subdirectory entries themselves
+        folder, filename = parts[0], parts[1]
         if filename.endswith("/"):
             continue
-        folders.setdefault(folder, []).append(entry)
+        folders.setdefault(folder, []).append(path)
 
     if not folders:
+        shutil.rmtree(base_dir, ignore_errors=True)
         return JSONResponse(
-            {"error": "Zip contains no challenge folders"},
+            {"error": "Archive contains no challenge folders"},
             status_code=400,
         )
 
-    # Determine which agents to run
+    _DESCRIPTION_FILES = {"description.txt", "prompt.txt"}
+
+    preview_folders: dict[str, dict] = {}
+    challenges_preview = []
+    for folder_name, entries in sorted(folders.items()):
+        folder_dir = base_dir / folder_name
+        folder_dir.mkdir(parents=True, exist_ok=True)
+        description = ""
+        file_names: list[str] = []
+        for entry in entries:
+            filename = entry.split("/", 1)[1]
+            raw = archive_files[entry]
+            if filename.lower() in _DESCRIPTION_FILES:
+                description = raw.decode("utf-8", errors="replace").strip()
+                continue
+            flat_name = filename.replace("/", "_")
+            (folder_dir / flat_name).write_bytes(raw)
+            file_names.append(flat_name)
+        preview_folders[folder_name] = {
+            "dir": str(folder_dir),
+            "files": file_names,
+        }
+        challenges_preview.append({
+            "folder_name": folder_name,
+            "name": folder_name,
+            "description": description,
+            "files": file_names,
+        })
+
+    _bulk_previews[token] = {
+        "base_dir": base_dir,
+        "created_at": _time.monotonic(),
+        "folders": preview_folders,
+    }
+    return JSONResponse(
+        {"preview_token": token, "challenges": challenges_preview}
+    )
+
+
+async def bulk_upload(request: Request) -> JSONResponse:
+    """Create challenges from a previously previewed zip.
+
+    Expects a JSON body with:
+      preview_token  – token returned by bulk_preview
+      flag_format    – global default flag format
+      agent          – "claude", "copilot", or "both"
+      model          – model slug
+      autonomous     – bool
+      challenges     – list of per-challenge overrides:
+          { folder_name, name, description, flag_format, enabled }
+    """
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    body = await request.json()
+    token = body.get("preview_token", "")
+    if not token or token not in _bulk_previews:
+        return JSONResponse(
+            {"error": "Invalid or expired preview token"},
+            status_code=400,
+        )
+
+    preview = _bulk_previews.pop(token)
+    base_dir = preview["base_dir"]
+    preview_folders = preview["folders"]
+
+    global_flag_format = body.get("flag_format", "").strip()
+    agent = body.get("agent", "claude").strip() or "claude"
+    model = body.get("model", "opus").strip() or "opus"
+    autonomous = bool(body.get("autonomous", False))
+    paused = bool(body.get("paused", False))
+    challenges_cfg = body.get("challenges", [])
+
     if agent == "both":
-        agents_to_run = [
-            ("claude", model or "opus"),
-            ("copilot", model or "claude-opus-4.6"),
-        ]
+        agents_to_run = [("claude", model), ("copilot", model)]
     else:
         agents_to_run = [(agent, model)]
 
     created = []
-    for folder_name, entries in sorted(folders.items()):
-        # Extract files to a temp location first
-        description = ""
-        file_data: dict[str, bytes] = {}
-        for entry in entries:
-            filename = entry.split("/", 1)[1]
-            raw = zf.read(entry)
-            if filename.lower() == "description.txt":
-                description = raw.decode("utf-8", errors="replace")
-                continue
-            flat_name = filename.replace("/", "_")
-            file_data[flat_name] = raw
+    for cfg in challenges_cfg:
+        if not cfg.get("enabled", True):
+            continue
+        folder_name = cfg.get("folder_name", "")
+        folder_info = preview_folders.get(folder_name)
+        if not folder_info:
+            continue
+        folder_dir = Path(folder_info["dir"])
+        file_names = folder_info["files"]
+
+        ch_name = cfg.get("name", "").strip() or folder_name
+        ch_description = cfg.get("description", "").strip()
+        ch_flag_format = cfg.get("flag_format", "").strip() or global_flag_format
 
         for run_agent_name, run_model in agents_to_run:
             challenge_id = uuid.uuid4().hex[:12]
             challenge_dir = CHALLENGES_DIR / challenge_id
             challenge_dir.mkdir(parents=True)
-
-            for fname, fdata in file_data.items():
-                (challenge_dir / fname).write_bytes(fdata)
+            for fname in file_names:
+                src = folder_dir / fname
+                if src.exists():
+                    shutil.copy2(src, challenge_dir / fname)
 
             prefix = (
                 f"[{run_agent_name.capitalize()}] "
                 if len(agents_to_run) > 1
                 else ""
             )
-
+            display_name = f"{prefix}{ch_name}"
             challenge = {
                 "id": challenge_id,
-                "name": f"{prefix}{folder_name}",
-                "description": description.strip(),
-                "flag_format": flag_format,
+                "name": display_name,
+                "description": ch_description,
+                "flag_format": ch_flag_format,
                 "agent": run_agent_name,
                 "model": run_model,
                 "autonomous": autonomous,
-                "status": "solving",
+                "status": "pending" if paused else "solving",
                 "created_at": datetime.now().isoformat(),
-                "files": list(file_data.keys()),
+                "files": file_names,
                 "process": None,
                 "task": None,
                 "output_lines": [],
@@ -653,14 +764,11 @@ async def bulk_upload(request: Request) -> JSONResponse:
             }
             challenges[challenge_id] = challenge
             save_metadata(challenge)
-            challenge["task"] = asyncio.create_task(
-                run_agent(challenge_id)
-            )
-            created.append({
-                "id": challenge_id,
-                "name": challenge["name"],
-            })
+            if not paused:
+                challenge["task"] = asyncio.create_task(run_agent(challenge_id))
+            created.append({"id": challenge_id, "name": display_name})
 
+    shutil.rmtree(base_dir, ignore_errors=True)
     return JSONResponse({"created": created}, status_code=201)
 
 
@@ -1039,6 +1147,7 @@ async def run_agent(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        limit=2 ** 24,  # 16 MB — default 64 KB is too small for large Claude JSON events
     )
     challenge["process"] = proc
 
@@ -1197,6 +1306,12 @@ async def update_settings(request: Request) -> JSONResponse:
                 status_code=400,
             )
         settings["default_agent"] = agent
+    if "default_flag_format" in body:
+        settings["default_flag_format"] = str(body["default_flag_format"])
+    if "theme" in body:
+        theme = str(body["theme"])
+        if theme in ("dark", "light"):
+            settings["theme"] = theme
     save_settings(settings)
     return JSONResponse(settings)
 
@@ -1324,6 +1439,8 @@ async def on_shutdown():
         proc = challenge.get("process")
         if proc and proc.returncode is None:
             proc.terminate()
+    for preview in _bulk_previews.values():
+        shutil.rmtree(preview["base_dir"], ignore_errors=True)
 
 
 routes = [
@@ -1336,6 +1453,7 @@ routes = [
     Route("/api/settings", update_settings, methods=["PUT"]),
     Route("/api/challenges", list_challenges, methods=["GET"]),
     Route("/api/challenges", create_challenge, methods=["POST"]),
+    Route("/api/challenges/bulk-preview", bulk_preview, methods=["POST"]),
     Route("/api/challenges/bulk", bulk_upload, methods=["POST"]),
     Route("/api/challenges/{id}/solve", solve_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/stop", stop_challenge, methods=["POST"]),

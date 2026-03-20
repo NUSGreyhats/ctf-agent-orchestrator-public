@@ -6,6 +6,8 @@ let autoScroll = true;
 let toolCount = 0;
 let stepCount = 0;
 let defaultAgent = "claude";
+let defaultFlagFormat = "";
+let currentTheme = "dark";
 let csrfToken = null;
 
 const pendingTools = new Map();
@@ -76,7 +78,17 @@ async function loadDefaultAgent() {
   if (!res) return;
   const settings = await res.json();
   defaultAgent = settings.default_agent || "claude";
+  defaultFlagFormat = settings.default_flag_format || "";
+  currentTheme = settings.theme || "dark";
+  applyTheme(currentTheme);
   updateAgentToggleUI();
+  $("#default-flag-format").value = defaultFlagFormat;
+}
+
+function applyTheme(theme) {
+  document.body.classList.toggle("light", theme === "light");
+  const btn = $("#btn-theme-toggle");
+  if (btn) btn.textContent = theme === "light" ? "Dark" : "Light";
 }
 
 function updateAgentToggleUI() {
@@ -93,6 +105,23 @@ document.querySelectorAll(".agent-toggle-btn").forEach((btn) => {
       method: "PUT",
       body: JSON.stringify({ default_agent: defaultAgent }),
     });
+  });
+});
+
+$("#default-flag-format").addEventListener("change", async () => {
+  defaultFlagFormat = $("#default-flag-format").value.trim();
+  await api("/api/settings", {
+    method: "PUT",
+    body: JSON.stringify({ default_flag_format: defaultFlagFormat }),
+  });
+});
+
+$("#btn-theme-toggle").addEventListener("click", async () => {
+  currentTheme = currentTheme === "dark" ? "light" : "dark";
+  applyTheme(currentTheme);
+  await api("/api/settings", {
+    method: "PUT",
+    body: JSON.stringify({ theme: currentTheme }),
   });
 });
 
@@ -155,24 +184,30 @@ async function loadChallenges() {
   }
   empty.classList.add("hidden");
   list.innerHTML = challenges.map((c) => {
-    const agentLabel = c.agent === "copilot"
-      ? "copilot"
-      : esc(c.model || "opus");
+    const agentLabel = c.agent === "copilot" ? "copilot" : esc(c.model || "opus");
+    const isPending = c.status === "pending";
     return `
-    <div class="challenge-card" data-id="${c.id}">
-      <span class="badge badge-${c.status}">${c.status}</span>
-      <span class="card-name">${esc(c.name)}</span>
-      <span class="card-desc">${esc(c.description || "")}</span>
-      <span class="card-agent card-agent-${c.agent || "claude"}">${agentLabel}</span>
-      <span class="card-files">${c.files.length} file${c.files.length !== 1 ? "s" : ""}</span>
-      <span class="card-duration">${formatDuration(c.duration_ms)}</span>
-      <button class="btn-card-delete" data-id="${c.id}" title="Delete">&times;</button>
+    <div class="challenge-card status-${c.status}" data-id="${c.id}">
+      <div class="card-top">
+        <span class="badge badge-${c.status}">${c.status}</span>
+        <button class="btn-card-delete" data-id="${c.id}" title="Delete">&times;</button>
+      </div>
+      <div class="card-body">
+        <div class="card-name">${esc(c.name)}</div>
+        <div class="card-desc">${esc(c.description || "")}</div>
+      </div>
+      <div class="card-footer">
+        <span class="card-agent card-agent-${c.agent || "claude"}">${agentLabel}</span>
+        <span class="card-files">${c.files.length} file${c.files.length !== 1 ? "s" : ""}</span>
+        <span class="card-duration">${formatDuration(c.duration_ms)}</span>
+        ${isPending ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Start</button>` : ""}
+      </div>
     </div>`;
   }).join("");
 
   list.querySelectorAll(".challenge-card").forEach((card) =>
     card.addEventListener("click", (e) => {
-      if (e.target.classList.contains("btn-card-delete")) return;
+      if (e.target.closest(".btn-card-delete") || e.target.closest(".btn-card-start")) return;
       openChallenge(card.dataset.id);
     })
   );
@@ -182,6 +217,13 @@ async function loadChallenges() {
       if (!confirm("Delete this challenge?")) return;
       await api(`/api/challenges/${btn.dataset.id}`, { method: "DELETE" });
       loadChallenges();
+    })
+  );
+  list.querySelectorAll(".btn-card-start").forEach((btn) =>
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const res = await api(`/api/challenges/${btn.dataset.id}/solve`, { method: "POST" });
+      if (res && res.ok) loadChallenges();
     })
   );
 }
@@ -195,6 +237,7 @@ $("#btn-new-challenge").addEventListener("click", () => {
   $("#challenge-agent").value = defaultAgent;
   updateModelOptions();
   $("#challenge-autonomous").checked = defaultAgent === "copilot";
+  $("#challenge-flag").value = defaultFlagFormat;
   $("#modal-overlay").classList.remove("hidden");
   $("#challenge-name").focus();
 });
@@ -281,26 +324,26 @@ $("#challenge-form").addEventListener("submit", async (e) => {
   }
 });
 
-// === Bulk Upload ===
+// === Bulk Upload (3-phase: drop → preview → create) ===
 const bulkOverlay = $("#bulk-overlay");
 const bulkFileInput = $("#bulk-file");
 const bulkDropZone = $("#bulk-drop-zone");
+let bulkPreviewToken = null;
+let bulkPreviewChallenges = [];
 
-$("#btn-bulk-upload").addEventListener("click", () => {
-  $("#bulk-agent").value = defaultAgent;
-  updateBulkModels();
-  $("#bulk-autonomous").checked = defaultAgent === "copilot";
-  bulkOverlay.classList.remove("hidden");
-});
-$("#bulk-close").addEventListener("click", closeBulkModal);
-bulkOverlay.addEventListener("click", (e) => {
-  if (e.target === bulkOverlay) closeBulkModal();
-});
+function showBulkPhase(phase) {
+  ["upload", "loading", "preview"].forEach((p) =>
+    $("#bulk-phase-" + p).classList.toggle("hidden", p !== phase)
+  );
+}
 
-function closeBulkModal() {
-  bulkOverlay.classList.add("hidden");
-  $("#bulk-form").reset();
+function resetBulkModal() {
+  bulkPreviewToken = null;
+  bulkPreviewChallenges = [];
+  bulkFileInput.value = "";
   $("#bulk-file-name").innerHTML = "";
+  $("#bulk-challenge-list").innerHTML = "";
+  showBulkPhase("upload");
 }
 
 function updateBulkModels() {
@@ -314,6 +357,24 @@ function updateBulkModels() {
   ).join("");
 }
 
+$("#btn-bulk-upload").addEventListener("click", () => {
+  resetBulkModal();
+  $("#bulk-agent").value = defaultAgent;
+  updateBulkModels();
+  $("#bulk-autonomous").checked = defaultAgent === "copilot";
+  $("#bulk-flag").value = defaultFlagFormat;
+  bulkOverlay.classList.remove("hidden");
+});
+$("#bulk-close").addEventListener("click", closeBulkModal);
+bulkOverlay.addEventListener("click", (e) => {
+  if (e.target === bulkOverlay) closeBulkModal();
+});
+
+function closeBulkModal() {
+  bulkOverlay.classList.add("hidden");
+  resetBulkModal();
+}
+
 $("#bulk-agent").addEventListener("change", () => {
   updateBulkModels();
   const agent = $("#bulk-agent").value;
@@ -321,41 +382,118 @@ $("#bulk-agent").addEventListener("change", () => {
 });
 updateBulkModels();
 
-bulkDropZone.addEventListener("dragover", (e) => { e.preventDefault(); bulkDropZone.classList.add("dragover"); });
-bulkDropZone.addEventListener("dragleave", () => bulkDropZone.classList.remove("dragover"));
+bulkDropZone.addEventListener("dragover", (e) => {
+  e.preventDefault(); bulkDropZone.classList.add("dragover");
+});
+bulkDropZone.addEventListener("dragleave", () =>
+  bulkDropZone.classList.remove("dragover")
+);
 bulkDropZone.addEventListener("drop", (e) => {
   e.preventDefault(); bulkDropZone.classList.remove("dragover");
-  bulkFileInput.files = e.dataTransfer.files;
-  updateBulkFileName();
+  if (e.dataTransfer.files.length) triggerBulkPreview(e.dataTransfer.files[0]);
 });
-bulkFileInput.addEventListener("change", updateBulkFileName);
+bulkFileInput.addEventListener("change", () => {
+  if (bulkFileInput.files.length) triggerBulkPreview(bulkFileInput.files[0]);
+});
 
-function updateBulkFileName() {
-  const f = bulkFileInput.files[0];
-  $("#bulk-file-name").innerHTML = f ? `<span>${esc(f.name)}</span>` : "";
+async function triggerBulkPreview(file) {
+  $("#bulk-file-name").innerHTML = `<span>${esc(file.name)}</span>`;
+  showBulkPhase("loading");
+
+  const fd = new FormData();
+  fd.append("zipfile", file);
+  const res = await api("/api/challenges/bulk-preview", { method: "POST", body: fd });
+  if (!res || !res.ok) {
+    showBulkPhase("upload");
+    const err = res ? await res.json().catch(() => ({})) : {};
+    showToast(err.error || "Preview failed", "error");
+    return;
+  }
+
+  const data = await res.json();
+  bulkPreviewToken = data.preview_token;
+  bulkPreviewChallenges = data.challenges;
+  renderBulkPreview(data.challenges);
+  showBulkPhase("preview");
 }
 
-$("#bulk-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  if (!bulkFileInput.files.length) {
-    showToast("Please select a zip file", "error"); return;
-  }
-  const agent = $("#bulk-agent").value;
-  const fd = new FormData();
-  fd.append("zipfile", bulkFileInput.files[0]);
-  fd.append("flag_format", $("#bulk-flag").value);
-  fd.append("agent", agent);
-  fd.append("model", $("#bulk-model").value);
-  fd.append("autonomous", $("#bulk-autonomous").checked ? "true" : "false");
+function renderBulkPreview(chals) {
+  const list = $("#bulk-challenge-list");
+  list.innerHTML = chals.map((c, i) => {
+    const fileLabel = c.files.length
+      ? `${c.files.length} file${c.files.length !== 1 ? "s" : ""}: ${c.files.slice(0, 4).map(esc).join(", ")}${c.files.length > 4 ? ", …" : ""}`
+      : "No files";
+    return `
+    <div class="bulk-ch-row" data-index="${i}">
+      <div class="bulk-ch-row-header">
+        <input type="checkbox" class="bulk-ch-enabled" checked title="Include this challenge">
+        <input type="text" class="bulk-ch-name" value="${esc(c.name)}" placeholder="Challenge name">
+        <span class="bulk-ch-files-label">${esc(fileLabel)}</span>
+      </div>
+      <div class="bulk-ch-row-body">
+        <div class="bulk-ch-col">
+          <div class="bulk-field-label">Description</div>
+          <textarea class="bulk-ch-desc" rows="2">${esc(c.description)}</textarea>
+        </div>
+        <div class="bulk-ch-col bulk-ch-col-flag">
+          <div class="bulk-field-label">Flag Format</div>
+          <input type="text" class="bulk-ch-flag" placeholder="Inherits default">
+        </div>
+      </div>
+    </div>`;
+  }).join("");
 
-  const btn = e.target.querySelector("button[type=submit]");
+  list.querySelectorAll(".bulk-ch-enabled").forEach((cb) =>
+    cb.addEventListener("change", () => {
+      cb.closest(".bulk-ch-row").classList.toggle("bulk-ch-disabled", !cb.checked);
+      updateBulkSubmitLabel();
+    })
+  );
+  const pausedCb = $("#bulk-paused");
+  if (pausedCb) pausedCb.addEventListener("change", updateBulkSubmitLabel);
+  updateBulkSubmitLabel();
+}
+
+function updateBulkSubmitLabel() {
+  const n = document.querySelectorAll(".bulk-ch-enabled:checked").length;
+  const btn = $("#btn-bulk-submit");
+  if (!btn) return;
+  const startNow = !$("#bulk-paused") || !$("#bulk-paused").checked;
+  const verb = startNow ? "Create & Solve" : "Create";
+  btn.textContent = `${verb} ${n} Challenge${n !== 1 ? "s" : ""}`;
+}
+
+$("#btn-bulk-submit").addEventListener("click", async () => {
+  if (!bulkPreviewToken) return;
+  const rows = document.querySelectorAll(".bulk-ch-row");
+  const challengeConfigs = Array.from(rows).map((row, i) => ({
+    folder_name: bulkPreviewChallenges[i].folder_name,
+    name: row.querySelector(".bulk-ch-name").value.trim(),
+    description: row.querySelector(".bulk-ch-desc").value.trim(),
+    flag_format: row.querySelector(".bulk-ch-flag").value.trim(),
+    enabled: row.querySelector(".bulk-ch-enabled").checked,
+  }));
+
+  const btn = $("#btn-bulk-submit");
   btn.disabled = true;
-  btn.textContent = "Uploading...";
+  btn.textContent = "Creating…";
   try {
-    const res = await api("/api/challenges/bulk", { method: "POST", body: fd });
-    if (!res.ok) {
-      const err = await res.json();
-      showToast(err.error || "Upload failed", "error"); return;
+    const res = await api("/api/challenges/bulk", {
+      method: "POST",
+      body: JSON.stringify({
+        preview_token: bulkPreviewToken,
+        flag_format: $("#bulk-flag").value.trim(),
+        agent: $("#bulk-agent").value,
+        model: $("#bulk-model").value,
+        autonomous: $("#bulk-autonomous").checked,
+        paused: $("#bulk-paused") ? $("#bulk-paused").checked : false,
+        challenges: challengeConfigs,
+      }),
+    });
+    if (!res || !res.ok) {
+      const err = res ? await res.json().catch(() => ({})) : {};
+      showToast(err.error || "Upload failed", "error");
+      return;
     }
     const data = await res.json();
     showToast(`Created ${data.created.length} challenge(s)`, "success");
@@ -363,7 +501,7 @@ $("#bulk-form").addEventListener("submit", async (e) => {
     loadChallenges();
   } finally {
     btn.disabled = false;
-    btn.textContent = "Upload & Create Challenges";
+    updateBulkSubmitLabel();
   }
 });
 

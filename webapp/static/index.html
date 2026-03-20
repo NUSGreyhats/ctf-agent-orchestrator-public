@@ -30,9 +30,14 @@
           <button id="btn-agent-claude" class="agent-toggle-btn active" data-agent="claude">Claude</button>
           <button id="btn-agent-copilot" class="agent-toggle-btn" data-agent="copilot">Copilot</button>
         </div>
+        <div class="default-flag-wrapper">
+          <span class="toggle-label">Flag:</span>
+          <input type="text" id="default-flag-format" class="default-flag-input" placeholder="e.g. flag{...}">
+        </div>
         <button id="btn-new-challenge" class="btn-primary">+ New Challenge</button>
         <button id="btn-bulk-upload" class="btn-ghost">Bulk Upload</button>
         <button id="btn-usage" class="btn-ghost">Usage</button>
+        <button id="btn-theme-toggle" class="btn-ghost">Light</button>
         <button id="btn-logout" class="btn-ghost">Logout</button>
       </div>
     </header>
@@ -148,51 +153,67 @@
 
   <!-- Bulk Upload Modal -->
   <div id="bulk-overlay" class="modal-overlay hidden">
-    <div class="modal">
+    <div class="modal modal-wide">
       <div class="modal-header">
         <h2>Bulk Upload</h2>
         <button id="bulk-close" class="btn-icon">&times;</button>
       </div>
-      <p class="bulk-hint">Upload a zip file with one folder per challenge. Each folder becomes a challenge using its name. Place a <code>description.txt</code> inside a folder to set the challenge description.</p>
-      <form id="bulk-form">
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label for="bulk-agent">Agent</label>
-            <select id="bulk-agent">
-              <option value="claude" selected>Claude</option>
-              <option value="copilot">Copilot</option>
-              <option value="both">Both (parallel)</option>
-            </select>
+
+      <!-- Phase 1: zip drop zone -->
+      <div id="bulk-phase-upload">
+        <p class="bulk-hint">Upload a <code>.zip</code> or <code>.7z</code> with one folder per challenge. Folder names become challenge names. Add a <code>description.txt</code> or <code>prompt.txt</code> inside each folder to set its description.</p>
+        <div id="bulk-drop-zone" class="drop-zone">
+          <p>Drop .zip or .7z here or click to browse</p>
+          <input type="file" id="bulk-file" accept=".zip,.7z">
+        </div>
+        <div id="bulk-file-name" class="file-list"></div>
+      </div>
+
+      <!-- Phase 2: analysing -->
+      <div id="bulk-phase-loading" class="hidden">
+        <div class="bulk-loading">
+          <div class="bulk-spinner"></div>
+          <p class="bulk-loading-text">Analysing zip&hellip;</p>
+        </div>
+      </div>
+
+      <!-- Phase 3: preview + edit -->
+      <div id="bulk-phase-preview" class="hidden">
+        <div class="bulk-global-bar">
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label for="bulk-agent">Agent</label>
+              <select id="bulk-agent">
+                <option value="claude" selected>Claude</option>
+                <option value="copilot">Copilot</option>
+                <option value="both">Both (parallel)</option>
+              </select>
+            </div>
+            <div class="form-group flex-1" id="bulk-model-group">
+              <label for="bulk-model">Model</label>
+              <select id="bulk-model"></select>
+            </div>
+            <div class="form-group flex-1">
+              <label for="bulk-flag">Default Flag Format</label>
+              <input type="text" id="bulk-flag" placeholder="e.g. flag{...}">
+            </div>
+            <div class="form-group bulk-autonomous-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="bulk-autonomous">
+                <span>Autonomous</span>
+              </label>
+            </div>
+            <div class="form-group bulk-autonomous-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="bulk-paused">
+                <span>Pause (start manually)</span>
+              </label>
+            </div>
           </div>
-          <div class="form-group flex-1" id="bulk-model-group">
-            <label for="bulk-model">Model</label>
-            <select id="bulk-model"></select>
-          </div>
         </div>
-
-        <div class="form-group">
-          <label for="bulk-flag">Flag Format</label>
-          <input type="text" id="bulk-flag" placeholder="e.g. flag{...} or CTF{...}">
-        </div>
-
-        <div class="form-group form-group-inline">
-          <label class="checkbox-label">
-            <input type="checkbox" id="bulk-autonomous">
-            <span>Autonomous mode</span>
-          </label>
-        </div>
-
-        <div class="form-group">
-          <label>Zip File</label>
-          <div id="bulk-drop-zone" class="drop-zone">
-            <p>Drop zip file here or click to browse</p>
-            <input type="file" id="bulk-file" accept=".zip">
-          </div>
-          <div id="bulk-file-name" class="file-list"></div>
-        </div>
-
-        <button type="submit" class="btn-primary btn-full">Upload & Create Challenges</button>
-      </form>
+        <div id="bulk-challenge-list" class="bulk-challenge-list"></div>
+        <button id="btn-bulk-submit" class="btn-primary btn-full">Create &amp; Solve</button>
+      </div>
     </div>
   </div>
 

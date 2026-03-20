@@ -1,8 +1,8 @@
 terraform {
   required_providers {
-    google = {
-      source  = "hashicorp/google"
-      version = "~> 6.0"
+    digitalocean = {
+      source  = "digitalocean/digitalocean"
+      version = "~> 2.0"
     }
     null = {
       source  = "hashicorp/null"
@@ -11,59 +11,65 @@ terraform {
   }
 }
 
-provider "google" {
-  project = var.project_id
-  region  = regex("^(.*)-[a-z]$", var.zone)[0]
-  zone    = var.zone
+provider "digitalocean" {
+  token = var.do_token
 }
 
-resource "google_compute_instance" "ctf" {
-  name         = "ctf-workstation"
-  machine_type = var.machine_type
-  zone         = var.zone
-
-  boot_disk {
-    initialize_params {
-      image = "ubuntu-os-cloud/ubuntu-2404-lts-amd64"
-      size  = var.boot_disk_size_gb
-      type  = "pd-ssd"
-    }
-  }
-
-  network_interface {
-    network = "default"
-
-    access_config {}
-  }
-
-  tags = ["ctf-workstation"]
-
-  metadata = {
-    startup-script = file("${path.module}/startup.sh")
-    ssh-keys       = "root:${file(var.ssh_public_key_path)}"
-  }
+resource "digitalocean_ssh_key" "ctf" {
+  name       = "ctf-workstation-key"
+  public_key = file(var.ssh_public_key_path)
 }
 
-resource "google_compute_firewall" "webapp" {
-  name    = "allow-ctf-webapp"
-  network = "default"
+resource "digitalocean_droplet" "ctf" {
+  name      = "ctf-workstation"
+  region    = var.region
+  size      = var.droplet_size
+  image     = "ubuntu-24-04-x64"
+  ssh_keys  = [digitalocean_ssh_key.ctf.fingerprint]
+  user_data = file("${path.module}/startup.sh")
+}
 
-  allow {
-    protocol = "tcp"
-    ports    = ["8080"]
+resource "digitalocean_firewall" "webapp" {
+  name        = "allow-ctf-webapp"
+  droplet_ids = [digitalocean_droplet.ctf.id]
+
+  inbound_rule {
+    protocol         = "tcp"
+    port_range       = "22"
+    source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
-  source_ranges = ["0.0.0.0/0"]
-  target_tags   = ["ctf-workstation"]
+  inbound_rule {
+    protocol         = "tcp"
+    port_range       = "8080"
+    source_addresses = ["0.0.0.0/0", "::/0"]
+  }
+
+  outbound_rule {
+    protocol              = "tcp"
+    port_range            = "all"
+    destination_addresses = ["0.0.0.0/0", "::/0"]
+  }
+
+  outbound_rule {
+    protocol              = "udp"
+    port_range            = "all"
+    destination_addresses = ["0.0.0.0/0", "::/0"]
+  }
+
+  outbound_rule {
+    protocol              = "icmp"
+    destination_addresses = ["0.0.0.0/0", "::/0"]
+  }
 }
 
 resource "null_resource" "provision" {
-  depends_on = [google_compute_instance.ctf]
+  depends_on = [digitalocean_droplet.ctf]
 
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command = <<-EOT
-      IP="${google_compute_instance.ctf.network_interface[0].access_config[0].nat_ip}"
+      IP="${digitalocean_droplet.ctf.ipv4_address}"
       SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5"
 
       # Wait for SSH to become available

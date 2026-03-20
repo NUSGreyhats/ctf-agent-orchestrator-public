@@ -25,6 +25,14 @@ EOF
 chmod +x /usr/bin/apktool
 
 #
+# install bata24/gef (GDB Enhanced Features)
+#
+
+mkdir -p /opt/gef
+wget -O /opt/gef/gef.py https://raw.githubusercontent.com/bata24/gef/main/gef.py
+python3 -m pip install keystone-engine ropper
+
+#
 # Python packages for skills: ida-domain, libdebug
 #
 
