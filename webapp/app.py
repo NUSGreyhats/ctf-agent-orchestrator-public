@@ -958,6 +958,7 @@ async def delete_challenge(request: Request) -> JSONResponse:
     challenge_dir = CHALLENGES_DIR / challenge_id
     if challenge_dir.exists():
         shutil.rmtree(challenge_dir)
+    shutil.rmtree(challenge_state_dir(challenge_id), ignore_errors=True)
 
     del challenges[challenge_id]
     return JSONResponse({"ok": True})
@@ -1028,10 +1029,15 @@ async def get_file(request: Request) -> Response:
     full_path = (challenge_dir / file_path).resolve()
     state_dir = challenge_state_dir(challenge_id).resolve()
 
-    if not str(full_path).startswith(str(challenge_dir.resolve())):
+    try:
+        full_path.relative_to(challenge_dir.resolve())
+    except ValueError:
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    if str(full_path).startswith(str(state_dir)):
+    try:
+        full_path.relative_to(state_dir)
         return JSONResponse({"error": "forbidden"}, status_code=403)
+    except ValueError:
+        pass
     if not full_path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -1208,6 +1214,7 @@ async def run_agent(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        limit=2 ** 24,  # 16 MB — default 64 KB is too small for large JSON events
     )
     challenge["process"] = proc
     challenge["_saw_provider_message"] = False
@@ -1416,10 +1423,15 @@ async def download_file(request: Request) -> Response:
     full_path = (challenge_dir / file_path).resolve()
     state_dir = challenge_state_dir(challenge_id).resolve()
 
-    if not str(full_path).startswith(str(challenge_dir.resolve())):
+    try:
+        full_path.relative_to(challenge_dir.resolve())
+    except ValueError:
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    if str(full_path).startswith(str(state_dir)):
+    try:
+        full_path.relative_to(state_dir)
         return JSONResponse({"error": "forbidden"}, status_code=403)
+    except ValueError:
+        pass
     if not full_path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
 
