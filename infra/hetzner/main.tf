@@ -23,11 +23,13 @@ locals {
   repo_root = abspath("${path.module}/../..")
 
   environment_files = sort(fileset(local.repo_root, "environment/**"))
+  mcp_files         = sort(fileset(local.repo_root, "mcps/**"))
   webapp_files      = sort(fileset(local.repo_root, "webapp/**"))
   skill_files       = sort(fileset(local.repo_root, "skills/**"))
 
   sync_files = distinct(concat(
     local.environment_files,
+    local.mcp_files,
     local.webapp_files,
     local.skill_files,
   ))
@@ -118,7 +120,7 @@ resource "null_resource" "sync_repo" {
       done
 
       step "Copying repository to the VM"
-      tar -C "$SRC_PATH" -cf - . | ssh $SSH_OPTS root@"$IP" "rm -rf /root/all-things-ai && mkdir -p /root/all-things-ai && tar -C /root/all-things-ai -xf -"
+      tar -C "$SRC_PATH" -cf - . | ssh $SSH_OPTS root@"$IP" "TMP_DIR=\$(mktemp -d /root/all-things-ai.sync.XXXXXX) && trap 'rm -rf \"\$TMP_DIR\"' EXIT && mkdir -p /root/all-things-ai /root/all-things-ai/challenges && tar -C \"\$TMP_DIR\" -xf - && rm -rf \"\$TMP_DIR/challenges\" && find /root/all-things-ai -mindepth 1 -maxdepth 1 -not -name challenges -exec rm -rf {} + && cp -a \"\$TMP_DIR\"/. /root/all-things-ai/"
     EOT
   }
 }

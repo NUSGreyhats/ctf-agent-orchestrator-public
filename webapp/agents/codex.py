@@ -204,8 +204,6 @@ def _build_command(
             "--json",
             "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox",
-            "--cd",
-            ".",
         ])
         if model:
             cmd.extend(["--model", model])
