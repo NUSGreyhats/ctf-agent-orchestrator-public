@@ -1027,17 +1027,13 @@ async def get_file(request: Request) -> Response:
 
     challenge_dir = CHALLENGES_DIR / challenge_id
     full_path = (challenge_dir / file_path).resolve()
-    state_dir = challenge_state_dir(challenge_id).resolve()
 
     try:
         full_path.relative_to(challenge_dir.resolve())
     except ValueError:
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    try:
-        full_path.relative_to(state_dir)
+    if full_path.name in (METADATA_FILE, OUTPUT_FILE):
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    except ValueError:
-        pass
     if not full_path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -1421,17 +1417,13 @@ async def download_file(request: Request) -> Response:
 
     challenge_dir = CHALLENGES_DIR / challenge_id
     full_path = (challenge_dir / file_path).resolve()
-    state_dir = challenge_state_dir(challenge_id).resolve()
 
     try:
         full_path.relative_to(challenge_dir.resolve())
     except ValueError:
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    try:
-        full_path.relative_to(state_dir)
+    if full_path.name in (METADATA_FILE, OUTPUT_FILE):
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    except ValueError:
-        pass
     if not full_path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
 

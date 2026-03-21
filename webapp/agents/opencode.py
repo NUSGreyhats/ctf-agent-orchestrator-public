@@ -133,11 +133,12 @@ def _normalize_part_event(part: dict, challenge: dict) -> dict | None:
             }
 
         if status in {"completed", "error"}:
-            content = (
+            raw = (
                 state.get("output")
                 if status == "completed"
                 else state.get("error", "")
             )
+            content = raw if isinstance(raw, str) else json.dumps(raw)
             return {
                 "type": "user",
                 "message": {"content": [{

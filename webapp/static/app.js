@@ -288,8 +288,7 @@ async function loadChallenges() {
 
   list.querySelectorAll(".challenge-card").forEach((card) =>
     card.addEventListener("click", (e) => {
-      if (e.target.classList.contains("btn-card-delete")) return;
-      if (e.target.classList.contains("btn-card-start")) return;
+      if (e.target.closest(".btn-card-delete") || e.target.closest(".btn-card-start")) return;
       openChallenge(card.dataset.id);
     })
   );
