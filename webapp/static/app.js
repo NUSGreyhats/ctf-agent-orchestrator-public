@@ -71,7 +71,7 @@ function getAgentAutonomousDefault(name) {
 function renderAgentToggleButtons() {
   const container = $("#default-agent-buttons");
   container.innerHTML = agentCatalog.map((agent) => `
-    <button class="agent-toggle-btn" data-agent="${agent.name}">${esc(agent.label)}</button>
+    <button class="agent-toggle-btn" data-agent="${esc(agent.name)}">${esc(agent.label)}</button>
   `).join("");
   container.querySelectorAll(".agent-toggle-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -87,11 +87,11 @@ function renderAgentToggleButtons() {
 
 function renderAgentSelect(selectEl, includeParallel = false) {
   const options = agentCatalog.map((agent) =>
-    `<option value="${agent.name}">${esc(agent.label)}</option>`
+    `<option value="${esc(agent.name)}">${esc(agent.label)}</option>`
   );
   if (includeParallel && parallelOption) {
     options.push(
-      `<option value="${parallelOption.value}">${esc(parallelOption.label)}</option>`
+      `<option value="${esc(parallelOption.value)}">${esc(parallelOption.label)}</option>`
     );
   }
   selectEl.innerHTML = options.join("");
@@ -99,14 +99,14 @@ function renderAgentSelect(selectEl, includeParallel = false) {
 
 function renderUsageShell() {
   $("#usage-grid").innerHTML = agentCatalog.map((agent) => `
-    <div class="usage-card" id="usage-${agent.name}">
+    <div class="usage-card" id="usage-${esc(agent.name)}">
       <div class="usage-card-header">
         <span class="usage-agent-name">${esc(agent.label)}</span>
-        <span id="${agent.name}-auth-badge" class="badge badge-pending">not connected</span>
+        <span id="${esc(agent.name)}-auth-badge" class="badge badge-pending">not connected</span>
       </div>
-      <div id="${agent.name}-auth-info" class="usage-auth-info"></div>
-      <div id="${agent.name}-stats" class="usage-stats"></div>
-      <div id="${agent.name}-challenge-stats" class="usage-challenge-stats"></div>
+      <div id="${esc(agent.name)}-auth-info" class="usage-auth-info"></div>
+      <div id="${esc(agent.name)}-stats" class="usage-stats"></div>
+      <div id="${esc(agent.name)}-challenge-stats" class="usage-challenge-stats"></div>
     </div>
   `).join("");
 }

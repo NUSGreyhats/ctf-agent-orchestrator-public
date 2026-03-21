@@ -543,6 +543,11 @@ async def create_challenge(request: Request) -> JSONResponse:
             safe_path = normalize_uploaded_path(field.filename)
             if not safe_path:
                 continue
+            if safe_path in file_data:
+                return JSONResponse(
+                    {"error": f"duplicate file path: {safe_path}"},
+                    status_code=400,
+                )
             file_data[safe_path] = await field.read()
 
     agents_to_run = expand_agent_selection(agent, model)
@@ -1006,8 +1011,6 @@ async def list_files(request: Request) -> JSONResponse:
         if not p.is_file():
             continue
         rel = str(p.relative_to(challenge_dir))
-        if rel == METADATA_FILE or rel == OUTPUT_FILE:
-            continue
         files.append({
             "path": rel,
             "size": p.stat().st_size,
@@ -1029,10 +1032,8 @@ async def get_file(request: Request) -> Response:
     full_path = (challenge_dir / file_path).resolve()
 
     try:
-        rel = str(full_path.relative_to(challenge_dir.resolve()))
+        full_path.relative_to(challenge_dir.resolve())
     except ValueError:
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    if rel == METADATA_FILE or rel == OUTPUT_FILE:
         return JSONResponse({"error": "forbidden"}, status_code=403)
     if not full_path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -1419,10 +1420,8 @@ async def download_file(request: Request) -> Response:
     full_path = (challenge_dir / file_path).resolve()
 
     try:
-        rel = str(full_path.relative_to(challenge_dir.resolve()))
+        full_path.relative_to(challenge_dir.resolve())
     except ValueError:
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    if rel == METADATA_FILE or rel == OUTPUT_FILE:
         return JSONResponse({"error": "forbidden"}, status_code=403)
     if not full_path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)

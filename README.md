@@ -53,9 +53,11 @@ When it finishes, Terraform prints the web app URL and password.
 You can retrieve the password again later with:
 
 ```bash
-cd infra/hetzner   # or infra/digitalocean
+cd infra/hetzner
 terraform output -raw webapp_password
 ```
+
+The password is also stored on the VM at `/root/.ctf-solver-password`.
 
 ### 2. Authenticate the Agents
 
