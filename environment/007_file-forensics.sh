@@ -10,7 +10,8 @@ set -e
 # Metadata and image analysis
 apt install -y \
     libimage-exiftool-perl \
-    pngcheck
+    pngcheck \
+    imagemagick
 
 # Steganography
 apt install -y \
