@@ -31,12 +31,14 @@ Effort selection in the web UI is currently exposed for Claude and Codex. Copilo
 
 ### 1. Deploy the VM
 
+Two cloud providers are supported (Hetzner and DigitalOcean). Pick one and `cd` into its directory — see [infra/README.md](infra/README.md) for provider-specific details.
+
 ```bash
-cd infra
+cd infra/hetzner   # or infra/digitalocean
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Edit `terraform.tfvars` with your Hetzner Cloud settings, then:
+Edit `terraform.tfvars` with your cloud provider settings, then:
 
 ```bash
 terraform init
@@ -51,7 +53,7 @@ When it finishes, Terraform prints the web app URL and password.
 You can retrieve the password again later with:
 
 ```bash
-cd infra
+cd infra/hetzner   # or infra/digitalocean
 terraform output -raw webapp_password
 ```
 
@@ -60,7 +62,7 @@ terraform output -raw webapp_password
 SSH into the VM:
 
 ```bash
-ssh root@$(cd infra && terraform output -raw external_ip)
+ssh root@$(cd infra/hetzner && terraform output -raw external_ip)
 ```
 
 Authenticate whichever agents you want to use:
@@ -130,14 +132,14 @@ The web UI streams agent output live, shows subagent tabs when agents spawn para
 ### Teardown
 
 ```bash
-cd infra
+cd infra/hetzner   # or infra/digitalocean
 terraform destroy
 ```
 
 ## Project Structure
 
 ```
-infra/          Terraform config for Hetzner Cloud provisioning
+infra/          Terraform configs (Hetzner Cloud and DigitalOcean)
 environment/    Setup scripts (tools, CLIs, dependencies)
 webapp/         Web app for challenge management and agent streaming
 skills/         Agent skills (CTF methodology, domain-specific)

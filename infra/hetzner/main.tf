@@ -20,7 +20,7 @@ provider "hcloud" {
 }
 
 locals {
-  repo_root = abspath("${path.module}/..")
+  repo_root = abspath("${path.module}/../..")
 
   environment_files = sort(fileset(local.repo_root, "environment/**"))
   webapp_files      = sort(fileset(local.repo_root, "webapp/**"))

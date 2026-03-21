@@ -106,7 +106,7 @@ SKILL_CATALOG = (
         "binary exploitation, mitigations, ROP, heap bugs, shellcode, and seccomp bypasses",
     ),
     (
-        "/root/all-things-ai/skills/crypto/SKILLS.md",
+        "/root/all-things-ai/skills/crypto/SKILL.md",
         "cryptography, RSA, AES, lattices, PRNGs, ECC, and Z3/SageMath style attacks",
     ),
     (
@@ -1029,10 +1029,10 @@ async def get_file(request: Request) -> Response:
     full_path = (challenge_dir / file_path).resolve()
 
     try:
-        full_path.relative_to(challenge_dir.resolve())
+        rel = str(full_path.relative_to(challenge_dir.resolve()))
     except ValueError:
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    if full_path.name in (METADATA_FILE, OUTPUT_FILE):
+    if rel == METADATA_FILE or rel == OUTPUT_FILE:
         return JSONResponse({"error": "forbidden"}, status_code=403)
     if not full_path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -1419,10 +1419,10 @@ async def download_file(request: Request) -> Response:
     full_path = (challenge_dir / file_path).resolve()
 
     try:
-        full_path.relative_to(challenge_dir.resolve())
+        rel = str(full_path.relative_to(challenge_dir.resolve()))
     except ValueError:
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    if full_path.name in (METADATA_FILE, OUTPUT_FILE):
+    if rel == METADATA_FILE or rel == OUTPUT_FILE:
         return JSONResponse({"error": "forbidden"}, status_code=403)
     if not full_path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
