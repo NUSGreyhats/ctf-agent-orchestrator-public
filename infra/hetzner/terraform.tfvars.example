@@ -1,0 +1,6 @@
+hcloud_token        = "your-hetzner-cloud-api-token"
+location            = "nbg1"
+server_type         = "cx23"
+all_things_ai_path  = "../.."
+ssh_public_key_path = "~/.ssh/id_rsa.pub"
+ssh_private_key_path = "~/.ssh/id_rsa"

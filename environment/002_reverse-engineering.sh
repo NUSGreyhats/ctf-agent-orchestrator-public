@@ -8,7 +8,8 @@ set -e
 #
 
 wget "https://github.com/skylot/jadx/releases/download/v1.5.5/jadx-1.5.5.zip"
-unzip jadx-1.5.5.zip -d /opt/jadx-1.5.5/
+rm -rf /opt/jadx-1.5.5
+unzip -oq jadx-1.5.5.zip -d /opt/jadx-1.5.5/
 rm -f jadx-1.5.5.zip
 chmod +x /opt/jadx-1.5.5/bin/jadx
 echo 'export PATH=$PATH:/opt/jadx-1.5.5/bin' >> ~/.bashrc
@@ -29,7 +30,7 @@ chmod +x /usr/bin/apktool
 #
 
 mkdir -p /opt/gef
-wget -O /opt/gef/gef.py https://raw.githubusercontent.com/bata24/gef/main/gef.py
+wget -O /opt/gef/gef.py https://raw.githubusercontent.com/bata24/gef/master/gef.py
 python3 -m pip install keystone-engine ropper
 
 #

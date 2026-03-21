@@ -5,10 +5,13 @@ let currentChallengeId = null;
 let autoScroll = true;
 let toolCount = 0;
 let stepCount = 0;
-let defaultAgent = "claude";
+let defaultAgent = null;
 let defaultFlagFormat = "";
 let currentTheme = "dark";
 let csrfToken = null;
+let agentCatalog = [];
+let agentByName = new Map();
+let parallelOption = null;
 
 const pendingTools = new Map();
 
@@ -36,6 +39,92 @@ function showView(name) {
   views[name].classList.remove("hidden");
 }
 
+function primaryAgentName() {
+  return agentCatalog[0]?.name || "claude";
+}
+
+function getAgentMeta(name) {
+  return agentByName.get(name) || agentCatalog[0] || {
+    name: "claude",
+    label: "Claude",
+    models: [],
+    default_model: "opus",
+    effort_levels: [],
+    default_effort: "",
+    auth_connect_command: "claude auth login",
+    autonomous_default: false,
+    badge_mode: "model",
+  };
+}
+
+function isParallelSelection(name) {
+  return Boolean(parallelOption && name === parallelOption.value);
+}
+
+function getAgentAutonomousDefault(name) {
+  if (isParallelSelection(name)) {
+    return agentCatalog.some((agent) => agent.autonomous_default);
+  }
+  return Boolean(getAgentMeta(name).autonomous_default);
+}
+
+function renderAgentToggleButtons() {
+  const container = $("#default-agent-buttons");
+  container.innerHTML = agentCatalog.map((agent) => `
+    <button class="agent-toggle-btn" data-agent="${esc(agent.name)}">${esc(agent.label)}</button>
+  `).join("");
+  container.querySelectorAll(".agent-toggle-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      defaultAgent = btn.dataset.agent;
+      updateAgentToggleUI();
+      await api("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({ default_agent: defaultAgent }),
+      });
+    });
+  });
+}
+
+function renderAgentSelect(selectEl, includeParallel = false) {
+  const options = agentCatalog.map((agent) =>
+    `<option value="${esc(agent.name)}">${esc(agent.label)}</option>`
+  );
+  if (includeParallel && parallelOption) {
+    options.push(
+      `<option value="${esc(parallelOption.value)}">${esc(parallelOption.label)}</option>`
+    );
+  }
+  selectEl.innerHTML = options.join("");
+}
+
+function renderUsageShell() {
+  $("#usage-grid").innerHTML = agentCatalog.map((agent) => `
+    <div class="usage-card" id="usage-${esc(agent.name)}">
+      <div class="usage-card-header">
+        <span class="usage-agent-name">${esc(agent.label)}</span>
+        <span id="${esc(agent.name)}-auth-badge" class="badge badge-pending">not connected</span>
+      </div>
+      <div id="${esc(agent.name)}-auth-info" class="usage-auth-info"></div>
+      <div id="${esc(agent.name)}-stats" class="usage-stats"></div>
+      <div id="${esc(agent.name)}-challenge-stats" class="usage-challenge-stats"></div>
+    </div>
+  `).join("");
+}
+
+async function loadAgentCatalog() {
+  const res = await api("/api/agents");
+  if (!res) return false;
+  const data = await res.json();
+  agentCatalog = data.agents || [];
+  agentByName = new Map(agentCatalog.map((agent) => [agent.name, agent]));
+  parallelOption = data.parallel_option || null;
+  renderAgentToggleButtons();
+  renderAgentSelect($("#challenge-agent"), true);
+  renderAgentSelect($("#bulk-agent"), true);
+  renderUsageShell();
+  return true;
+}
+
 async function api(path, opts = {}) {
   const headers = { ...opts.headers };
   if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
@@ -59,7 +148,12 @@ $("#login-form").addEventListener("submit", async (e) => {
   if (res.ok) {
     const data = await res.json();
     csrfToken = data.csrf_token;
-    showView("dashboard"); loadChallenges(); loadDefaultAgent(); checkAgentAuth();
+    if (await loadAgentCatalog()) {
+      showView("dashboard");
+      loadChallenges();
+      loadDefaultAgent();
+      checkAgentAuth();
+    }
   } else {
     const data = await res.json().catch(() => ({}));
     $("#login-error").textContent = data.error || "Invalid password";
@@ -77,12 +171,14 @@ async function loadDefaultAgent() {
   const res = await api("/api/settings");
   if (!res) return;
   const settings = await res.json();
-  defaultAgent = settings.default_agent || "claude";
+  defaultAgent = settings.default_agent || primaryAgentName();
+  if (!agentByName.has(defaultAgent)) defaultAgent = primaryAgentName();
   defaultFlagFormat = settings.default_flag_format || "";
   currentTheme = settings.theme || "dark";
   applyTheme(currentTheme);
   updateAgentToggleUI();
-  $("#default-flag-format").value = defaultFlagFormat;
+  const defaultFlagInput = $("#default-flag-format");
+  if (defaultFlagInput) defaultFlagInput.value = defaultFlagFormat;
 }
 
 function applyTheme(theme) {
@@ -97,53 +193,41 @@ function updateAgentToggleUI() {
   });
 }
 
-document.querySelectorAll(".agent-toggle-btn").forEach((btn) => {
-  btn.addEventListener("click", async () => {
-    defaultAgent = btn.dataset.agent;
-    updateAgentToggleUI();
+const defaultFlagInput = $("#default-flag-format");
+if (defaultFlagInput) {
+  defaultFlagInput.addEventListener("change", async () => {
+    defaultFlagFormat = defaultFlagInput.value.trim();
     await api("/api/settings", {
       method: "PUT",
-      body: JSON.stringify({ default_agent: defaultAgent }),
+      body: JSON.stringify({ default_flag_format: defaultFlagFormat }),
     });
   });
-});
+}
 
-$("#default-flag-format").addEventListener("change", async () => {
-  defaultFlagFormat = $("#default-flag-format").value.trim();
-  await api("/api/settings", {
-    method: "PUT",
-    body: JSON.stringify({ default_flag_format: defaultFlagFormat }),
+const themeToggleBtn = $("#btn-theme-toggle");
+if (themeToggleBtn) {
+  themeToggleBtn.addEventListener("click", async () => {
+    currentTheme = currentTheme === "dark" ? "light" : "dark";
+    applyTheme(currentTheme);
+    await api("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ theme: currentTheme }),
+    });
   });
-});
-
-$("#btn-theme-toggle").addEventListener("click", async () => {
-  currentTheme = currentTheme === "dark" ? "light" : "dark";
-  applyTheme(currentTheme);
-  await api("/api/settings", {
-    method: "PUT",
-    body: JSON.stringify({ theme: currentTheme }),
-  });
-});
+}
 
 // === Agent Auth Check ===
 async function checkAgentAuth() {
   const res = await api("/api/usage");
   if (!res) return;
   const data = await res.json();
-
-  const missing = [];
-  if (!data.claude) {
-    missing.push({
-      name: "Claude Code",
-      command: "claude auth login",
-    });
-  }
-  if (!data.copilot) {
-    missing.push({
-      name: "GitHub Copilot CLI",
-      command: "copilot login",
-    });
-  }
+  const usage = data.agents || {};
+  const missing = agentCatalog
+    .filter((agent) => !usage[agent.name])
+    .map((agent) => ({
+      name: agent.label,
+      command: agent.auth_connect_command,
+    }));
 
   if (missing.length === 0) return;
 
@@ -184,24 +268,21 @@ async function loadChallenges() {
   }
   empty.classList.add("hidden");
   list.innerHTML = challenges.map((c) => {
-    const agentLabel = c.agent === "copilot" ? "copilot" : esc(c.model || "opus");
+    const agent = getAgentMeta(c.agent);
+    const agentLabel = agent.badge_mode === "label"
+      ? esc(agent.label)
+      : esc(c.model || agent.default_model);
     const isPending = c.status === "pending";
     return `
     <div class="challenge-card status-${c.status}" data-id="${c.id}">
-      <div class="card-top">
-        <span class="badge badge-${c.status}">${c.status}</span>
-        <button class="btn-card-delete" data-id="${c.id}" title="Delete">&times;</button>
-      </div>
-      <div class="card-body">
-        <div class="card-name">${esc(c.name)}</div>
-        <div class="card-desc">${esc(c.description || "")}</div>
-      </div>
-      <div class="card-footer">
-        <span class="card-agent card-agent-${c.agent || "claude"}">${agentLabel}</span>
-        <span class="card-files">${c.files.length} file${c.files.length !== 1 ? "s" : ""}</span>
-        <span class="card-duration">${formatDuration(c.duration_ms)}</span>
-        ${isPending ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Start</button>` : ""}
-      </div>
+      <span class="badge badge-${c.status}">${c.status}</span>
+      <span class="card-name">${esc(c.name)}</span>
+      <span class="card-desc">${esc(c.description || "")}</span>
+      <span class="card-agent card-agent-${c.agent || primaryAgentName()}">${agentLabel}</span>
+      <span class="card-files">${c.files.length} file${c.files.length !== 1 ? "s" : ""}</span>
+      <span class="card-duration">${formatDuration(c.duration_ms)}</span>
+      ${isPending ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Start</button>` : ""}
+      <button class="btn-card-delete" data-id="${c.id}" title="Delete">&times;</button>
     </div>`;
   }).join("");
 
@@ -222,7 +303,10 @@ async function loadChallenges() {
   list.querySelectorAll(".btn-card-start").forEach((btn) =>
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
-      const res = await api(`/api/challenges/${btn.dataset.id}/solve`, { method: "POST" });
+      const res = await api(
+        `/api/challenges/${btn.dataset.id}/solve`,
+        { method: "POST" },
+      );
       if (res && res.ok) loadChallenges();
     })
   );
@@ -236,7 +320,7 @@ setInterval(() => {
 $("#btn-new-challenge").addEventListener("click", () => {
   $("#challenge-agent").value = defaultAgent;
   updateModelOptions();
-  $("#challenge-autonomous").checked = defaultAgent === "copilot";
+  $("#challenge-autonomous").checked = getAgentAutonomousDefault(defaultAgent);
   $("#challenge-flag").value = defaultFlagFormat;
   $("#modal-overlay").classList.remove("hidden");
   $("#challenge-name").focus();
@@ -249,55 +333,142 @@ $("#modal-overlay").addEventListener("click", (e) => {
 function closeModal() {
   $("#modal-overlay").classList.add("hidden");
   $("#challenge-form").reset();
+  pendingChallengeUploads = [];
   $("#file-list").innerHTML = "";
   updateModelOptions();
 }
 
 const dropZone = $("#drop-zone");
 const fileInput = $("#challenge-files");
+let pendingChallengeUploads = [];
 dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
 dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
-dropZone.addEventListener("drop", (e) => {
+dropZone.addEventListener("drop", async (e) => {
   e.preventDefault(); dropZone.classList.remove("dragover");
-  fileInput.files = e.dataTransfer.files; updateFileList();
+  pendingChallengeUploads = await collectUploadsFromDataTransfer(e.dataTransfer);
+  updateFileList();
 });
-fileInput.addEventListener("change", updateFileList);
+fileInput.addEventListener("change", () => {
+  pendingChallengeUploads = Array.from(fileInput.files).map((file) => ({
+    file,
+    path: uploadPathForFile(file),
+  }));
+  updateFileList();
+});
 
-function updateFileList() {
-  $("#file-list").innerHTML = Array.from(fileInput.files)
-    .map((f) => `<span>${esc(f.name)}</span>`).join("");
+function normalizeUploadPath(path) {
+  return (path || "").replace(/\\/g, "/").split("/").filter(Boolean).join("/");
 }
 
-const agentModels = {
-  claude: [
-    { value: "opus", label: "Opus" },
-    { value: "sonnet", label: "Sonnet" },
-    { value: "haiku", label: "Haiku" },
-  ],
-  copilot: [
-    { value: "claude-opus-4.6", label: "Claude Opus 4.6" },
-    { value: "claude-sonnet-4.6", label: "Claude Sonnet 4.6" },
-    { value: "claude-haiku-4.5", label: "Claude Haiku 4.5" },
-    { value: "gpt-5.4", label: "GPT-5.4" },
-    { value: "gpt-5.2", label: "GPT-5.2" },
-    { value: "gpt-5.1", label: "GPT-5.1" },
-    { value: "gemini-3-pro-preview", label: "Gemini 3 Pro" },
-  ],
-};
+function uploadPathForFile(file, fallbackPath = "") {
+  return normalizeUploadPath(file.webkitRelativePath || fallbackPath || file.name) || file.name;
+}
+
+async function collectUploadsFromDataTransfer(dataTransfer) {
+  const items = Array.from(dataTransfer.items || []);
+  const entries = items
+    .map((item) => item.webkitGetAsEntry ? item.webkitGetAsEntry() : null)
+    .filter(Boolean);
+
+  if (!entries.length) {
+    return Array.from(dataTransfer.files || []).map((file) => ({
+      file,
+      path: uploadPathForFile(file),
+    }));
+  }
+
+  const uploads = [];
+  for (const entry of entries) {
+    uploads.push(...await collectUploadsFromEntry(entry));
+  }
+  return uploads;
+}
+
+async function collectUploadsFromEntry(entry, prefix = "") {
+  if (entry.isFile) {
+    return new Promise((resolve, reject) => {
+      entry.file(
+        (file) => resolve([{
+          file,
+          path: uploadPathForFile(file, `${prefix}${file.name}`),
+        }]),
+        reject,
+      );
+    });
+  }
+
+  if (!entry.isDirectory) return [];
+
+  const children = await readAllDirectoryEntries(entry);
+  const uploads = [];
+  for (const child of children) {
+    uploads.push(...await collectUploadsFromEntry(
+      child,
+      `${prefix}${entry.name}/`,
+    ));
+  }
+  return uploads;
+}
+
+async function readAllDirectoryEntries(entry) {
+  const reader = entry.createReader();
+  const entries = [];
+  while (true) {
+    const batch = await new Promise((resolve, reject) =>
+      reader.readEntries(resolve, reject)
+    );
+    if (!batch.length) return entries;
+    entries.push(...batch);
+  }
+}
+
+function updateFileList() {
+  $("#file-list").innerHTML = pendingChallengeUploads
+    .map(({ path }) => `<span>${esc(path)}</span>`).join("");
+}
 
 function updateModelOptions() {
   const agent = $("#challenge-agent").value;
-  const models = agent === "both" ? agentModels.claude : (agentModels[agent] || agentModels.claude);
+  const modelGroup = $("#model-group");
+  const effortGroup = $("#effort-group");
   const sel = $("#challenge-model");
-  sel.innerHTML = models.map((m) =>
+  const effortSel = $("#challenge-effort");
+  if (isParallelSelection(agent)) {
+    modelGroup.classList.add("hidden");
+    effortGroup.classList.add("hidden");
+    sel.disabled = true;
+    effortSel.disabled = true;
+    sel.innerHTML = '<option value="">Provider defaults</option>';
+    effortSel.innerHTML = '<option value="">Provider default</option>';
+    return;
+  }
+  modelGroup.classList.remove("hidden");
+  const meta = getAgentMeta(agent);
+  sel.disabled = false;
+  sel.innerHTML = (meta.models || []).map((m) =>
     `<option value="${m.value}">${esc(m.label)}</option>`
   ).join("");
+  sel.value = meta.default_model;
+
+  const effortLevels = meta.effort_levels || [];
+  if (!effortLevels.length) {
+    effortGroup.classList.add("hidden");
+    effortSel.disabled = true;
+    effortSel.innerHTML = '<option value="">Provider default</option>';
+  } else {
+    effortGroup.classList.remove("hidden");
+    effortSel.disabled = false;
+    effortSel.innerHTML = effortLevels.map((e) =>
+      `<option value="${e.value}">${esc(e.label)}</option>`
+    ).join("");
+    effortSel.value = meta.default_effort || "";
+  }
 }
 
 $("#challenge-agent").addEventListener("change", () => {
   updateModelOptions();
   const agent = $("#challenge-agent").value;
-  $("#challenge-autonomous").checked = agent === "copilot" || agent === "both";
+  $("#challenge-autonomous").checked = getAgentAutonomousDefault(agent);
 });
 updateModelOptions();
 
@@ -308,9 +479,12 @@ $("#challenge-form").addEventListener("submit", async (e) => {
   fd.append("description", $("#challenge-desc").value);
   fd.append("flag_format", $("#challenge-flag").value);
   fd.append("agent", $("#challenge-agent").value);
-  fd.append("model", $("#challenge-model").value);
+  fd.append("model", $("#challenge-model").disabled ? "" : $("#challenge-model").value);
+  fd.append("effort", $("#challenge-effort").disabled ? "" : $("#challenge-effort").value);
   fd.append("autonomous", $("#challenge-autonomous").checked ? "true" : "false");
-  for (const file of fileInput.files) fd.append("files", file);
+  for (const upload of pendingChallengeUploads) {
+    fd.append("files", upload.file, upload.path);
+  }
 
   const res = await api("/api/challenges", { method: "POST", body: fd });
   if (res.ok) {
@@ -321,10 +495,13 @@ $("#challenge-form").addEventListener("submit", async (e) => {
     } else if (data.created) {
       openChallenge(data.created[0].id);
     }
+    return;
   }
+  const err = await res.json().catch(() => ({}));
+  showToast(err.error || "Failed to create challenge", "error");
 });
 
-// === Bulk Upload (3-phase: drop → preview → create) ===
+// === Bulk Upload ===
 const bulkOverlay = $("#bulk-overlay");
 const bulkFileInput = $("#bulk-file");
 const bulkDropZone = $("#bulk-drop-zone");
@@ -343,25 +520,54 @@ function resetBulkModal() {
   bulkFileInput.value = "";
   $("#bulk-file-name").innerHTML = "";
   $("#bulk-challenge-list").innerHTML = "";
+  const pausedCb = $("#bulk-paused");
+  if (pausedCb) pausedCb.checked = false;
   showBulkPhase("upload");
 }
 
 function updateBulkModels() {
   const agent = $("#bulk-agent").value;
-  const models = agent === "both"
-    ? [{ value: "opus", label: "Opus (default)" }]
-    : (agentModels[agent] || agentModels.claude);
+  const modelGroup = $("#bulk-model-group");
+  const effortGroup = $("#bulk-effort-group");
   const sel = $("#bulk-model");
-  sel.innerHTML = models.map((m) =>
+  const effortSel = $("#bulk-effort");
+  if (isParallelSelection(agent)) {
+    modelGroup.classList.add("hidden");
+    effortGroup.classList.add("hidden");
+    sel.disabled = true;
+    effortSel.disabled = true;
+    sel.innerHTML = '<option value="">Provider defaults</option>';
+    effortSel.innerHTML = '<option value="">Provider default</option>';
+    return;
+  }
+  modelGroup.classList.remove("hidden");
+  const meta = getAgentMeta(agent);
+  sel.disabled = false;
+  sel.innerHTML = (meta.models || []).map((m) =>
     `<option value="${m.value}">${esc(m.label)}</option>`
   ).join("");
+  sel.value = meta.default_model;
+
+  const effortLevels = meta.effort_levels || [];
+  if (!effortLevels.length) {
+    effortGroup.classList.add("hidden");
+    effortSel.disabled = true;
+    effortSel.innerHTML = '<option value="">Provider default</option>';
+  } else {
+    effortGroup.classList.remove("hidden");
+    effortSel.disabled = false;
+    effortSel.innerHTML = effortLevels.map((e) =>
+      `<option value="${e.value}">${esc(e.label)}</option>`
+    ).join("");
+    effortSel.value = meta.default_effort || "";
+  }
 }
 
 $("#btn-bulk-upload").addEventListener("click", () => {
   resetBulkModal();
   $("#bulk-agent").value = defaultAgent;
   updateBulkModels();
-  $("#bulk-autonomous").checked = defaultAgent === "copilot";
+  $("#bulk-autonomous").checked = getAgentAutonomousDefault(defaultAgent);
   $("#bulk-flag").value = defaultFlagFormat;
   bulkOverlay.classList.remove("hidden");
 });
@@ -378,16 +584,12 @@ function closeBulkModal() {
 $("#bulk-agent").addEventListener("change", () => {
   updateBulkModels();
   const agent = $("#bulk-agent").value;
-  $("#bulk-autonomous").checked = agent === "copilot" || agent === "both";
+  $("#bulk-autonomous").checked = getAgentAutonomousDefault(agent);
 });
 updateBulkModels();
 
-bulkDropZone.addEventListener("dragover", (e) => {
-  e.preventDefault(); bulkDropZone.classList.add("dragover");
-});
-bulkDropZone.addEventListener("dragleave", () =>
-  bulkDropZone.classList.remove("dragover")
-);
+bulkDropZone.addEventListener("dragover", (e) => { e.preventDefault(); bulkDropZone.classList.add("dragover"); });
+bulkDropZone.addEventListener("dragleave", () => bulkDropZone.classList.remove("dragover"));
 bulkDropZone.addEventListener("drop", (e) => {
   e.preventDefault(); bulkDropZone.classList.remove("dragover");
   if (e.dataTransfer.files.length) triggerBulkPreview(e.dataTransfer.files[0]);
@@ -402,7 +604,10 @@ async function triggerBulkPreview(file) {
 
   const fd = new FormData();
   fd.append("zipfile", file);
-  const res = await api("/api/challenges/bulk-preview", { method: "POST", body: fd });
+  const res = await api(
+    "/api/challenges/bulk-preview",
+    { method: "POST", body: fd },
+  );
   if (!res || !res.ok) {
     showBulkPhase("upload");
     const err = res ? await res.json().catch(() => ({})) : {};
@@ -412,16 +617,16 @@ async function triggerBulkPreview(file) {
 
   const data = await res.json();
   bulkPreviewToken = data.preview_token;
-  bulkPreviewChallenges = data.challenges;
-  renderBulkPreview(data.challenges);
+  bulkPreviewChallenges = data.challenges || [];
+  renderBulkPreview(bulkPreviewChallenges);
   showBulkPhase("preview");
 }
 
-function renderBulkPreview(chals) {
+function renderBulkPreview(challengesPreview) {
   const list = $("#bulk-challenge-list");
-  list.innerHTML = chals.map((c, i) => {
+  list.innerHTML = challengesPreview.map((c, i) => {
     const fileLabel = c.files.length
-      ? `${c.files.length} file${c.files.length !== 1 ? "s" : ""}: ${c.files.slice(0, 4).map(esc).join(", ")}${c.files.length > 4 ? ", …" : ""}`
+      ? `${c.files.length} file${c.files.length !== 1 ? "s" : ""}: ${c.files.slice(0, 4).map(esc).join(", ")}${c.files.length > 4 ? ", ..." : ""}`
       : "No files";
     return `
     <div class="bulk-ch-row" data-index="${i}">
@@ -433,7 +638,7 @@ function renderBulkPreview(chals) {
       <div class="bulk-ch-row-body">
         <div class="bulk-ch-col">
           <div class="bulk-field-label">Description</div>
-          <textarea class="bulk-ch-desc" rows="2">${esc(c.description)}</textarea>
+          <textarea class="bulk-ch-desc" rows="2">${esc(c.description || "")}</textarea>
         </div>
         <div class="bulk-ch-col bulk-ch-col-flag">
           <div class="bulk-field-label">Flag Format</div>
@@ -445,26 +650,34 @@ function renderBulkPreview(chals) {
 
   list.querySelectorAll(".bulk-ch-enabled").forEach((cb) =>
     cb.addEventListener("change", () => {
-      cb.closest(".bulk-ch-row").classList.toggle("bulk-ch-disabled", !cb.checked);
+      cb.closest(".bulk-ch-row").classList.toggle(
+        "bulk-ch-disabled",
+        !cb.checked,
+      );
       updateBulkSubmitLabel();
     })
   );
+
   const pausedCb = $("#bulk-paused");
-  if (pausedCb) pausedCb.addEventListener("change", updateBulkSubmitLabel);
+  if (pausedCb) {
+    pausedCb.removeEventListener("change", updateBulkSubmitLabel);
+    pausedCb.addEventListener("change", updateBulkSubmitLabel);
+  }
   updateBulkSubmitLabel();
 }
 
 function updateBulkSubmitLabel() {
-  const n = document.querySelectorAll(".bulk-ch-enabled:checked").length;
+  const selected = document.querySelectorAll(".bulk-ch-enabled:checked").length;
   const btn = $("#btn-bulk-submit");
   if (!btn) return;
   const startNow = !$("#bulk-paused") || !$("#bulk-paused").checked;
   const verb = startNow ? "Create & Solve" : "Create";
-  btn.textContent = `${verb} ${n} Challenge${n !== 1 ? "s" : ""}`;
+  btn.textContent = `${verb} ${selected} Challenge${selected !== 1 ? "s" : ""}`;
 }
 
 $("#btn-bulk-submit").addEventListener("click", async () => {
   if (!bulkPreviewToken) return;
+
   const rows = document.querySelectorAll(".bulk-ch-row");
   const challengeConfigs = Array.from(rows).map((row, i) => ({
     folder_name: bulkPreviewChallenges[i].folder_name,
@@ -476,7 +689,7 @@ $("#btn-bulk-submit").addEventListener("click", async () => {
 
   const btn = $("#btn-bulk-submit");
   btn.disabled = true;
-  btn.textContent = "Creating…";
+  btn.textContent = "Creating...";
   try {
     const res = await api("/api/challenges/bulk", {
       method: "POST",
@@ -484,14 +697,15 @@ $("#btn-bulk-submit").addEventListener("click", async () => {
         preview_token: bulkPreviewToken,
         flag_format: $("#bulk-flag").value.trim(),
         agent: $("#bulk-agent").value,
-        model: $("#bulk-model").value,
+        model: $("#bulk-model").disabled ? "" : $("#bulk-model").value,
+        effort: $("#bulk-effort").disabled ? "" : $("#bulk-effort").value,
         autonomous: $("#bulk-autonomous").checked,
         paused: $("#bulk-paused") ? $("#bulk-paused").checked : false,
         challenges: challengeConfigs,
       }),
     });
-    if (!res || !res.ok) {
-      const err = res ? await res.json().catch(() => ({})) : {};
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
       showToast(err.error || "Upload failed", "error");
       return;
     }
@@ -524,11 +738,12 @@ async function openChallenge(id) {
   $("#detail-name").textContent = c.name;
   updateStatusBadge(c.status);
   const agentBadge = $("#detail-model");
-  if (c.agent === "copilot") {
-    agentBadge.textContent = "copilot";
-    agentBadge.className = "badge badge-agent-copilot";
+  const agentMeta = getAgentMeta(c.agent);
+  if (agentMeta.badge_mode === "label") {
+    agentBadge.textContent = agentMeta.label;
+    agentBadge.className = `badge badge-agent-${c.agent}`;
   } else {
-    agentBadge.textContent = c.model || "opus";
+    agentBadge.textContent = c.model || agentMeta.default_model;
     agentBadge.className = "badge badge-model";
   }
   $("#detail-desc").textContent = c.description || "No description";
@@ -1133,8 +1348,22 @@ function renderToolResults(event, feed) {
   for (const block of msg.content) {
     if (block.type !== "tool_result") continue;
 
-    const toolEl = pendingTools.get(block.tool_use_id);
-    if (!toolEl) continue;
+    let toolEl = pendingTools.get(block.tool_use_id);
+    if (!toolEl) {
+      // Some providers can emit a completed tool result without a prior
+      // tool-start event in the same stream. Render a synthetic tool card.
+      const synthetic = {
+        id: block.tool_use_id || `tool-${Date.now()}`,
+        name: block.name || "tool",
+        input: block.input || {},
+      };
+      toolEl = buildToolUse(synthetic);
+      feed.appendChild(toolEl);
+      addToolLogEntry(synthetic);
+      toolCount++;
+      updateCounters();
+      pendingTools.set(synthetic.id, toolEl);
+    }
 
     let output = "";
     // Agent tool results: extract content text
@@ -1613,77 +1842,43 @@ async function loadUsage() {
 }
 
 function renderUsage(data) {
-  // Claude
-  const claudeBadge = $("#claude-auth-badge");
-  const claudeInfo = $("#claude-auth-info");
-  const claudeStats = $("#claude-stats");
-  const claudeChallenge = $("#claude-challenge-stats");
-
-  if (data.claude) {
-    const auth = data.claude.auth;
-    claudeBadge.textContent = "connected";
-    claudeBadge.className = "badge badge-solved";
-    claudeInfo.innerHTML = [
-      `<span class="usage-kv"><span class="usage-k">Account</span> ${esc(auth.email || "")}</span>`,
-      `<span class="usage-kv"><span class="usage-k">Plan</span> ${esc(auth.subscriptionType || "")}</span>`,
-      `<span class="usage-kv"><span class="usage-k">Org</span> ${esc(auth.orgName || "")}</span>`,
-    ].join("");
-
-    const rows = [];
-    if (data.claude.totalSessions) rows.push(kvRow("Sessions", data.claude.totalSessions));
-    if (data.claude.totalMessages) rows.push(kvRow("Messages", data.claude.totalMessages.toLocaleString()));
-    if (data.claude.modelUsage) {
-      for (const [model, u] of Object.entries(data.claude.modelUsage)) {
-        const input = u.inputTokens + (u.cacheReadInputTokens || 0) + (u.cacheCreationInputTokens || 0);
-        const output = u.outputTokens || 0;
-        const total = input + output;
-        rows.push(kvRow(model, `${(total / 1000).toFixed(0)}k tokens (${(input / 1000).toFixed(0)}k in / ${(output / 1000).toFixed(0)}k out)`));
-      }
-    }
-    claudeStats.innerHTML = rows.join("");
-  } else {
-    claudeBadge.textContent = "not connected";
-    claudeBadge.className = "badge badge-pending";
-    claudeInfo.innerHTML = '<span class="text-muted">Run <code>claude auth login</code> to connect</span>';
-    claudeStats.innerHTML = "";
-  }
-
-  // Copilot
-  const copilotBadge = $("#copilot-auth-badge");
-  const copilotInfo = $("#copilot-auth-info");
-  const copilotStats = $("#copilot-stats");
-  const copilotChallenge = $("#copilot-challenge-stats");
-
-  if (data.copilot) {
-    const auth = data.copilot.auth;
-    copilotBadge.textContent = "connected";
-    copilotBadge.className = "badge badge-solved";
-    copilotInfo.innerHTML = [
-      `<span class="usage-kv"><span class="usage-k">User</span> ${esc(auth.login || "")}</span>`,
-      `<span class="usage-kv"><span class="usage-k">Host</span> ${esc(auth.host || "")}</span>`,
-      auth.model ? `<span class="usage-kv"><span class="usage-k">Model</span> ${esc(auth.model)}</span>` : "",
-    ].filter(Boolean).join("");
-
-    const rows = [];
-    if (data.copilot.totalSessions) rows.push(kvRow("Sessions", data.copilot.totalSessions));
-    copilotStats.innerHTML = rows.join("");
-  } else {
-    copilotBadge.textContent = "not connected";
-    copilotBadge.className = "badge badge-pending";
-    copilotInfo.innerHTML = '<span class="text-muted">Run <code>copilot login</code> to connect</span>';
-    copilotStats.innerHTML = "";
-  }
-
-  // Challenge stats per agent
+  const usage = data.agents || {};
   const cs = data.challenges || {};
-  claudeChallenge.innerHTML = renderChallengeStats(cs.claude);
-  copilotChallenge.innerHTML = renderChallengeStats(cs.copilot);
 
-  // Daily activity chart
+  agentCatalog.forEach((agent) => {
+    const badge = $(`#${agent.name}-auth-badge`);
+    const info = $(`#${agent.name}-auth-info`);
+    const stats = $(`#${agent.name}-stats`);
+    const challengeStats = $(`#${agent.name}-challenge-stats`);
+    const entry = usage[agent.name];
+
+    if (entry) {
+      badge.textContent = "connected";
+      badge.className = "badge badge-solved";
+      info.innerHTML = (entry.auth_rows || [])
+        .map((row) => kvRow(row.label, row.value))
+        .join("");
+      stats.innerHTML = (entry.stat_rows || [])
+        .map((row) => kvRow(row.label, row.value))
+        .join("");
+    } else {
+      badge.textContent = "not connected";
+      badge.className = "badge badge-pending";
+      info.innerHTML = `<span class="text-muted">Run <code>${esc(agent.auth_connect_command)}</code> to connect</span>`;
+      stats.innerHTML = "";
+    }
+
+    challengeStats.innerHTML = renderChallengeStats(cs[agent.name]);
+  });
+
   const dailySection = $("#usage-daily");
-  if (data.claude && data.claude.dailyActivity && data.claude.dailyActivity.length) {
+  const dailyEntry = agentCatalog
+    .map((agent) => ({ agent, usage: usage[agent.name] }))
+    .find(({ usage: entry }) => entry && entry.daily_activity && entry.daily_activity.length);
+  if (dailyEntry) {
     dailySection.classList.remove("hidden");
-    renderDailyChart(data.claude.dailyActivity);
+    $("#usage-daily-title").textContent = dailyEntry.usage.daily_activity_title || `Daily Activity (${dailyEntry.agent.label})`;
+    renderDailyChart(dailyEntry.usage.daily_activity);
   } else {
     dailySection.classList.add("hidden");
   }
@@ -1729,7 +1924,12 @@ function renderDailyChart(activity) {
       const data = await csrfRes.json();
       csrfToken = data.csrf_token;
     }
-    showView("dashboard"); loadChallenges(); loadDefaultAgent(); checkAgentAuth();
+    if (await loadAgentCatalog()) {
+      showView("dashboard");
+      loadChallenges();
+      loadDefaultAgent();
+      checkAgentAuth();
+    }
   } else {
     showView("login");
   }

@@ -27,8 +27,7 @@
       <div class="header-actions">
         <div class="default-agent-toggle">
           <span class="toggle-label">Agent:</span>
-          <button id="btn-agent-claude" class="agent-toggle-btn active" data-agent="claude">Claude</button>
-          <button id="btn-agent-copilot" class="agent-toggle-btn" data-agent="copilot">Copilot</button>
+          <div id="default-agent-buttons"></div>
         </div>
         <div class="default-flag-wrapper">
           <span class="toggle-label">Flag:</span>
@@ -59,33 +58,11 @@
       </div>
     </header>
     <div class="usage-page">
-      <div class="usage-grid">
-        <!-- Claude Card -->
-        <div class="usage-card" id="usage-claude">
-          <div class="usage-card-header">
-            <span class="usage-agent-name">Claude</span>
-            <span id="claude-auth-badge" class="badge badge-pending">not connected</span>
-          </div>
-          <div id="claude-auth-info" class="usage-auth-info"></div>
-          <div id="claude-stats" class="usage-stats"></div>
-          <div id="claude-challenge-stats" class="usage-challenge-stats"></div>
-        </div>
-
-        <!-- Copilot Card -->
-        <div class="usage-card" id="usage-copilot">
-          <div class="usage-card-header">
-            <span class="usage-agent-name">Copilot</span>
-            <span id="copilot-auth-badge" class="badge badge-pending">not connected</span>
-          </div>
-          <div id="copilot-auth-info" class="usage-auth-info"></div>
-          <div id="copilot-stats" class="usage-stats"></div>
-          <div id="copilot-challenge-stats" class="usage-challenge-stats"></div>
-        </div>
-      </div>
+      <div id="usage-grid" class="usage-grid"></div>
 
       <!-- Daily Activity Chart (Claude) -->
       <div id="usage-daily" class="usage-section hidden">
-        <h2 class="usage-section-title">Daily Activity (Claude)</h2>
+        <h2 id="usage-daily-title" class="usage-section-title">Daily Activity</h2>
         <div id="daily-chart" class="daily-chart"></div>
       </div>
     </div>
@@ -106,15 +83,15 @@
           </div>
           <div class="form-group flex-1">
             <label for="challenge-agent">Agent</label>
-            <select id="challenge-agent">
-              <option value="claude" selected>Claude</option>
-              <option value="copilot">Copilot</option>
-              <option value="both">Both (parallel)</option>
-            </select>
+            <select id="challenge-agent"></select>
           </div>
           <div class="form-group flex-1" id="model-group">
             <label for="challenge-model">Model</label>
             <select id="challenge-model"></select>
+          </div>
+          <div class="form-group flex-1 hidden" id="effort-group">
+            <label for="challenge-effort">Effort</label>
+            <select id="challenge-effort"></select>
           </div>
         </div>
 
@@ -140,7 +117,7 @@
         <div class="form-group">
           <label>Challenge Files</label>
           <div id="drop-zone" class="drop-zone">
-            <p>Drop files here or click to browse</p>
+            <p>Drop files or folders here, or click to browse files</p>
             <input type="file" id="challenge-files" multiple>
           </div>
           <div id="file-list" class="file-list"></div>
@@ -159,7 +136,7 @@
         <button id="bulk-close" class="btn-icon">&times;</button>
       </div>
 
-      <!-- Phase 1: zip drop zone -->
+      <!-- Phase 1: archive upload -->
       <div id="bulk-phase-upload">
         <p class="bulk-hint">Upload a <code>.zip</code> or <code>.7z</code> with one folder per challenge. Folder names become challenge names. Add a <code>description.txt</code> or <code>prompt.txt</code> inside each folder to set its description.</p>
         <div id="bulk-drop-zone" class="drop-zone">
@@ -169,11 +146,11 @@
         <div id="bulk-file-name" class="file-list"></div>
       </div>
 
-      <!-- Phase 2: analysing -->
+      <!-- Phase 2: analyzing -->
       <div id="bulk-phase-loading" class="hidden">
         <div class="bulk-loading">
           <div class="bulk-spinner"></div>
-          <p class="bulk-loading-text">Analysing zip&hellip;</p>
+          <p class="bulk-loading-text">Analyzing archive...</p>
         </div>
       </div>
 
@@ -183,15 +160,15 @@
           <div class="form-row">
             <div class="form-group flex-1">
               <label for="bulk-agent">Agent</label>
-              <select id="bulk-agent">
-                <option value="claude" selected>Claude</option>
-                <option value="copilot">Copilot</option>
-                <option value="both">Both (parallel)</option>
-              </select>
+              <select id="bulk-agent"></select>
             </div>
             <div class="form-group flex-1" id="bulk-model-group">
               <label for="bulk-model">Model</label>
               <select id="bulk-model"></select>
+            </div>
+            <div class="form-group flex-1 hidden" id="bulk-effort-group">
+              <label for="bulk-effort">Effort</label>
+              <select id="bulk-effort"></select>
             </div>
             <div class="form-group flex-1">
               <label for="bulk-flag">Default Flag Format</label>

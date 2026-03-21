@@ -66,35 +66,32 @@ ctfgrep reports which encoding the match was found in (PLAINTEXT, BASE64,
 HEX, or XOR with the key), along with the decoded content. This catches
 flags that are trivially obfuscated — a very common CTF technique.
 
-## Step 3: Identify Category and Load Domain Skills
+## Step 3: Identify Category and Load Skills Immediately
 
-After the quick search, identify the category and **immediately load the required
-skills before doing any analysis**. Do not skip this — the domain skills contain
-the full tool references and techniques. Reading the bullet points below is not
-a substitute for loading the skill.
+After the quick search, identify category and load the required skill files
+**before** deeper analysis. Do not continue with ad-hoc tooling first.
 
-| Category | Required skills to load NOW |
+Required mapping:
+
+| Category | Required skill(s) to load now |
 |---|---|
-| Memory forensics | `/memory-forensics` |
-| Disk forensics | `/disk-forensics` |
-| File / stego / docs | `/file-forensics` |
-| Network / pcap | `/network-forensics` |
-| Reverse engineering | `/headless-ida-analysis` then `/ctf-reverse` |
-| Binary exploitation / pwn | `/headless-ida-analysis` then `/ctf-pwn` |
-| Kernel exploitation | `/kernel-gef-debugging` |
-| Android / APK | `/apk-analysis` |
-| Cryptography | `/ctf-crypto` |
-| Web | `/ctf-web` |
-| Malware | `/ctf-malware` |
-| Misc | `/ctf-misc` |
-| OSINT | `/ctf-osint` |
+| Memory forensics | `memory-forensics` |
+| Disk forensics | `disk-forensics` |
+| File/stego/docs | `file-forensics` |
+| Network/pcap | `network-forensics` |
+| Reverse engineering | `rev` + `headless-ida-analysis`; add `libdebug-debugging` for runtime |
+| Binary exploitation | `pwn`; add `headless-ida-analysis` and `libdebug-debugging` as needed |
+| Kernel exploitation/debug | `kernel-gef-debugging` |
+| Android | `apk-analysis` |
+| Cryptography | `crypto` |
+| Web exploitation | `web` |
+| Mixed/unclear | `misc` |
 
-For dynamic analysis, also load one of:
-- `/libdebug-debugging` — scripted automation, exploit development, brute-forcing, pwntools integration (preferred for pwn and RE)
-- `/kernel-gef-debugging` — interactive GDB+GEF session, kernel debugging, remote targets
-
-**For any ELF binary: always use IDA (`/headless-ida-analysis`). Never use
-objdump, readelf, or nm as a substitute for disassembly or decompilation.**
+Rules:
+- If challenge spans multiple categories, load all relevant skills.
+- For ELF reversing or pwn, use IDA workflow (`headless-ida-analysis`) instead of
+  `objdump`/`readelf`-only analysis.
+- For kernel targets, prefer GDB MCP flow from `kernel-gef-debugging`.
 
 ## Step 4: Work Methodically
 

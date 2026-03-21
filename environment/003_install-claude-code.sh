@@ -27,7 +27,7 @@ done
 rm -rf /tmp/ljagiello-ctf-skills
 
 # Install GDB MCP server dependency
-python3 -m pip install 'mcp[cli]'
+python3 -m pip install --break-system-packages --ignore-installed 'mcp[cli]'
 
 # Register GDB MCP server in Claude Code settings
 python3 - <<'EOF'

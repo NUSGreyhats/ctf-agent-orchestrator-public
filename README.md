@@ -1,6 +1,6 @@
 # all-things-ai
 
-An AI-powered CTF solving workstation. Spins up a GCP VM pre-loaded with forensics, reverse engineering, and analysis tools, then lets you throw CTF challenges at Claude Code or GitHub Copilot CLI agents via a web UI or the terminal.
+An AI-powered CTF solving workstation. Spins up a Hetzner Cloud VM pre-loaded with forensics, reverse engineering, and analysis tools, then lets you throw CTF challenges at Claude Code, Codex, GitHub Copilot CLI, or OpenCode agents via a web UI or the terminal.
 
 ## Methodology
 
@@ -10,45 +10,61 @@ This project streamlines that setup. It provisions an isolated cloud VM with all
 
 Out of the box, agents are already effective. But we can do better by providing **skills** — structured workflows that suggest or enforce how the agent should approach different challenge types (forensics, reversing, crypto, etc.). Skills act as a feedback loop: when you notice the agent going down a rabbithole or missing an obvious technique, you encode that knowledge into a skill so it doesn't repeat the mistake. Over time, the skill library compounds and the solve rate improves.
 
-Skills live in the `skills/` directory and are loaded automatically by both Claude Code and Copilot CLI.
+Skills live in the `skills/` directory, and `/root/all-things-ai/skills/` on the VM is the source of truth for every provider. The web app prompt tells agents to read the relevant `SKILL.md` files directly from that repo path.
+
+Kernel debugging via the local GDB MCP server (`/root/all-things-ai/mcps/gdb_mcp.py`) is provisioned during environment setup and registered for Claude Code, Codex, and OpenCode.
 
 ## Supported Agents
 
 | Agent | Models | Subagent tabs | Steering |
 |-------|--------|---------------|----------|
-| Claude Code | Opus, Sonnet, Haiku | Yes | Yes |
-| GitHub Copilot CLI | Claude, GPT, Gemini | Yes | Yes |
+| Claude Code | Hardcoded list (`Provider default`, `opus`, `sonnet`, `haiku`) | Yes | Yes |
+| Codex | Discovered from local Codex cache/config (with effort selector) | Partial | Yes |
+| GitHub Copilot CLI | Hardcoded curated GPT/Claude/Gemini list | Yes | Yes |
+| OpenCode | Discovered from `opencode models` | Partial | Yes |
 
-Both agents can be run on the same challenge simultaneously using the **Both (parallel)** option.
+Multiple agents can be run on the same challenge simultaneously using the **All (parallel)** option.
+
+Effort selection in the web UI is currently exposed for Claude and Codex. Copilot and OpenCode run with provider-default reasoning settings in this wrapper.
 
 ## How to Use
 
 ### 1. Deploy the VM
 
+Two cloud providers are supported (Hetzner and DigitalOcean). Pick one and `cd` into its directory — see [infra/README.md](infra/README.md) for provider-specific details.
+
 ```bash
-cd infra
+cd infra/hetzner   # or infra/digitalocean
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Edit `terraform.tfvars` with your GCP project ID, then:
+Edit `terraform.tfvars` with your cloud provider settings, then:
 
 ```bash
-gcloud auth application-default login
 terraform init
 terraform plan
 terraform apply
 ```
 
-This creates a VM and runs all environment setup scripts (tool installation, agent CLIs, web app). Takes around 15 minutes on `e2-standard-4`.
+This creates a VM and runs all environment setup scripts (tool installation, agent CLIs, web app).
 
 When it finishes, Terraform prints the web app URL and password.
+
+You can retrieve the password again later with:
+
+```bash
+cd infra/hetzner
+terraform output -raw webapp_password
+```
+
+The password is also stored on the VM at `/root/.ctf-solver-password`.
 
 ### 2. Authenticate the Agents
 
 SSH into the VM:
 
 ```bash
-ssh root@$(cd infra && terraform output -raw external_ip)
+ssh root@$(cd infra/hetzner && terraform output -raw external_ip)
 ```
 
 Authenticate whichever agents you want to use:
@@ -57,8 +73,14 @@ Authenticate whichever agents you want to use:
 # Claude Code
 claude auth login
 
+# Codex
+codex login
+
 # GitHub Copilot CLI
 copilot login
+
+# OpenCode
+opencode auth login
 ```
 
 ### 3. Solve Challenges
@@ -80,9 +102,17 @@ Then SSH in and use an agent to solve them in parallel:
 cd /root/challenges
 yolo  # alias for: IS_SANDBOX=1 claude --dangerously-skip-permissions
 
+# Codex
+cd /root/challenges
+codex --dangerously-bypass-approvals-and-sandbox
+
 # Copilot CLI
 cd /root/challenges
 copilot --yolo
+
+# OpenCode
+cd /root/challenges
+opencode
 ```
 
 Tell the agent to spawn subagents to solve each challenge directory concurrently.
@@ -91,10 +121,10 @@ Tell the agent to spawn subagents to solve each challenge directory concurrently
 
 Open `https://<VM_IP>:8080` in your browser and log in with the password from the Terraform output (also stored in `/root/.ctf-solver-password`).
 
-1. Set your default agent (Claude or Copilot) using the toggle in the header
+1. Set your default agent using the toggle in the header
 2. Click **+ New Challenge**
 3. Fill in the name, description, flag format, and upload the challenge files
-4. Select the agent — Claude, Copilot, or **Both (parallel)** to race them side by side
+4. Select the agent or choose **All (parallel)** to race multiple providers side by side
 5. Click **Create & Solve** and watch the agent work in real time
 
 **Bulk upload:** Click **Bulk Upload** to upload a zip file containing multiple challenges (one folder per challenge, with an optional `description.txt` in each). All challenges start solving automatically.
@@ -104,14 +134,14 @@ The web UI streams agent output live, shows subagent tabs when agents spawn para
 ### Teardown
 
 ```bash
-cd infra
+cd infra/hetzner   # or infra/digitalocean
 terraform destroy
 ```
 
 ## Project Structure
 
 ```
-infra/          Terraform config for GCP VM provisioning
+infra/          Terraform configs (Hetzner Cloud and DigitalOcean)
 environment/    Setup scripts (tools, CLIs, dependencies)
 webapp/         Web app for challenge management and agent streaming
 skills/         Agent skills (CTF methodology, domain-specific)
