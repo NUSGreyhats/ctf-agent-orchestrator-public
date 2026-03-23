@@ -273,6 +273,9 @@ async function loadChallenges() {
       ? esc(agent.label)
       : esc(c.model || agent.default_model);
     const isPending = c.status === "pending";
+    const isShelved = c.status === "shelved";
+    const steerCount = c.manager && c.manager.steer_count ? c.manager.steer_count : 0;
+    const steerBadge = steerCount ? `<span class="card-steers">${steerCount} steer${steerCount !== 1 ? "s" : ""}</span>` : "";
     return `
     <div class="challenge-card status-${c.status}" data-id="${c.id}">
       <span class="badge badge-${c.status}">${c.status}</span>
@@ -281,7 +284,9 @@ async function loadChallenges() {
       <span class="card-agent card-agent-${c.agent || primaryAgentName()}">${agentLabel}</span>
       <span class="card-files">${c.files.length} file${c.files.length !== 1 ? "s" : ""}</span>
       <span class="card-duration">${formatDuration(c.duration_ms)}</span>
+      ${steerBadge}
       ${isPending ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Start</button>` : ""}
+      ${isShelved ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Un-shelve</button>` : ""}
       <button class="btn-card-delete" data-id="${c.id}" title="Delete">&times;</button>
     </div>`;
   }).join("");
@@ -303,10 +308,12 @@ async function loadChallenges() {
   list.querySelectorAll(".btn-card-start").forEach((btn) =>
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
-      const res = await api(
-        `/api/challenges/${btn.dataset.id}/solve`,
-        { method: "POST" },
-      );
+      const cid = btn.dataset.id;
+      const ch = challenges.find((x) => x.id === cid);
+      const endpoint = ch && ch.status === "shelved"
+        ? `/api/challenges/${cid}/unshelve`
+        : `/api/challenges/${cid}/solve`;
+      const res = await api(endpoint, { method: "POST" });
       if (res && res.ok) loadChallenges();
     })
   );
@@ -778,6 +785,7 @@ async function openChallenge(id) {
   switchTab("tab-info");
   connectWS(id);
   loadFiles();
+  loadManagerState();
 }
 
 function updateStatusBadge(status) {
@@ -788,6 +796,7 @@ function updateStatusBadge(status) {
 
 function updateButtons(status) {
   $("#btn-retry").classList.toggle("hidden", status !== "failed" && status !== "solved");
+  $("#btn-unshelve").classList.toggle("hidden", status !== "shelved");
   $("#btn-stop").classList.toggle("hidden", status !== "solving");
 }
 
@@ -818,6 +827,15 @@ $("#btn-retry").addEventListener("click", async () => {
 $("#btn-stop").addEventListener("click", async () => {
   if (!currentChallengeId) return;
   await api(`/api/challenges/${currentChallengeId}/stop`, { method: "POST" });
+});
+
+$("#btn-unshelve").addEventListener("click", async () => {
+  if (!currentChallengeId) return;
+  const res = await api(`/api/challenges/${currentChallengeId}/unshelve`, { method: "POST" });
+  if (res && res.ok) {
+    updateStatusBadge("solving"); updateButtons("solving"); startTimer();
+    $("#error-banner").classList.add("hidden");
+  }
 });
 
 $("#btn-delete").addEventListener("click", async () => {
@@ -1112,14 +1130,14 @@ function renderEvent(event) {
     updateStatusBadge(event.status);
     updateButtons(event.status);
     if (event.status === "solving") startTimer();
-    if (event.status === "solved" || event.status === "failed") {
+    if (event.status === "solved" || event.status === "failed" || event.status === "shelved") {
       stopTimer();
+      if (event.status === "shelved") loadManagerState();
       // Toast if not viewing this challenge
       if (views.detail.classList.contains("hidden")) {
-        showToast(
-          event.status === "solved" ? "Challenge solved!" : "Challenge failed",
-          event.status === "solved" ? "success" : "error"
-        );
+        const msgs = { solved: "Challenge solved!", failed: "Challenge failed", shelved: "Challenge shelved by manager" };
+        const types = { solved: "success", failed: "error", shelved: "info" };
+        showToast(msgs[event.status] || event.status, types[event.status] || "info");
       }
     }
     if (event.error) {
@@ -1726,6 +1744,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "1") switchTab("tab-info");
   if (e.key === "2") switchTab("tab-tools");
   if (e.key === "3") switchTab("tab-files");
+  if (e.key === "4") switchTab("tab-manager");
 });
 
 // === Scroll to Bottom Button ===
@@ -1910,6 +1929,85 @@ function renderDailyChart(activity) {
       <div class="daily-bar" style="height:${Math.max(pct, 4)}%"></div>
       <span class="daily-label">${label}</span>
       <span class="daily-value">${d.messageCount}</span>
+    </div>`;
+  }).join("");
+}
+
+// === Manager Settings Modal ===
+$("#btn-manager-settings").addEventListener("click", async () => {
+  const res = await api("/api/settings");
+  if (!res) return;
+  const s = await res.json();
+  $("#manager-enabled").checked = !!s.manager_enabled;
+  $("#manager-interval").value = s.manager_interval || 10;
+  $("#manager-min-time").value = s.manager_min_solve_time || 5;
+  $("#manager-model").value = s.manager_model || "sonnet";
+  $("#manager-overlay").classList.remove("hidden");
+});
+$("#manager-close").addEventListener("click", () => {
+  $("#manager-overlay").classList.add("hidden");
+});
+$("#manager-overlay").addEventListener("click", (e) => {
+  if (e.target === $("#manager-overlay")) $("#manager-overlay").classList.add("hidden");
+});
+$("#btn-manager-save").addEventListener("click", async () => {
+  const body = {
+    manager_enabled: $("#manager-enabled").checked,
+    manager_interval: parseInt($("#manager-interval").value) || 10,
+    manager_min_solve_time: parseInt($("#manager-min-time").value) || 5,
+    manager_model: $("#manager-model").value.trim() || "sonnet",
+  };
+  const res = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
+  if (res && res.ok) {
+    showToast("Manager settings saved", "success");
+    $("#manager-overlay").classList.add("hidden");
+  }
+});
+
+// === Manager Sidebar Tab ===
+async function loadManagerState() {
+  if (!currentChallengeId) return;
+  const res = await api(`/api/challenges/${currentChallengeId}/manager`);
+  if (!res) return;
+  const state = await res.json();
+  renderManagerTab(state);
+}
+
+function renderManagerTab(state) {
+  const steerCount = state.steer_count || 0;
+  const shelveReason = state.shelve_reason || "";
+  const history = state.review_history || [];
+
+  $("#manager-steer-count").textContent = steerCount
+    ? `Steered ${steerCount} time${steerCount !== 1 ? "s" : ""}`
+    : "No manager interventions yet";
+  const shelveEl = $("#manager-shelve-reason");
+  if (shelveReason) {
+    shelveEl.textContent = `Shelve reason: ${shelveReason}`;
+    shelveEl.classList.remove("hidden");
+  } else {
+    shelveEl.textContent = "";
+    shelveEl.classList.add("hidden");
+  }
+
+  const historyEl = $("#manager-history");
+  if (!history.length) {
+    historyEl.innerHTML = '<div class="text-muted">No reviews yet</div>';
+    return;
+  }
+  historyEl.innerHTML = history.slice().reverse().map((entry) => {
+    const verdictClass = entry.verdict === "STEER" ? "manager-verdict-steer"
+      : entry.verdict === "SHELVE" ? "manager-verdict-shelve"
+      : "manager-verdict-wait";
+    const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : "";
+    return `
+    <div class="manager-review-entry">
+      <div class="manager-review-header">
+        <span class="manager-verdict ${verdictClass}">${esc(entry.verdict)}</span>
+        <span class="manager-review-time">${esc(ts)}</span>
+      </div>
+      <div class="manager-review-reasoning">${esc(entry.reasoning || "")}</div>
+      ${entry.instructions ? `<div class="manager-review-instructions"><strong>Instructions:</strong> ${esc(entry.instructions)}</div>` : ""}
     </div>`;
   }).join("");
 }

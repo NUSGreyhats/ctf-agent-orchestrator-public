@@ -36,6 +36,7 @@
         <button id="btn-new-challenge" class="btn-primary">+ New Challenge</button>
         <button id="btn-bulk-upload" class="btn-ghost">Bulk Upload</button>
         <button id="btn-usage" class="btn-ghost">Usage</button>
+        <button id="btn-manager-settings" class="btn-ghost">Manager</button>
         <button id="btn-theme-toggle" class="btn-ghost">Light</button>
         <button id="btn-logout" class="btn-ghost">Logout</button>
       </div>
@@ -207,6 +208,7 @@
       </div>
       <div class="header-actions">
         <button id="btn-retry" class="btn-primary hidden">Retry</button>
+        <button id="btn-unshelve" class="btn-primary hidden">Un-shelve</button>
         <button id="btn-stop" class="btn-danger hidden">Stop</button>
         <button id="btn-sidebar-toggle" class="btn-ghost btn-sidebar-toggle">Panel</button>
         <button id="btn-delete" class="btn-ghost btn-ghost-danger">Delete</button>
@@ -246,6 +248,7 @@
           <button class="sidebar-tab active" data-tab="tab-info">Info</button>
           <button class="sidebar-tab" data-tab="tab-tools">Tools <span id="tool-counter" class="tab-badge">0</span></button>
           <button class="sidebar-tab" data-tab="tab-files">Files <span id="file-counter" class="tab-badge">0</span></button>
+          <button class="sidebar-tab" data-tab="tab-manager">Manager</button>
         </div>
 
         <!-- Info tab -->
@@ -275,6 +278,17 @@
             <div id="files-tree"></div>
           </div>
         </div>
+
+        <!-- Manager tab -->
+        <div id="tab-manager" class="sidebar-content">
+          <div class="panel-body panel-body-scroll">
+            <div id="manager-info" class="manager-info">
+              <div id="manager-steer-count" class="info-meta"></div>
+              <div id="manager-shelve-reason" class="info-meta"></div>
+            </div>
+            <div id="manager-history" class="manager-history"></div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -289,6 +303,38 @@
         <button id="file-viewer-close" class="btn-icon">&times;</button>
       </div>
       <div id="file-viewer-content" class="file-viewer-body"></div>
+    </div>
+  </div>
+
+  <!-- Manager Settings Modal -->
+  <div id="manager-overlay" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Manager Agent</h2>
+        <button id="manager-close" class="btn-icon">&times;</button>
+      </div>
+      <p class="manager-hint">The manager agent periodically reviews solving challenges and steers or shelves them if stuck.</p>
+      <div class="form-group form-group-inline">
+        <label class="checkbox-label">
+          <input type="checkbox" id="manager-enabled">
+          <span>Enable manager agent</span>
+        </label>
+      </div>
+      <div class="form-row">
+        <div class="form-group flex-1">
+          <label for="manager-interval">Review interval (min)</label>
+          <input type="number" id="manager-interval" min="1" max="120" value="10">
+        </div>
+        <div class="form-group flex-1">
+          <label for="manager-min-time">Min solve time (min)</label>
+          <input type="number" id="manager-min-time" min="1" max="60" value="5">
+        </div>
+        <div class="form-group flex-1">
+          <label for="manager-model">Model</label>
+          <input type="text" id="manager-model" value="sonnet" placeholder="e.g. sonnet">
+        </div>
+      </div>
+      <button id="btn-manager-save" class="btn-primary btn-full">Save</button>
     </div>
   </div>
 

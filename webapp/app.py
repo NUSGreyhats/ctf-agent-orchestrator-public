@@ -175,6 +175,25 @@ def provider_state_for_metadata(challenge: dict) -> dict:
     return state
 
 
+def _default_manager_state() -> dict:
+    return {
+        "steer_count": 0,
+        "last_summary": "",
+        "shelve_reason": None,
+        "review_history": [],
+    }
+
+
+def manager_state_for_metadata(challenge: dict) -> dict:
+    state = challenge.get("manager", {})
+    return {
+        "steer_count": state.get("steer_count", 0),
+        "last_summary": state.get("last_summary", ""),
+        "shelve_reason": state.get("shelve_reason"),
+        "review_history": state.get("review_history", []),
+    }
+
+
 def challenge_state_dir(challenge_id: str) -> Path:
     return STATE_ROOT_DIR / challenge_id
 
@@ -240,6 +259,10 @@ def load_settings() -> dict:
         "default_agent": DEFAULT_AGENT,
         "default_flag_format": "",
         "theme": "dark",
+        "manager_enabled": False,
+        "manager_interval": 10,
+        "manager_model": "sonnet",
+        "manager_min_solve_time": 5,
     }
     if SETTINGS_FILE.exists():
         try:
@@ -276,6 +299,7 @@ def save_metadata(challenge: dict) -> None:
         "error": challenge["error"],
         "duration_ms": challenge.get("duration_ms"),
         "provider_state": provider_state_for_metadata(challenge),
+        "manager": manager_state_for_metadata(challenge),
     }
     meta_path = ensure_state_dir(challenge["id"]) / METADATA_FILE
     meta_path.write_text(json.dumps(meta, indent=2))
@@ -417,6 +441,10 @@ def load_challenges_from_disk() -> None:
             "_opencode_session_id": provider_state.get(
                 "opencode_session_id"
             ),
+            "manager": {
+                **_default_manager_state(),
+                **meta.get("manager", {}),
+            },
         }
 
 
@@ -516,6 +544,7 @@ async def list_challenges(request: Request) -> JSONResponse:
             "created_at": c["created_at"],
             "files": c["files"],
             "duration_ms": c.get("duration_ms"),
+            "manager": manager_state_for_metadata(c),
         })
     result.sort(key=lambda x: x["created_at"], reverse=True)
     return JSONResponse(result)
@@ -586,6 +615,7 @@ async def create_challenge(request: Request) -> JSONResponse:
             "error": None,
             "duration_ms": None,
             "solve_start": None,
+            "manager": _default_manager_state(),
         }
         challenges[challenge_id] = challenge
         save_metadata(challenge)
@@ -842,6 +872,7 @@ async def bulk_upload(request: Request) -> JSONResponse:
                     "error": None,
                     "duration_ms": None,
                     "solve_start": None,
+                    "manager": _default_manager_state(),
                 }
                 challenges[challenge_id] = challenge
                 save_metadata(challenge)
@@ -903,6 +934,44 @@ async def stop_challenge(request: Request) -> JSONResponse:
         append_output_event(challenge_id, stop_event)
         await broadcast(challenge_id, stop_event)
     return JSONResponse({"status": challenge["status"]})
+
+
+async def unshelve_challenge(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if challenge["status"] != "shelved":
+        return JSONResponse(
+            {"error": "challenge is not shelved"}, status_code=409
+        )
+
+    manager_state = challenge.get("manager", {})
+    last_summary = manager_state.get("last_summary", "")
+    continue_msg = last_summary if last_summary else None
+
+    unshelve_event = {
+        "type": "system",
+        "message": "Challenge un-shelved by user.",
+    }
+    challenge["output_lines"].append(unshelve_event)
+    append_output_event(challenge_id, unshelve_event)
+    await broadcast(challenge_id, unshelve_event)
+
+    challenge["status"] = "solving"
+    challenge["error"] = None
+    manager_state["shelve_reason"] = None
+    challenge["manager"] = manager_state
+    save_metadata(challenge)
+    challenge["task"] = asyncio.create_task(
+        run_agent(challenge_id, continue_msg=continue_msg)
+    )
+    return JSONResponse({"status": "solving"})
 
 
 async def steer_challenge(request: Request) -> JSONResponse:
@@ -1103,6 +1172,415 @@ async def broadcast(challenge_id: str, data: dict):
             dead.append(ws)
     for ws in dead:
         challenge["ws_clients"].discard(ws)
+
+
+# ---------------------------------------------------------------------------
+# Manager agent
+# ---------------------------------------------------------------------------
+
+def _tool_summary_for_log(name: str, input_data: dict) -> str:
+    """One-line summary of a tool call for the manager log."""
+    if name == "Bash":
+        return input_data.get("description") or str(
+            input_data.get("command", "")
+        )[:120]
+    if name in ("Read", "Write", "Edit"):
+        return input_data.get("file_path", "")
+    if name == "Grep":
+        return f'"{input_data.get("pattern", "")}" {input_data.get("path", "")}'
+    if name == "Glob":
+        return input_data.get("pattern", "")
+    if name == "Agent":
+        return input_data.get("description", "")[:80]
+    return json.dumps(input_data, default=str)[:100]
+
+
+def truncate_log_for_manager(
+    output_lines: list[dict], max_chars: int = 32_000
+) -> str:
+    """Extract decision-relevant content from the output log."""
+    entries: list[str] = []
+    for event in output_lines:
+        etype = event.get("type", "")
+        if etype == "assistant":
+            msg = event.get("message", {})
+            for block in msg.get("content", []):
+                btype = block.get("type", "")
+                if btype == "text" and block.get("text"):
+                    entries.append(f"ASSISTANT: {block['text']}")
+                elif btype == "thinking" and block.get("thinking"):
+                    thinking = block["thinking"]
+                    if len(thinking) > 300:
+                        thinking = thinking[:300] + "..."
+                    entries.append(f"THINKING: {thinking}")
+                elif btype == "tool_use":
+                    summary = _tool_summary_for_log(
+                        block.get("name", "tool"),
+                        block.get("input", {}),
+                    )
+                    entries.append(
+                        f"TOOL CALL: {block.get('name', 'tool')} — "
+                        f"{summary}"
+                    )
+        elif etype == "user":
+            msg = event.get("message", {})
+            for block in msg.get("content", []):
+                if block.get("type") != "tool_result":
+                    continue
+                is_error = block.get("is_error", False)
+                status = "ERROR" if is_error else "OK"
+                content = block.get("content", "")
+                if isinstance(content, str) and len(content) > 400:
+                    content = content[:200] + "\n...\n" + content[-200:]
+                entries.append(f"TOOL RESULT ({status}): {content}")
+        elif etype == "error":
+            entries.append(f"ERROR: {event.get('message', '')}")
+        elif etype == "user_steer":
+            entries.append(
+                f"USER STEERED: {event.get('message', '')}"
+            )
+        elif etype == "system":
+            msg = event.get("message", "")
+            if msg:
+                entries.append(f"SYSTEM: {msg}")
+
+    text = "\n".join(entries)
+    if len(text) > max_chars:
+        # Keep the most recent context
+        text = "... (earlier output truncated) ...\n" + text[
+            -max_chars:
+        ]
+    return text
+
+
+def build_manager_prompt(challenge: dict, truncated_log: str) -> str:
+    """Build the prompt sent to the manager LLM."""
+    manager_state = challenge.get("manager", {})
+    elapsed_ms = challenge.get("duration_ms") or 0
+    if challenge.get("solve_start"):
+        elapsed_ms = int(
+            (_time.monotonic() - challenge["solve_start"]) * 1000
+        )
+    elapsed_min = elapsed_ms / 60_000
+
+    parts = [
+        "You are a CTF challenge manager agent. Your job is to review "
+        "the progress of a solver agent working on a CTF challenge and "
+        "decide what to do next.",
+        "",
+        f"Challenge: {challenge['name']}",
+    ]
+    if challenge.get("description"):
+        parts.append(f"Description: {challenge['description']}")
+    if challenge.get("flag_format"):
+        parts.append(f"Flag format: {challenge['flag_format']}")
+    parts.extend([
+        f"Agent: {challenge.get('agent', 'unknown')}",
+        f"Elapsed time: {elapsed_min:.1f} minutes",
+        f"Times steered so far: {manager_state.get('steer_count', 0)}",
+    ])
+
+    last_summary = manager_state.get("last_summary", "")
+    if last_summary:
+        parts.extend([
+            "",
+            "Summary from your previous review:",
+            last_summary,
+        ])
+
+    review_history = manager_state.get("review_history", [])
+    if review_history:
+        parts.append("")
+        parts.append("Previous manager decisions:")
+        for entry in review_history[-5:]:
+            parts.append(
+                f"  [{entry.get('verdict', '?')}] "
+                f"{entry.get('reasoning', '')[:200]}"
+            )
+
+    parts.extend([
+        "",
+        "=== SOLVER OUTPUT LOG ===",
+        truncated_log,
+        "=== END OF LOG ===",
+        "",
+        "Analyze the solver's progress and decide ONE of:",
+        "",
+        "STEER — The solver is stuck, going in circles, or missing an "
+        "obvious approach. Provide specific, actionable instructions "
+        "for what to try next. Be concrete: name specific tools, "
+        "techniques, or commands.",
+        "",
+        "SHELVE — The solver has exhausted reasonable approaches and "
+        "further steering is unlikely to yield progress. The challenge "
+        "may require capabilities the agent doesn't have, or the "
+        "approach is fundamentally wrong. Do NOT shelve simply because "
+        "of a high steer count — if each steer is making incremental "
+        "progress, continue steering.",
+        "",
+        "WAIT — The solver is making reasonable progress and doesn't "
+        "need intervention right now.",
+        "",
+        "Consider:",
+        "- What has the solver tried? What hasn't it tried?",
+        "- Is it repeating the same failed approaches?",
+        "- Are there unconventional techniques worth suggesting?",
+        "- Is partial progress being made with each attempt?",
+        "",
+        "Respond in EXACTLY this format:",
+        "VERDICT: STEER | SHELVE | WAIT",
+        "REASONING: <your analysis>",
+        "INSTRUCTIONS: <specific instructions for the solver, "
+        "only if VERDICT is STEER>",
+        "SUMMARY: <concise summary of what has been tried and current "
+        "state, for future reference>",
+    ])
+    return "\n".join(parts)
+
+
+def parse_manager_response(text: str) -> dict:
+    """Parse the structured response from the manager LLM."""
+    result = {
+        "verdict": "WAIT",
+        "reasoning": "",
+        "instructions": "",
+        "summary": "",
+    }
+    current_field = None
+    current_lines: list[str] = []
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        matched = False
+        for prefix, field in (
+            ("VERDICT:", "verdict"),
+            ("REASONING:", "reasoning"),
+            ("INSTRUCTIONS:", "instructions"),
+            ("SUMMARY:", "summary"),
+        ):
+            if stripped.upper().startswith(prefix):
+                if current_field:
+                    result[current_field] = "\n".join(
+                        current_lines
+                    ).strip()
+                current_field = field
+                current_lines = [stripped[len(prefix):].strip()]
+                matched = True
+                break
+        if not matched and current_field:
+            current_lines.append(line)
+
+    if current_field:
+        result[current_field] = "\n".join(current_lines).strip()
+
+    verdict = result["verdict"].upper().strip()
+    if verdict not in ("STEER", "SHELVE", "WAIT"):
+        if "STEER" in verdict:
+            verdict = "STEER"
+        elif "SHELVE" in verdict:
+            verdict = "SHELVE"
+        else:
+            verdict = "WAIT"
+    result["verdict"] = verdict
+    return result
+
+
+def _manager_should_review(challenge: dict, settings: dict) -> bool:
+    """Check if a challenge is due for manager review."""
+    if challenge["status"] != "solving":
+        return False
+    solve_start = challenge.get("solve_start")
+    if not solve_start:
+        return False
+
+    now = _time.monotonic()
+    elapsed = now - solve_start
+    min_time = settings.get("manager_min_solve_time", 5) * 60
+    if elapsed < min_time:
+        return False
+
+    manager_state = challenge.get("manager", {})
+    last_review = manager_state.get("last_review_at")
+    interval = settings.get("manager_interval", 10) * 60
+    if last_review and (now - last_review) < interval:
+        return False
+
+    return True
+
+
+async def run_manager_review(challenge_id: str) -> None:
+    """Run a single manager review for a challenge."""
+    challenge = challenges.get(challenge_id)
+    if not challenge or challenge["status"] != "solving":
+        return
+
+    settings = load_settings()
+    manager_state = challenge.setdefault("manager", _default_manager_state())
+    manager_state["last_review_at"] = _time.monotonic()
+
+    review_event = {
+        "type": "system",
+        "subtype": "manager_review",
+        "message": "Manager agent reviewing progress...",
+    }
+    challenge["output_lines"].append(review_event)
+    append_output_event(challenge_id, review_event)
+    await broadcast(challenge_id, review_event)
+
+    truncated_log = truncate_log_for_manager(challenge["output_lines"])
+    prompt = build_manager_prompt(challenge, truncated_log)
+
+    model = settings.get("manager_model", "sonnet")
+    cmd = [
+        "claude",
+        "-p",
+        "--dangerously-skip-permissions",
+        "--output-format",
+        "text",
+        "--model",
+        model,
+        prompt,
+    ]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(CHALLENGES_DIR / challenge_id),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "IS_SANDBOX": "1"},
+        )
+        stdout_data, stderr_data = await asyncio.wait_for(
+            proc.communicate(), timeout=120
+        )
+        response_text = stdout_data.decode("utf-8", errors="replace")
+    except asyncio.TimeoutError:
+        response_text = ""
+    except Exception:
+        response_text = ""
+
+    if not response_text.strip():
+        err_event = {
+            "type": "system",
+            "subtype": "manager_review",
+            "message": "Manager review failed — no response.",
+        }
+        challenge["output_lines"].append(err_event)
+        append_output_event(challenge_id, err_event)
+        await broadcast(challenge_id, err_event)
+        return
+
+    parsed = parse_manager_response(response_text)
+    verdict = parsed["verdict"]
+
+    review_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "verdict": verdict,
+        "reasoning": parsed["reasoning"],
+        "instructions": parsed["instructions"],
+        "summary": parsed["summary"],
+    }
+    manager_state["review_history"].append(review_entry)
+    if parsed["summary"]:
+        manager_state["last_summary"] = parsed["summary"]
+
+    if verdict == "STEER" and parsed["instructions"]:
+        manager_state["steer_count"] = (
+            manager_state.get("steer_count", 0) + 1
+        )
+        save_metadata(challenge)
+
+        steer_msg = (
+            f"[Manager Agent — Steer #{manager_state['steer_count']}]\n"
+            f"Reasoning: {parsed['reasoning']}\n\n"
+            f"{parsed['instructions']}"
+        )
+
+        # Stop current process
+        proc = challenge.get("process")
+        if proc and proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+
+        steer_event = {
+            "type": "system",
+            "subtype": "manager_steer",
+            "message": steer_msg,
+        }
+        challenge["output_lines"].append(steer_event)
+        append_output_event(challenge_id, steer_event)
+        await broadcast(challenge_id, steer_event)
+
+        challenge["status"] = "solving"
+        challenge["error"] = None
+        challenge["task"] = asyncio.create_task(
+            run_agent(
+                challenge_id, continue_msg=parsed["instructions"]
+            )
+        )
+
+    elif verdict == "SHELVE":
+        manager_state["shelve_reason"] = parsed["reasoning"]
+        save_metadata(challenge)
+
+        # Stop current process
+        proc = challenge.get("process")
+        if proc and proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+
+        challenge["status"] = "shelved"
+        challenge["error"] = None
+        save_metadata(challenge)
+
+        shelve_event = {
+            "type": "system",
+            "subtype": "manager_shelve",
+            "message": (
+                f"[Manager Agent — Shelved]\n"
+                f"Reasoning: {parsed['reasoning']}"
+            ),
+        }
+        challenge["output_lines"].append(shelve_event)
+        append_output_event(challenge_id, shelve_event)
+        await broadcast(challenge_id, shelve_event)
+        await broadcast(challenge_id, {
+            "type": "status",
+            "status": "shelved",
+        })
+
+    else:
+        # WAIT
+        save_metadata(challenge)
+        wait_event = {
+            "type": "system",
+            "subtype": "manager_wait",
+            "message": (
+                f"[Manager Agent — No intervention needed]\n"
+                f"Reasoning: {parsed['reasoning']}"
+            ),
+        }
+        challenge["output_lines"].append(wait_event)
+        append_output_event(challenge_id, wait_event)
+        await broadcast(challenge_id, wait_event)
+
+
+async def manager_loop() -> None:
+    """Background loop that periodically reviews solving challenges."""
+    while True:
+        await asyncio.sleep(60)
+        settings = load_settings()
+        if not settings.get("manager_enabled"):
+            continue
+        for challenge_id, challenge in list(challenges.items()):
+            if _manager_should_review(challenge, settings):
+                asyncio.create_task(run_manager_review(challenge_id))
 
 
 def build_prompt(challenge: dict) -> str:
@@ -1490,6 +1968,18 @@ async def update_settings(request: Request) -> JSONResponse:
         theme = str(body["theme"])
         if theme in ("dark", "light"):
             settings["theme"] = theme
+    if "manager_enabled" in body:
+        settings["manager_enabled"] = bool(body["manager_enabled"])
+    if "manager_interval" in body:
+        val = int(body["manager_interval"])
+        if 1 <= val <= 120:
+            settings["manager_interval"] = val
+    if "manager_model" in body:
+        settings["manager_model"] = str(body["manager_model"])
+    if "manager_min_solve_time" in body:
+        val = int(body["manager_min_solve_time"])
+        if 1 <= val <= 60:
+            settings["manager_min_solve_time"] = val
     save_settings(settings)
     return JSONResponse(settings)
 
@@ -1535,7 +2025,27 @@ async def get_usage(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+_manager_task: asyncio.Task | None = None
+
+
+async def on_startup():
+    global _manager_task
+    _manager_task = asyncio.create_task(manager_loop())
+
+
+async def get_manager_state(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    challenge_id = request.path_params["id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(manager_state_for_metadata(challenge))
+
+
 async def on_shutdown():
+    if _manager_task and not _manager_task.done():
+        _manager_task.cancel()
     for challenge in challenges.values():
         proc = challenge.get("process")
         if proc and proc.returncode is None:
@@ -1565,6 +2075,8 @@ routes = [
     Route("/api/challenges/{id}/solve", solve_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/stop", stop_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/steer", steer_challenge, methods=["POST"]),
+    Route("/api/challenges/{id}/unshelve", unshelve_challenge, methods=["POST"]),
+    Route("/api/challenges/{id}/manager", get_manager_state, methods=["GET"]),
     Route("/api/challenges/{id}", delete_challenge, methods=["DELETE"]),
     Route("/api/challenges/{id}/files", list_files, methods=["GET"]),
     Route("/api/challenges/{id}/files/{path:path}", get_file, methods=["GET"]),
@@ -1579,6 +2091,7 @@ routes = [
 
 app = Starlette(
     routes=routes,
+    on_startup=[on_startup],
     on_shutdown=[on_shutdown],
     middleware=[
         Middleware(
