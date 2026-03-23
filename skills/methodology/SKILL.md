@@ -67,40 +67,31 @@ file before doing any deeper analysis**. Do not continue with ad-hoc tooling.
 
 All skill paths are relative to `/root/all-things-ai/skills/`.
 
-### Category skills — read ONE based on triage
+### Category skills
 
-| Triage signal | Read this skill |
+| Skill | Category |
 |---|---|
-| `.raw`, `.mem`, `.vmem`, `.dmp`, `.lime` memory dump | `categories/forensics/memory/SKILL.md` |
-| `.dd`, `.img`, `.iso`, `.E01`, `.vmdk`, `.qcow2` disk image | `categories/forensics/disk/SKILL.md` |
-| Image with suspected stego, corrupted file, PDF, Office doc | `categories/forensics/file/SKILL.md` |
-| `.pcap`, `.pcapng` network capture | `categories/forensics/network/SKILL.md` |
-| ELF/PE/Mach-O binary to understand logic | `categories/rev/SKILL.md` |
-| ELF/PE binary to exploit (buffer overflow, ROP, heap) | `categories/pwn/SKILL.md` |
-| `.sage`, ciphertext, RSA/AES parameters, modular arithmetic | `categories/crypto/SKILL.md` |
-| HTTP service, web app, API endpoint | `categories/web/SKILL.md` |
-| `.apk` Android package | Read `tools/apk-analysis/SKILL.md` directly |
-| Kernel image, `.ko` module, qemu launch script | Read `tools/kernel-gef/SKILL.md` directly |
-| Mixed, unclear, puzzle, encoding chain | `categories/misc/SKILL.md` |
+| `categories/crypto/SKILL.md` | Cryptography |
+| `categories/forensics/disk/SKILL.md` | Disk forensics |
+| `categories/forensics/file/SKILL.md` | File forensics and steganography |
+| `categories/forensics/memory/SKILL.md` | Memory forensics |
+| `categories/forensics/network/SKILL.md` | Network forensics |
+| `categories/misc/SKILL.md` | Mixed or unclear |
+| `categories/pwn/SKILL.md` | Binary exploitation |
+| `categories/rev/SKILL.md` | Reverse engineering |
+| `categories/web/SKILL.md` | Web exploitation |
 
-### Tool skills — read whenever you need the tool
+### Tool skills
 
-| Tool skill | What it covers |
+| Skill | Tool |
 |---|---|
-| `tools/ida/SKILL.md` | Static analysis of ELF/PE binaries with IDA Pro |
-| `tools/libdebug/SKILL.md` | Dynamic/runtime analysis of Linux ELF binaries |
+| `tools/apk-analysis/SKILL.md` | Android APK analysis |
+| `tools/ida/SKILL.md` | IDA Pro static analysis |
 | `tools/kernel-gef/SKILL.md` | Kernel debugging with GDB + GEF |
-| `tools/apk-analysis/SKILL.md` | Android APK reverse engineering |
+| `tools/libdebug/SKILL.md` | Scriptable Linux ELF debugging |
 
-Read a tool skill as soon as you recognize you need it — you don't have to
-wait for a category skill to tell you.
-
-### Rules
-
-- If the challenge spans multiple categories, read all relevant skills.
-- For ELF reversing or pwn, prefer IDA (`tools/ida/SKILL.md`) over
-  `objdump`/`readelf`-only analysis.
-- For kernel targets, prefer GDB MCP flow from `tools/kernel-gef/SKILL.md`.
+Read any skill — category or tool — as soon as you determine it's relevant.
+If the challenge spans multiple categories, read all that apply.
 
 ## Step 4: Work Methodically
 
