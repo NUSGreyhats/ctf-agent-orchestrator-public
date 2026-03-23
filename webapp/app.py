@@ -1096,7 +1096,7 @@ async def broadcast(challenge_id: str, data: dict):
     if not challenge:
         return
     dead = []
-    for ws in challenge["ws_clients"]:
+    for ws in list(challenge["ws_clients"]):
         try:
             await ws.send_json(data)
         except Exception:
