@@ -149,6 +149,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .badge-failed { background: var(--red-dim); color: var(--red); }
 .badge-shelved { background: var(--orange-dim); color: var(--orange); }
 .badge-model { background: var(--purple-dim); color: var(--purple); font-family: var(--mono); }
+.badge-mode { background: var(--bg-input); color: var(--text-muted); font-family: var(--mono); font-size: 0.6rem; }
 .badge-agent-codex { background: var(--green-dim); color: var(--green); font-family: var(--mono); }
 .badge-agent-copilot { background: var(--accent-dim); color: var(--accent); font-family: var(--mono); }
 .badge-agent-opencode { background: var(--orange-dim); color: var(--orange); font-family: var(--mono); }
@@ -159,7 +160,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 /* === Challenge List === */
 #challenges-list { padding: 0.75rem; display: flex; flex-direction: column; gap: 0.35rem; }
 .challenge-card {
-  display: grid; grid-template-columns: auto 1fr 2fr auto auto auto auto auto;
+  display: grid; grid-template-columns: auto 1fr 2fr auto auto auto auto auto auto;
   align-items: center; gap: 0.75rem; padding: 0.65rem 0.75rem;
   background: var(--bg-card); border: 1px solid var(--border);
   border-radius: 8px; cursor: pointer; transition: all 0.15s;
@@ -169,6 +170,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .challenge-card.status-solved { border-left: 3px solid var(--green); }
 .challenge-card.status-failed { border-left: 3px solid var(--red); }
 .challenge-card.status-pending { border-left: 3px solid var(--text-dim); }
+.challenge-card.status-shelved { border-left: 3px solid var(--orange); }
 .card-name { font-weight: 600; font-size: 0.85rem; }
 .card-desc { color: var(--text-muted); font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-agent { font-family: var(--mono); font-size: 0.65rem; color: var(--purple); }
@@ -225,7 +227,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   color: var(--text-muted); margin-bottom: 0.2rem;
   text-transform: uppercase; letter-spacing: 0.04em;
 }
-.modal input[type="text"], .modal textarea, .modal select {
+.modal input[type="text"], .modal input[type="number"], .modal textarea, .modal select {
   width: 100%; padding: 0.5rem 0.65rem; background: var(--bg-input);
   border: 1px solid var(--border); border-radius: 8px; color: var(--text);
   font-size: 0.85rem; font-family: var(--sans); outline: none;
@@ -248,6 +250,16 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .checkbox-hint { font-size: 0.7rem; color: var(--text-dim); }
 .modal select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M3 5l3 3 3-3'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.6rem center; padding-right: 1.8rem; }
 
+/* Agent checkbox group for parallel mode */
+.agent-checkbox-group {
+  display: flex; flex-wrap: wrap; gap: 0.5rem 1rem;
+  padding: 0.5rem 0.65rem; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.agent-checkbox-item {
+  font-size: 0.8rem; font-weight: 500; white-space: nowrap;
+}
+
 /* Drop zone */
 .drop-zone {
   border: 1.5px dashed var(--border); border-radius: 8px; padding: 1.2rem;
@@ -261,7 +273,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .bulk-hint { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 1rem; line-height: 1.5; }
 .bulk-hint code { background: var(--bg-input); padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.75rem; }
 
-/* Bulk upload – wide modal */
+/* Bulk upload - wide modal */
 .modal-wide { max-width: 760px; }
 
 /* Loading phase */
@@ -520,6 +532,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 .dot-running { background: var(--yellow); animation: pulse 1s infinite; }
 .dot-done { background: var(--green); }
+.dot-solved { background: var(--green); }
 .dot-error { background: var(--red); }
 
 /* System/error messages */
@@ -548,9 +561,16 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 
 /* === Files Tree === */
 #files-toolbar {
-  padding: 0.3rem 0; display: flex; justify-content: flex-end;
+  padding: 0.3rem 0; display: flex; justify-content: flex-end; gap: 0.4rem; align-items: center;
 }
 .btn-sm { font-size: 0.65rem; padding: 0.2rem 0.5rem; }
+
+#files-run-select {
+  font-size: 0.65rem; padding: 0.15rem 0.4rem;
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); font-family: var(--sans);
+  outline: none; cursor: pointer;
+}
 
 .file-item {
   display: flex; align-items: center; gap: 0.35rem;
@@ -631,46 +651,53 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .syn-number { color: #79c0ff; }
 .syn-function { color: #d2a8ff; }
 
-/* === Agent Tabs === */
+/* === Run Tabs (replaces Agent Tabs) === */
 .agent-tabs {
   display: flex; gap: 0; overflow-x: auto; flex-shrink: 0;
   border-bottom: 1px solid var(--border); background: var(--bg-card);
   scrollbar-width: thin;
 }
-.agent-tab {
+.run-tab {
   display: flex; align-items: center; gap: 0.3rem;
   padding: 0.35rem 0.75rem; font-size: 0.7rem; font-weight: 600;
   color: var(--text-muted); background: none; border: none;
   border-bottom: 2px solid transparent; cursor: pointer;
   white-space: nowrap; transition: all 0.15s;
 }
-.agent-tab:hover { color: var(--text); background: var(--bg-hover); }
-.agent-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-.agent-tab-dot {
+.run-tab:hover { color: var(--text); background: var(--bg-hover); }
+.run-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.run-tab-dot {
   width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
 }
 
 .agent-feeds { flex: 1; overflow: hidden; position: relative; min-height: 0; }
-.agent-feed {
+.run-feed {
   display: none; overflow-y: auto;
   position: absolute; inset: 0; padding: 0.5rem;
 }
-.agent-feed.active { display: block; }
+.run-feed.active { display: block; }
 
 /* === Steer Bar === */
 .steer-bar {
   display: flex; gap: 0.4rem; padding: 0.4rem 0.5rem;
   border-top: 1px solid var(--border); background: var(--bg-card);
-  flex-shrink: 0;
+  flex-shrink: 0; align-items: center;
 }
-.steer-bar input {
+.steer-bar input[type="text"] {
   flex: 1; padding: 0.4rem 0.65rem; background: var(--bg-input);
   border: 1px solid var(--border); border-radius: 8px;
   color: var(--text); font-size: 0.8rem; font-family: var(--sans);
   outline: none; transition: border-color 0.15s;
 }
-.steer-bar input:focus { border-color: var(--accent); }
-.steer-bar input::placeholder { color: var(--text-dim); }
+.steer-bar input[type="text"]:focus { border-color: var(--accent); }
+.steer-bar input[type="text"]::placeholder { color: var(--text-dim); }
+
+#steer-run-select {
+  font-size: 0.65rem; padding: 0.3rem 0.5rem;
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); font-family: var(--sans);
+  outline: none; cursor: pointer; max-width: 120px;
+}
 
 .user-steer-msg {
   padding: 0.35rem 0.65rem; margin: 0.25rem 0;
@@ -982,3 +1009,47 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   padding-top: 0.3rem; margin-top: 0.3rem;
 }
 .status-shelved { border-left-color: var(--orange); }
+
+/* Mode badges */
+.badge-mode {
+  background: var(--bg-input); color: var(--text-muted);
+  font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.03em;
+}
+.card-mode {
+  font-family: var(--mono); font-size: 0.6rem; color: var(--text-dim);
+  text-transform: uppercase;
+}
+.card-runs {
+  font-family: var(--mono); font-size: 0.6rem; color: var(--text-muted);
+}
+
+/* Agent checkbox group (parallel mode selector) */
+.agent-checkbox-group {
+  display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.35rem 0;
+}
+.agent-checkbox-item {
+  display: flex; align-items: center; gap: 0.3rem;
+  font-size: 0.8rem; color: var(--text);
+}
+.agent-checkbox-item input[type="checkbox"] {
+  margin: 0;
+}
+
+/* Run tabs (reuse agent-tab base styles) */
+.run-tab { /* inherits from .agent-tab via shared class */ }
+.run-feed { /* inherits from .agent-feed via shared class */ }
+
+/* Dot colors for run tab status */
+.dot-solved { background: var(--green); }
+
+/* Steer and file run selectors */
+#steer-run-select, #files-run-select {
+  background: var(--bg-input); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  font-size: 0.75rem; padding: 0.2rem 0.4rem;
+  font-family: var(--mono);
+}
+
+/* Manager verdict: handoff and summarize */
+.manager-verdict-handoff { background: var(--accent-dim); color: var(--accent); }
+.manager-verdict-summarize { background: var(--purple-dim); color: var(--purple); }

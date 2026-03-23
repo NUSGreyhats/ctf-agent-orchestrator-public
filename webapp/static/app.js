@@ -1,6 +1,12 @@
-/* CTF Solver - Frontend */
+/* CTF Solver - Frontend
+ *
+ * Supports 4 challenge modes: single, single_managed, parallel, parallel_managed.
+ * Each challenge has one or more "runs" — per-agent WebSocket streams.
+ */
+
 const $ = (sel) => document.querySelector(sel);
-let ws = null;
+
+// === Global State ===
 let currentChallengeId = null;
 let autoScroll = true;
 let toolCount = 0;
@@ -11,15 +17,20 @@ let currentTheme = "dark";
 let csrfToken = null;
 let agentCatalog = [];
 let agentByName = new Map();
-let parallelOption = null;
 
 const pendingTools = new Map();
 
-// Subagent tracking: Map<toolUseId, {feed, tab, desc, status}>
-const agentFeeds = new Map();
-let activeAgentTab = "main";
+// Run tracking — one WS per run, one feed per run
+let currentRuns = [];               // run objects for current challenge
+let activeRunId = null;             // which run tab is active
+let currentChallengeMode = "single";
+let wsConnections = new Map();      // run_id -> WebSocket
 
-// Timer & cost tracking
+// Per-run counters (future use for per-tab badges)
+let runToolCounts = new Map();
+let runStepCounts = new Map();
+
+// Timer & cost
 let timerStart = null;
 let timerInterval = null;
 let totalCostUsd = 0;
@@ -27,6 +38,7 @@ let totalTokens = 0;
 let challengeFlagFormat = "";
 let lastThinkingEl = null;
 
+// === Views ===
 const views = {
   login: $("#login-view"),
   dashboard: $("#dashboard-view"),
@@ -39,6 +51,7 @@ function showView(name) {
   views[name].classList.remove("hidden");
 }
 
+// === Agent Helpers ===
 function primaryAgentName() {
   return agentCatalog[0]?.name || "claude";
 }
@@ -57,17 +70,19 @@ function getAgentMeta(name) {
   };
 }
 
-function isParallelSelection(name) {
-  return Boolean(parallelOption && name === parallelOption.value);
+function isParallelMode(mode) {
+  return mode === "parallel" || mode === "parallel_managed";
 }
 
-function getAgentAutonomousDefault(name) {
-  if (isParallelSelection(name)) {
-    return agentCatalog.some((agent) => agent.autonomous_default);
-  }
-  return Boolean(getAgentMeta(name).autonomous_default);
+function isManagedMode(mode) {
+  return mode === "single_managed" || mode === "parallel_managed";
 }
 
+function getAgentAutonomousDefault(agentName) {
+  return Boolean(getAgentMeta(agentName).autonomous_default);
+}
+
+// === Agent UI Renderers ===
 function renderAgentToggleButtons() {
   const container = $("#default-agent-buttons");
   container.innerHTML = agentCatalog.map((agent) => `
@@ -85,16 +100,24 @@ function renderAgentToggleButtons() {
   });
 }
 
-function renderAgentSelect(selectEl, includeParallel = false) {
-  const options = agentCatalog.map((agent) =>
+function renderAgentSelect(selectEl) {
+  selectEl.innerHTML = agentCatalog.map((agent) =>
     `<option value="${esc(agent.name)}">${esc(agent.label)}</option>`
-  );
-  if (includeParallel && parallelOption) {
-    options.push(
-      `<option value="${esc(parallelOption.value)}">${esc(parallelOption.label)}</option>`
-    );
-  }
-  selectEl.innerHTML = options.join("");
+  ).join("");
+}
+
+function renderAgentCheckboxes(container) {
+  container.innerHTML = agentCatalog.map((agent) => `
+    <label class="checkbox-label agent-checkbox-item">
+      <input type="checkbox" value="${esc(agent.name)}" checked>
+      <span>${esc(agent.label)}</span>
+    </label>
+  `).join("");
+}
+
+function getCheckedAgents(container) {
+  return Array.from(container.querySelectorAll("input[type=checkbox]:checked"))
+    .map((cb) => cb.value);
 }
 
 function renderUsageShell() {
@@ -117,18 +140,19 @@ async function loadAgentCatalog() {
   const data = await res.json();
   agentCatalog = data.agents || [];
   agentByName = new Map(agentCatalog.map((agent) => [agent.name, agent]));
-  parallelOption = data.parallel_option || null;
   renderAgentToggleButtons();
-  renderAgentSelect($("#challenge-agent"), true);
-  renderAgentSelect($("#bulk-agent"), true);
+  renderAgentSelect($("#challenge-agent"));
+  renderAgentSelect($("#bulk-agent"));
+  renderAgentCheckboxes($("#parallel-agent-checkboxes"));
+  renderAgentCheckboxes($("#bulk-parallel-checkboxes"));
   renderUsageShell();
   return true;
 }
 
+// === API ===
 async function api(path, opts = {}) {
   const headers = { ...opts.headers };
   if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
-  // Only set Content-Type for non-FormData bodies
   if (!(opts.body instanceof FormData)) {
     headers["Content-Type"] = headers["Content-Type"] || "application/json";
   }
@@ -166,7 +190,7 @@ $("#btn-logout").addEventListener("click", async () => {
   showView("login");
 });
 
-// === Default Agent Toggle ===
+// === Default Agent / Settings ===
 async function loadDefaultAgent() {
   const res = await api("/api/settings");
   if (!res) return;
@@ -268,22 +292,44 @@ async function loadChallenges() {
   }
   empty.classList.add("hidden");
   list.innerHTML = challenges.map((c) => {
-    const agent = getAgentMeta(c.agent);
-    const agentLabel = agent.badge_mode === "label"
-      ? esc(agent.label)
-      : esc(c.model || agent.default_model);
+    const mode = c.mode || "single";
+    const runs = c.runs || [];
+    const runCount = runs.length;
     const isPending = c.status === "pending";
     const isShelved = c.status === "shelved";
     const steerCount = c.manager && c.manager.steer_count ? c.manager.steer_count : 0;
     const steerBadge = steerCount ? `<span class="card-steers">${steerCount} steer${steerCount !== 1 ? "s" : ""}</span>` : "";
+
+    // Mode badge
+    const modeLabel = mode.replace(/_/g, " ");
+    const modeBadge = `<span class="badge badge-mode">${esc(modeLabel)}</span>`;
+
+    // Agent / model display
+    let agentDisplay = "";
+    if (isParallelMode(mode)) {
+      agentDisplay = `<span class="card-agent">${runCount} run${runCount !== 1 ? "s" : ""}</span>`;
+    } else if (runs.length > 0) {
+      const run = runs[0];
+      const agentMeta = getAgentMeta(run.agent);
+      if (agentMeta.badge_mode === "label") {
+        agentDisplay = `<span class="card-agent card-agent-${run.agent}">${esc(agentMeta.label)}</span>`;
+      } else {
+        agentDisplay = `<span class="card-agent">${esc(run.model || agentMeta.default_model)}</span>`;
+      }
+    }
+
+    // Total duration across all runs
+    const totalDuration = runs.reduce((sum, r) => sum + (r.duration_ms || 0), 0);
+
     return `
     <div class="challenge-card status-${c.status}" data-id="${c.id}">
       <span class="badge badge-${c.status}">${c.status}</span>
       <span class="card-name">${esc(c.name)}</span>
       <span class="card-desc">${esc(c.description || "")}</span>
-      <span class="card-agent card-agent-${c.agent || primaryAgentName()}">${agentLabel}</span>
+      ${modeBadge}
+      ${agentDisplay}
       <span class="card-files">${c.files.length} file${c.files.length !== 1 ? "s" : ""}</span>
-      <span class="card-duration">${formatDuration(c.duration_ms)}</span>
+      <span class="card-duration">${formatDuration(totalDuration)}</span>
       ${steerBadge}
       ${isPending ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Start</button>` : ""}
       ${isShelved ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Un-shelve</button>` : ""}
@@ -319,13 +365,72 @@ async function loadChallenges() {
   );
 }
 
+// Auto-refresh dashboard every 5s
 setInterval(() => {
   if (!views.dashboard.classList.contains("hidden")) loadChallenges();
 }, 5000);
 
-// === Modal ===
+// === Mode Selector Logic (New Challenge) ===
+function updateModeOptions() {
+  const mode = $("#challenge-mode").value;
+  const singleGroup = $("#single-agent-group");
+  const parallelGroup = $("#parallel-agent-group");
+
+  if (isParallelMode(mode)) {
+    singleGroup.classList.add("hidden");
+    parallelGroup.classList.remove("hidden");
+  } else {
+    singleGroup.classList.remove("hidden");
+    parallelGroup.classList.add("hidden");
+    updateModelOptions();
+  }
+}
+
+function updateModelOptions() {
+  const agent = $("#challenge-agent").value;
+  const modelGroup = $("#model-group");
+  const effortGroup = $("#effort-group");
+  const sel = $("#challenge-model");
+  const effortSel = $("#challenge-effort");
+
+  modelGroup.classList.remove("hidden");
+  const meta = getAgentMeta(agent);
+  sel.disabled = false;
+  sel.innerHTML = (meta.models || []).map((m) =>
+    `<option value="${m.value}">${esc(m.label)}</option>`
+  ).join("");
+  sel.value = meta.default_model;
+
+  const effortLevels = meta.effort_levels || [];
+  if (!effortLevels.length) {
+    effortGroup.classList.add("hidden");
+    effortSel.disabled = true;
+    effortSel.innerHTML = '<option value="">Provider default</option>';
+  } else {
+    effortGroup.classList.remove("hidden");
+    effortSel.disabled = false;
+    effortSel.innerHTML = effortLevels.map((e) =>
+      `<option value="${e.value}">${esc(e.label)}</option>`
+    ).join("");
+    effortSel.value = meta.default_effort || "";
+  }
+}
+
+$("#challenge-mode").addEventListener("change", () => {
+  updateModeOptions();
+});
+
+$("#challenge-agent").addEventListener("change", () => {
+  updateModelOptions();
+  const agent = $("#challenge-agent").value;
+  $("#challenge-autonomous").checked = getAgentAutonomousDefault(agent);
+});
+
+// === New Challenge Modal ===
 $("#btn-new-challenge").addEventListener("click", () => {
+  $("#challenge-mode").value = "single";
   $("#challenge-agent").value = defaultAgent;
+  updateModeOptions();
   updateModelOptions();
   $("#challenge-autonomous").checked = getAgentAutonomousDefault(defaultAgent);
   $("#challenge-flag").value = defaultFlagFormat;
@@ -342,12 +447,15 @@ function closeModal() {
   $("#challenge-form").reset();
   pendingChallengeUploads = [];
   $("#file-list").innerHTML = "";
+  updateModeOptions();
   updateModelOptions();
 }
 
+// === File Upload / Drop Zone ===
 const dropZone = $("#drop-zone");
 const fileInput = $("#challenge-files");
 let pendingChallengeUploads = [];
+
 dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
 dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
 dropZone.addEventListener("drop", async (e) => {
@@ -434,61 +542,29 @@ function updateFileList() {
     .map(({ path }) => `<span>${esc(path)}</span>`).join("");
 }
 
-function updateModelOptions() {
-  const agent = $("#challenge-agent").value;
-  const modelGroup = $("#model-group");
-  const effortGroup = $("#effort-group");
-  const sel = $("#challenge-model");
-  const effortSel = $("#challenge-effort");
-  if (isParallelSelection(agent)) {
-    modelGroup.classList.add("hidden");
-    effortGroup.classList.add("hidden");
-    sel.disabled = true;
-    effortSel.disabled = true;
-    sel.innerHTML = '<option value="">Provider defaults</option>';
-    effortSel.innerHTML = '<option value="">Provider default</option>';
-    return;
-  }
-  modelGroup.classList.remove("hidden");
-  const meta = getAgentMeta(agent);
-  sel.disabled = false;
-  sel.innerHTML = (meta.models || []).map((m) =>
-    `<option value="${m.value}">${esc(m.label)}</option>`
-  ).join("");
-  sel.value = meta.default_model;
+// Initial mode/model setup
+updateModeOptions();
 
-  const effortLevels = meta.effort_levels || [];
-  if (!effortLevels.length) {
-    effortGroup.classList.add("hidden");
-    effortSel.disabled = true;
-    effortSel.innerHTML = '<option value="">Provider default</option>';
-  } else {
-    effortGroup.classList.remove("hidden");
-    effortSel.disabled = false;
-    effortSel.innerHTML = effortLevels.map((e) =>
-      `<option value="${e.value}">${esc(e.label)}</option>`
-    ).join("");
-    effortSel.value = meta.default_effort || "";
-  }
-}
-
-$("#challenge-agent").addEventListener("change", () => {
-  updateModelOptions();
-  const agent = $("#challenge-agent").value;
-  $("#challenge-autonomous").checked = getAgentAutonomousDefault(agent);
-});
-updateModelOptions();
-
+// === Create Challenge Submit ===
 $("#challenge-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const mode = $("#challenge-mode").value;
   const fd = new FormData();
   fd.append("name", $("#challenge-name").value);
   fd.append("description", $("#challenge-desc").value);
   fd.append("flag_format", $("#challenge-flag").value);
-  fd.append("agent", $("#challenge-agent").value);
-  fd.append("model", $("#challenge-model").disabled ? "" : $("#challenge-model").value);
-  fd.append("effort", $("#challenge-effort").disabled ? "" : $("#challenge-effort").value);
+  fd.append("mode", mode);
   fd.append("autonomous", $("#challenge-autonomous").checked ? "true" : "false");
+
+  if (isParallelMode(mode)) {
+    const agents = getCheckedAgents($("#parallel-agent-checkboxes"));
+    fd.append("agents", agents.join(","));
+  } else {
+    fd.append("agents", $("#challenge-agent").value);
+    fd.append("model", $("#challenge-model").disabled ? "" : $("#challenge-model").value);
+    fd.append("effort", $("#challenge-effort").disabled ? "" : $("#challenge-effort").value);
+  }
+
   for (const upload of pendingChallengeUploads) {
     fd.append("files", upload.file, upload.path);
   }
@@ -532,21 +608,28 @@ function resetBulkModal() {
   showBulkPhase("upload");
 }
 
+function updateBulkModeOptions() {
+  const mode = $("#bulk-mode").value;
+  const singleGroup = $("#bulk-single-group");
+  const parallelGroup = $("#bulk-parallel-group");
+
+  if (isParallelMode(mode)) {
+    singleGroup.classList.add("hidden");
+    parallelGroup.classList.remove("hidden");
+  } else {
+    singleGroup.classList.remove("hidden");
+    parallelGroup.classList.add("hidden");
+    updateBulkModels();
+  }
+}
+
 function updateBulkModels() {
   const agent = $("#bulk-agent").value;
   const modelGroup = $("#bulk-model-group");
   const effortGroup = $("#bulk-effort-group");
   const sel = $("#bulk-model");
   const effortSel = $("#bulk-effort");
-  if (isParallelSelection(agent)) {
-    modelGroup.classList.add("hidden");
-    effortGroup.classList.add("hidden");
-    sel.disabled = true;
-    effortSel.disabled = true;
-    sel.innerHTML = '<option value="">Provider defaults</option>';
-    effortSel.innerHTML = '<option value="">Provider default</option>';
-    return;
-  }
+
   modelGroup.classList.remove("hidden");
   const meta = getAgentMeta(agent);
   sel.disabled = false;
@@ -572,7 +655,9 @@ function updateBulkModels() {
 
 $("#btn-bulk-upload").addEventListener("click", () => {
   resetBulkModal();
+  $("#bulk-mode").value = "single";
   $("#bulk-agent").value = defaultAgent;
+  updateBulkModeOptions();
   updateBulkModels();
   $("#bulk-autonomous").checked = getAgentAutonomousDefault(defaultAgent);
   $("#bulk-flag").value = defaultFlagFormat;
@@ -588,12 +673,12 @@ function closeBulkModal() {
   resetBulkModal();
 }
 
+$("#bulk-mode").addEventListener("change", updateBulkModeOptions);
 $("#bulk-agent").addEventListener("change", () => {
   updateBulkModels();
   const agent = $("#bulk-agent").value;
   $("#bulk-autonomous").checked = getAgentAutonomousDefault(agent);
 });
-updateBulkModels();
 
 bulkDropZone.addEventListener("dragover", (e) => { e.preventDefault(); bulkDropZone.classList.add("dragover"); });
 bulkDropZone.addEventListener("dragleave", () => bulkDropZone.classList.remove("dragover"));
@@ -685,6 +770,7 @@ function updateBulkSubmitLabel() {
 $("#btn-bulk-submit").addEventListener("click", async () => {
   if (!bulkPreviewToken) return;
 
+  const mode = $("#bulk-mode").value;
   const rows = document.querySelectorAll(".bulk-ch-row");
   const challengeConfigs = Array.from(rows).map((row, i) => ({
     folder_name: bulkPreviewChallenges[i].folder_name,
@@ -693,6 +779,17 @@ $("#btn-bulk-submit").addEventListener("click", async () => {
     flag_format: row.querySelector(".bulk-ch-flag").value.trim(),
     enabled: row.querySelector(".bulk-ch-enabled").checked,
   }));
+
+  let agents, model, effort;
+  if (isParallelMode(mode)) {
+    agents = getCheckedAgents($("#bulk-parallel-checkboxes")).join(",");
+    model = "";
+    effort = "";
+  } else {
+    agents = $("#bulk-agent").value;
+    model = $("#bulk-model").disabled ? "" : $("#bulk-model").value;
+    effort = $("#bulk-effort").disabled ? "" : $("#bulk-effort").value;
+  }
 
   const btn = $("#btn-bulk-submit");
   btn.disabled = true;
@@ -703,9 +800,10 @@ $("#btn-bulk-submit").addEventListener("click", async () => {
       body: JSON.stringify({
         preview_token: bulkPreviewToken,
         flag_format: $("#bulk-flag").value.trim(),
-        agent: $("#bulk-agent").value,
-        model: $("#bulk-model").disabled ? "" : $("#bulk-model").value,
-        effort: $("#bulk-effort").disabled ? "" : $("#bulk-effort").value,
+        mode: mode,
+        agents: agents,
+        model: model,
+        effort: effort,
         autonomous: $("#bulk-autonomous").checked,
         paused: $("#bulk-paused") ? $("#bulk-paused").checked : false,
         challenges: challengeConfigs,
@@ -733,6 +831,8 @@ async function openChallenge(id) {
   stepCount = 0;
   pendingTools.clear();
   foundFlags.clear();
+  runToolCounts.clear();
+  runStepCounts.clear();
   $("#flags-list").innerHTML = "";
   $("#flags-section").classList.add("hidden");
 
@@ -742,17 +842,35 @@ async function openChallenge(id) {
   const c = challenges.find((x) => x.id === id);
   if (!c) return;
 
+  currentChallengeMode = c.mode || "single";
+  currentRuns = c.runs || [];
+
   $("#detail-name").textContent = c.name;
   updateStatusBadge(c.status);
-  const agentBadge = $("#detail-model");
-  const agentMeta = getAgentMeta(c.agent);
-  if (agentMeta.badge_mode === "label") {
-    agentBadge.textContent = agentMeta.label;
-    agentBadge.className = `badge badge-agent-${c.agent}`;
+
+  // Mode badge
+  const modeBadge = $("#detail-mode");
+  modeBadge.textContent = currentChallengeMode.replace(/_/g, " ");
+
+  // Model badge: show first run's model for single modes, run count for parallel
+  const modelBadge = $("#detail-model");
+  if (isParallelMode(currentChallengeMode)) {
+    modelBadge.textContent = `${currentRuns.length} runs`;
+    modelBadge.className = "badge badge-model";
+  } else if (currentRuns.length > 0) {
+    const run = currentRuns[0];
+    const agentMeta = getAgentMeta(run.agent);
+    if (agentMeta.badge_mode === "label") {
+      modelBadge.textContent = agentMeta.label;
+      modelBadge.className = `badge badge-agent-${run.agent}`;
+    } else {
+      modelBadge.textContent = run.model || agentMeta.default_model;
+      modelBadge.className = "badge badge-model";
+    }
   } else {
-    agentBadge.textContent = c.model || agentMeta.default_model;
-    agentBadge.className = "badge badge-model";
+    modelBadge.textContent = "";
   }
+
   $("#detail-desc").textContent = c.description || "No description";
   $("#detail-flag-format").textContent = c.flag_format ? `Flag: ${c.flag_format}` : "";
   $("#detail-files").textContent = c.files.length ? `Files: ${c.files.join(", ")}` : "No files";
@@ -766,7 +884,7 @@ async function openChallenge(id) {
     errorBanner.classList.add("hidden");
   }
 
-  // Reset timer/cost
+  // Reset timer / cost
   totalCostUsd = 0;
   totalTokens = 0;
   lastThinkingEl = null;
@@ -777,15 +895,17 @@ async function openChallenge(id) {
   else stopTimer();
 
   updateButtons(c.status);
-  resetAgentTabs();
+  initRunTabs(currentRuns);
   $("#tool-log").innerHTML = "";
   $("#files-tree").innerHTML = "";
   updateCounters();
   showView("detail");
   switchTab("tab-info");
-  connectWS(id);
+  connectAllRuns(id, currentRuns);
   loadFiles();
   loadManagerState();
+  updateSteerRunSelect();
+  updateFilesRunSelect();
 }
 
 function updateStatusBadge(status) {
@@ -795,7 +915,8 @@ function updateStatusBadge(status) {
 }
 
 function updateButtons(status) {
-  $("#btn-retry").classList.toggle("hidden", status !== "failed" && status !== "solved");
+  $("#btn-retry").classList.toggle("hidden", status !== "failed");
+  $("#btn-unsolve").classList.toggle("hidden", status !== "solved");
   $("#btn-unshelve").classList.toggle("hidden", status !== "shelved");
   $("#btn-stop").classList.toggle("hidden", status !== "solving");
 }
@@ -805,23 +926,36 @@ function updateCounters() {
   $("#tool-counter").textContent = toolCount;
 }
 
+// === Detail Buttons ===
 $("#btn-back").addEventListener("click", () => {
-  disconnectWS(); stopTimer(); currentChallengeId = null;
+  disconnectAllWS(); stopTimer(); currentChallengeId = null;
   showView("dashboard"); loadChallenges();
 });
 
 $("#btn-retry").addEventListener("click", async () => {
   if (!currentChallengeId) return;
-  resetAgentTabs();
+  initRunTabs([]);
   $("#tool-log").innerHTML = "";
   $("#error-banner").classList.add("hidden");
   foundFlags.clear(); $("#flags-list").innerHTML = ""; $("#flags-section").classList.add("hidden");
   toolCount = 0; stepCount = 0; totalCostUsd = 0; totalTokens = 0;
   lastThinkingEl = null;
   $("#detail-cost").textContent = "";
-  pendingTools.clear(); updateCounters();
+  pendingTools.clear(); runToolCounts.clear(); runStepCounts.clear(); updateCounters();
   const res = await api(`/api/challenges/${currentChallengeId}/solve`, { method: "POST" });
-  if (res && res.ok) { updateStatusBadge("solving"); updateButtons("solving"); startTimer(); }
+  if (res && res.ok) {
+    updateStatusBadge("solving"); updateButtons("solving"); startTimer();
+    // Re-open to pick up new runs from the server
+    openChallenge(currentChallengeId);
+  }
+});
+
+$("#btn-unsolve").addEventListener("click", async () => {
+  if (!currentChallengeId) return;
+  const res = await api(`/api/challenges/${currentChallengeId}/unsolve`, { method: "POST" });
+  if (res && res.ok) {
+    openChallenge(currentChallengeId);
+  }
 });
 
 $("#btn-stop").addEventListener("click", async () => {
@@ -842,11 +976,11 @@ $("#btn-delete").addEventListener("click", async () => {
   if (!currentChallengeId) return;
   if (!confirm("Delete this challenge?")) return;
   await api(`/api/challenges/${currentChallengeId}`, { method: "DELETE" });
-  disconnectWS(); stopTimer(); currentChallengeId = null;
+  disconnectAllWS(); stopTimer(); currentChallengeId = null;
   showView("dashboard"); loadChallenges();
 });
 
-// === WebSocket ===
+// === WebSocket Per-Run ===
 function setWsStatus(status) {
   const el = $("#ws-status");
   if (!el) return;
@@ -855,31 +989,62 @@ function setWsStatus(status) {
     : status === "reconnecting" ? "Reconnecting..." : "Disconnected";
 }
 
-function connectWS(challengeId) {
-  disconnectWS();
-  setWsStatus("reconnecting");
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(`${proto}//${location.host}/ws/${challengeId}`);
-  ws.onopen = () => setWsStatus("connected");
-  ws.onmessage = (e) => renderEvent(JSON.parse(e.data));
-  ws.onclose = () => {
-    setWsStatus("reconnecting");
-    if (currentChallengeId === challengeId)
-      setTimeout(() => { if (currentChallengeId === challengeId) connectWS(challengeId); }, 2000);
-  };
+function connectAllRuns(challengeId, runs) {
+  disconnectAllWS();
+  if (!runs || !runs.length) {
+    setWsStatus("disconnected");
+    return;
+  }
+  for (const run of runs) {
+    connectRunWS(challengeId, run.id, run.agent);
+  }
 }
 
-function disconnectWS() {
-  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+function connectRunWS(challengeId, runId, agentLabel) {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${proto}//${location.host}/ws/${challengeId}/${runId}`);
+  ws.onopen = () => {
+    setWsStatus("connected");
+  };
+  ws.onmessage = (e) => renderRunEvent(runId, JSON.parse(e.data));
+  ws.onclose = () => {
+    if (currentChallengeId === challengeId) {
+      // Check if any other connection is still open
+      let anyOpen = false;
+      for (const [rid, conn] of wsConnections) {
+        if (rid !== runId && conn.readyState === WebSocket.OPEN) {
+          anyOpen = true;
+          break;
+        }
+      }
+      if (!anyOpen) setWsStatus("reconnecting");
+      setTimeout(() => {
+        if (currentChallengeId === challengeId) {
+          connectRunWS(challengeId, runId, agentLabel);
+        }
+      }, 2000);
+    }
+  };
+  wsConnections.set(runId, ws);
+}
+
+function disconnectAllWS() {
+  for (const [, ws] of wsConnections) {
+    ws.onclose = null;
+    ws.close();
+  }
+  wsConnections.clear();
   setWsStatus("disconnected");
 }
 
 // === Scroll ===
 function getActiveFeed() {
-  return document.getElementById(`feed-${activeAgentTab}`);
+  if (!activeRunId) return null;
+  return document.getElementById(`feed-${activeRunId}`);
 }
 
 function setupFeedScroll(feedEl) {
+  if (!feedEl) return;
   feedEl.addEventListener("scroll", () => {
     autoScroll = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 50;
     updateScrollBtn();
@@ -890,72 +1055,125 @@ function updateScrollBtn() {
   const btn = $("#btn-scroll-bottom");
   if (btn) btn.classList.toggle("hidden", autoScroll);
 }
-setupFeedScroll(document.getElementById("feed-main"));
 
 function scrollBottom() {
   const f = getActiveFeed();
   if (autoScroll && f) f.scrollTop = f.scrollHeight;
 }
 
-// === Agent Tabs ===
-function resetAgentTabs() {
-  agentFeeds.clear();
-  activeAgentTab = "main";
-  const tabBar = $("#agent-tabs");
-  tabBar.innerHTML = '<button class="agent-tab active" data-agent="main">Main</button>';
-  const feedsEl = $("#agent-feeds");
-  feedsEl.innerHTML = '<div id="feed-main" class="panel-body agent-feed active"></div>';
-  setupFeedScroll(document.getElementById("feed-main"));
-  tabBar.querySelector('[data-agent="main"]').addEventListener("click", () => switchAgentTab("main"));
+function scrollBottomIfActive(runId) {
+  if (runId === activeRunId) scrollBottom();
 }
 
-function getFeedFor(event) {
-  const parentId = event.parent_tool_use_id;
-  if (!parentId) return document.getElementById("feed-main");
-  const info = agentFeeds.get(parentId);
-  return info ? info.feed : document.getElementById("feed-main");
+// === Run Tabs ===
+function initRunTabs(runs) {
+  currentRuns = runs;
+  const tabBar = $("#run-tabs");
+  const feedsEl = $("#run-feeds");
+
+  // Clear existing feeds but keep the scroll button
+  tabBar.innerHTML = "";
+  const scrollBtn = feedsEl.querySelector("#btn-scroll-bottom");
+  feedsEl.innerHTML = "";
+  if (scrollBtn) feedsEl.appendChild(scrollBtn);
+
+  if (!runs.length) {
+    // Create a default placeholder feed
+    activeRunId = "__default__";
+    const btn = document.createElement("button");
+    btn.className = "run-tab active";
+    btn.dataset.run = "__default__";
+    btn.innerHTML = '<span class="run-tab-dot dot-running"></span>Main';
+    tabBar.appendChild(btn);
+
+    const feed = document.createElement("div");
+    feed.id = "feed-__default__";
+    feed.className = "panel-body run-feed active";
+    feedsEl.insertBefore(feed, scrollBtn);
+    setupFeedScroll(feed);
+    return;
+  }
+
+  activeRunId = runs[0].id;
+
+  for (const run of runs) {
+    const agentMeta = getAgentMeta(run.agent);
+    const label = agentMeta.label || run.agent;
+
+    const btn = document.createElement("button");
+    btn.className = `run-tab${run.id === activeRunId ? " active" : ""}`;
+    btn.dataset.run = run.id;
+    const dotClass = run.status === "solving" ? "dot-running"
+      : run.status === "solved" ? "dot-solved"
+      : run.status === "failed" ? "dot-error" : "dot-running";
+    btn.innerHTML = `<span class="run-tab-dot ${dotClass}"></span>${esc(label)}`;
+    btn.addEventListener("click", () => switchRunTab(run.id));
+    tabBar.appendChild(btn);
+
+    const feed = document.createElement("div");
+    feed.id = `feed-${run.id}`;
+    feed.className = `panel-body run-feed${run.id === activeRunId ? " active" : ""}`;
+    feedsEl.insertBefore(feed, scrollBtn);
+    setupFeedScroll(feed);
+  }
 }
 
-function createSubagentTab(toolUseId, description) {
-  if (agentFeeds.has(toolUseId)) return;
-  const shortDesc = truncate(description || "Subagent", 24);
-  const tabBar = $("#agent-tabs");
-  const feedsEl = $("#agent-feeds");
-
-  const btn = document.createElement("button");
-  btn.className = "agent-tab";
-  btn.dataset.agent = toolUseId;
-  btn.innerHTML = `<span class="agent-tab-dot dot-running"></span>${esc(shortDesc)}`;
-  btn.addEventListener("click", () => switchAgentTab(toolUseId));
-  tabBar.appendChild(btn);
-
-  const feed = document.createElement("div");
-  feed.id = `feed-${toolUseId}`;
-  feed.className = "panel-body agent-feed";
-  feedsEl.appendChild(feed);
-  setupFeedScroll(feed);
-
-  agentFeeds.set(toolUseId, { feed, tab: btn, desc: description, status: "running" });
-}
-
-function finishSubagentTab(toolUseId, isError) {
-  const info = agentFeeds.get(toolUseId);
-  if (!info) return;
-  info.status = isError ? "error" : "done";
-  const dot = info.tab.querySelector(".agent-tab-dot");
-  if (dot) dot.className = `agent-tab-dot ${isError ? "dot-error" : "dot-done"}`;
-}
-
-function switchAgentTab(agentId) {
-  activeAgentTab = agentId;
-  document.querySelectorAll(".agent-tab").forEach((t) => t.classList.remove("active"));
-  document.querySelectorAll(".agent-feed").forEach((f) => f.classList.remove("active"));
-  const btn = document.querySelector(`[data-agent="${agentId}"]`);
+function switchRunTab(runId) {
+  activeRunId = runId;
+  document.querySelectorAll(".run-tab").forEach((t) => t.classList.remove("active"));
+  document.querySelectorAll(".run-feed").forEach((f) => f.classList.remove("active"));
+  const btn = document.querySelector(`[data-run="${runId}"]`);
   if (btn) btn.classList.add("active");
-  const feed = document.getElementById(`feed-${agentId}`);
+  const feed = document.getElementById(`feed-${runId}`);
   if (feed) { feed.classList.add("active"); autoScroll = true; scrollBottom(); }
-  // Only show steer bar for main agent
-  $("#steer-bar").classList.toggle("hidden", agentId !== "main");
+}
+
+function updateRunTabDot(runId, status) {
+  const btn = document.querySelector(`[data-run="${runId}"]`);
+  if (!btn) return;
+  const dot = btn.querySelector(".run-tab-dot");
+  if (!dot) return;
+  if (status === "solved") {
+    dot.className = "run-tab-dot dot-solved";
+  } else if (status === "failed" || status === "error") {
+    dot.className = "run-tab-dot dot-error";
+  } else if (status === "solving") {
+    dot.className = "run-tab-dot dot-running";
+  } else {
+    dot.className = "run-tab-dot dot-done";
+  }
+}
+
+// === Steer Run Select ===
+function updateSteerRunSelect() {
+  const sel = $("#steer-run-select");
+  if (isParallelMode(currentChallengeMode) && currentRuns.length > 1) {
+    sel.classList.remove("hidden");
+    sel.innerHTML = '<option value="">All runs</option>' +
+      currentRuns.map((r) => {
+        const meta = getAgentMeta(r.agent);
+        return `<option value="${esc(r.id)}">${esc(meta.label || r.agent)}</option>`;
+      }).join("");
+  } else {
+    sel.classList.add("hidden");
+    sel.innerHTML = "";
+  }
+}
+
+// === Files Run Select ===
+function updateFilesRunSelect() {
+  const sel = $("#files-run-select");
+  if (isParallelMode(currentChallengeMode) && currentRuns.length > 1) {
+    sel.classList.remove("hidden");
+    sel.innerHTML = '<option value="">All files</option>' +
+      currentRuns.map((r) => {
+        const meta = getAgentMeta(r.agent);
+        return `<option value="${esc(r.id)}">${esc(meta.label || r.agent)}</option>`;
+      }).join("");
+  } else {
+    sel.classList.add("hidden");
+    sel.innerHTML = "";
+  }
 }
 
 // === Markdown ===
@@ -1124,9 +1342,19 @@ function showToast(message, type = "info") {
   }, 4000);
 }
 
-// === Rendering ===
-function renderEvent(event) {
+// === Run Event Rendering ===
+function renderRunEvent(runId, event) {
+  // Get or create the feed for this run
+  let feed = document.getElementById(`feed-${runId}`);
+  if (!feed) {
+    // Might arrive before tabs are set up; use default feed
+    feed = document.getElementById("feed-__default__");
+  }
+  if (!feed) return;
+
+  // --- Status events: update run tab dot + challenge-level status ---
   if (event.type === "status") {
+    updateRunTabDot(runId, event.status);
     updateStatusBadge(event.status);
     updateButtons(event.status);
     if (event.status === "solving") startTimer();
@@ -1147,30 +1375,32 @@ function renderEvent(event) {
     return;
   }
 
-  // Handle subagent lifecycle via system events
+  // --- Subagent lifecycle (within a single run) ---
   if (event.type === "system" && event.subtype === "task_started") {
-    createSubagentTab(event.tool_use_id, event.description || "Subagent");
-    switchAgentTab(event.tool_use_id);
+    appendMsg(feed, `Subagent started: ${event.description || "task"}`, "system-msg");
+    scrollBottomIfActive(runId);
     return;
   }
   if (event.type === "system" && event.subtype === "task_notification") {
-    finishSubagentTab(event.tool_use_id, event.status !== "completed");
-    if (activeAgentTab === event.tool_use_id) switchAgentTab("main");
+    appendMsg(feed, `Subagent ${event.status || "finished"}: ${event.description || "task"}`, "system-msg");
+    scrollBottomIfActive(runId);
     return;
   }
 
-  // Route to correct feed based on parent_tool_use_id
-  const feed = getFeedFor(event);
-
+  // --- Error ---
   if (event.type === "error") {
     appendMsg(feed, event.message, "error-msg");
-    scrollBottom(); return;
+    scrollBottomIfActive(runId); return;
   }
+
+  // --- System messages ---
   if (event.type === "system") {
     if (event.subtype === "init") return;
     if (event.message) appendMsg(feed, event.message, "system-msg");
-    scrollBottom(); return;
+    scrollBottomIfActive(runId); return;
   }
+
+  // --- User steer ---
   if (event.type === "user_steer") {
     const div = document.createElement("div");
     div.className = "user-steer-msg";
@@ -1179,34 +1409,40 @@ function renderEvent(event) {
     text.textContent = event.message;
     div.appendChild(text);
     feed.appendChild(div);
-    scrollBottom(); return;
+    scrollBottomIfActive(runId); return;
   }
+
+  // --- Rate limit ---
   if (event.type === "rate_limit_event") {
     const info = event.rate_limit_info;
     if (info && info.utilization > 0.5) {
       appendMsg(feed, `Rate limit: ${Math.round(info.utilization * 100)}% used`, "rate-limit-msg");
-      scrollBottom();
+      scrollBottomIfActive(runId);
     }
     return;
   }
 
+  // --- Assistant message ---
   if (event.type === "assistant" && event.message) {
-    renderAssistant(feed, event.message);
-    scrollBottom(); return;
+    renderAssistant(feed, event.message, runId);
+    scrollBottomIfActive(runId); return;
   }
 
+  // --- User (tool results) ---
   if (event.type === "user" && event.message) {
     renderToolResults(event, feed);
-    scrollBottom(); return;
+    scrollBottomIfActive(runId); return;
   }
 
+  // --- Raw text ---
   if (event.type === "raw" && event.text) {
     appendMsg(feed, event.text, "raw-msg");
     const flag = checkForFlag(event.text);
     if (flag) showFlagBanner(flag);
-    scrollBottom(); return;
+    scrollBottomIfActive(runId); return;
   }
 
+  // --- Result ---
   if (event.type === "result") {
     if (event.total_cost_usd) { totalCostUsd = event.total_cost_usd; updateCost(); }
     if (event.result) {
@@ -1217,16 +1453,17 @@ function renderEvent(event) {
       feed.appendChild(block);
       const flag = checkForFlag(event.result);
       if (flag) showFlagBanner(flag);
-      scrollBottom();
+      scrollBottomIfActive(runId);
     }
     return;
   }
 }
 
-function renderAssistant(feed, msg) {
+// === Assistant Message Rendering ===
+function renderAssistant(feed, msg, runId) {
   if (!msg.content || !msg.content.length) return;
 
-  // Track tokens from usage
+  // Track tokens
   if (msg.usage) {
     totalTokens += (msg.usage.input_tokens || 0) + (msg.usage.output_tokens || 0);
     updateCost();
@@ -1273,7 +1510,6 @@ function renderAssistant(feed, msg) {
       });
       step.appendChild(div);
 
-      // Check for flags
       const flag = checkForFlag(block.text);
       if (flag) showFlagBanner(flag);
 
@@ -1307,6 +1543,7 @@ function renderAssistant(feed, msg) {
   }
 }
 
+// === Tool Use Rendering ===
 function buildToolUse(block) {
   const wrapper = document.createElement("div");
   wrapper.className = "step-tool";
@@ -1334,7 +1571,7 @@ function buildToolUse(block) {
 
   bar.append(icon, name, desc, status);
 
-  // Detail
+  // Detail (expandable)
   const detail = document.createElement("div");
   detail.className = "tool-detail";
 
@@ -1368,8 +1605,7 @@ function renderToolResults(event, feed) {
 
     let toolEl = pendingTools.get(block.tool_use_id);
     if (!toolEl) {
-      // Some providers can emit a completed tool result without a prior
-      // tool-start event in the same stream. Render a synthetic tool card.
+      // Synthetic tool card for completed tool results without a prior start event
       const synthetic = {
         id: block.tool_use_id || `tool-${Date.now()}`,
         name: block.name || "tool",
@@ -1384,7 +1620,7 @@ function renderToolResults(event, feed) {
     }
 
     let output = "";
-    // Agent tool results: extract content text
+    // Extract content text from agent tool results
     if (event.tool_use_result && event.tool_use_result.content) {
       output = event.tool_use_result.content
         .map((c) => c.text || "").filter(Boolean).join("\n");
@@ -1550,11 +1786,14 @@ function switchTab(tabId) {
 }
 
 // === Files Browser ===
-let filesRefreshTimer = null;
-
 async function loadFiles() {
   if (!currentChallengeId) return;
-  const res = await api(`/api/challenges/${currentChallengeId}/files`);
+  let url = `/api/challenges/${currentChallengeId}/files`;
+  const runSelect = $("#files-run-select");
+  if (runSelect && runSelect.value) {
+    url += `?run_id=${encodeURIComponent(runSelect.value)}`;
+  }
+  const res = await api(url);
   if (!res) return;
   const files = await res.json();
 
@@ -1604,6 +1843,12 @@ async function loadFiles() {
 
 $("#btn-refresh-files").addEventListener("click", loadFiles);
 
+// Listen for files run select change
+const filesRunSelect = $("#files-run-select");
+if (filesRunSelect) {
+  filesRunSelect.addEventListener("change", loadFiles);
+}
+
 // Auto-refresh files while solving
 setInterval(() => {
   if (currentChallengeId && !views.detail.classList.contains("hidden")) {
@@ -1620,7 +1865,12 @@ function formatSize(bytes) {
 // === File Viewer ===
 async function viewFile(path) {
   if (!currentChallengeId) return;
-  const res = await api(`/api/challenges/${currentChallengeId}/files/${path}`);
+  let url = `/api/challenges/${currentChallengeId}/files/${path}`;
+  const runSelect = $("#files-run-select");
+  if (runSelect && runSelect.value) {
+    url += `?run_id=${encodeURIComponent(runSelect.value)}`;
+  }
+  const res = await api(url);
   if (!res) return;
   const data = await res.json();
 
@@ -1666,7 +1916,7 @@ $("#file-viewer-overlay").addEventListener("click", (e) => {
     $("#file-viewer-overlay").classList.add("hidden");
 });
 
-// === Basic Syntax Highlighting ===
+// === Syntax Highlighting ===
 function highlightSyntax(code, ext) {
   const escaped = code
     .replace(/&/g, "&amp;")
@@ -1732,7 +1982,7 @@ document.addEventListener("keydown", (e) => {
     if (!$("#file-viewer-overlay").classList.contains("hidden")) {
       $("#file-viewer-overlay").classList.add("hidden");
     } else {
-      disconnectWS(); currentChallengeId = null;
+      disconnectAllWS(); currentChallengeId = null;
       showView("dashboard"); loadChallenges();
     }
     e.preventDefault();
@@ -1741,10 +1991,26 @@ document.addEventListener("keydown", (e) => {
     $("#steer-input").focus();
     e.preventDefault();
   }
+  // Sidebar tabs: 1-4
   if (e.key === "1") switchTab("tab-info");
   if (e.key === "2") switchTab("tab-tools");
   if (e.key === "3") switchTab("tab-files");
   if (e.key === "4") switchTab("tab-manager");
+
+  // Left/Right arrows to switch run tabs
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+    if (!currentRuns.length) return;
+    const idx = currentRuns.findIndex((r) => r.id === activeRunId);
+    if (idx === -1) return;
+    let newIdx;
+    if (e.key === "ArrowLeft") {
+      newIdx = idx > 0 ? idx - 1 : currentRuns.length - 1;
+    } else {
+      newIdx = idx < currentRuns.length - 1 ? idx + 1 : 0;
+    }
+    switchRunTab(currentRuns[newIdx].id);
+    e.preventDefault();
+  }
 });
 
 // === Scroll to Bottom Button ===
@@ -1760,8 +2026,8 @@ $("#btn-toggle-tools").addEventListener("click", () => {
   const feed = getActiveFeed();
   if (!feed) return;
   const details = feed.querySelectorAll(".tool-detail");
-  const anyOpen = Array.from(details).some((d) => d.open);
-  details.forEach((d) => d.open = !anyOpen);
+  const anyOpen = Array.from(details).some((d) => d.classList.contains("open"));
+  details.forEach((d) => d.classList.toggle("open", !anyOpen));
   $("#btn-toggle-tools").textContent = anyOpen ? "Expand all" : "Collapse all";
 });
 
@@ -1778,7 +2044,7 @@ $("#btn-export").addEventListener("click", () => {
     const ts = step.querySelector(".step-timestamp");
     const prefix = ts ? `[${ts.textContent}] ` : "";
 
-    const thinking = step.querySelector(".thinking-text");
+    const thinking = step.querySelector(".thinking-body");
     if (thinking) {
       lines.push(`${prefix}**Thinking:**`, thinking.textContent, "");
       return;
@@ -1825,9 +2091,16 @@ async function sendSteer() {
   if (!msg || !currentChallengeId) return;
   input.value = "";
 
+  const body = { message: msg };
+  // In parallel mode, include run_id if user selected a specific run
+  const runSelect = $("#steer-run-select");
+  if (runSelect && runSelect.value) {
+    body.run_id = runSelect.value;
+  }
+
   const res = await api(`/api/challenges/${currentChallengeId}/steer`, {
     method: "POST",
-    body: JSON.stringify({ message: msg }),
+    body: JSON.stringify(body),
   });
   if (res && res.ok) {
     updateStatusBadge("solving");
@@ -1938,10 +2211,21 @@ $("#btn-manager-settings").addEventListener("click", async () => {
   const res = await api("/api/settings");
   if (!res) return;
   const s = await res.json();
-  $("#manager-enabled").checked = !!s.manager_enabled;
   $("#manager-interval").value = s.manager_interval || 10;
   $("#manager-min-time").value = s.manager_min_solve_time || 5;
   $("#manager-model").value = s.manager_model || "sonnet";
+
+  // Render agent pool checkboxes
+  const poolContainer = $("#manager-agent-pool");
+  const currentPool = s.manager_agent_pool || [];
+  poolContainer.innerHTML = agentCatalog.map((agent) => {
+    const checked = currentPool.length === 0 || currentPool.includes(agent.name) ? "checked" : "";
+    return `<label class="checkbox-label agent-checkbox-item">
+      <input type="checkbox" value="${esc(agent.name)}" ${checked}>
+      <span>${esc(agent.label)}</span>
+    </label>`;
+  }).join("");
+
   $("#manager-overlay").classList.remove("hidden");
 });
 $("#manager-close").addEventListener("click", () => {
@@ -1951,11 +2235,13 @@ $("#manager-overlay").addEventListener("click", (e) => {
   if (e.target === $("#manager-overlay")) $("#manager-overlay").classList.add("hidden");
 });
 $("#btn-manager-save").addEventListener("click", async () => {
+  const agentPool = Array.from($("#manager-agent-pool").querySelectorAll("input[type=checkbox]:checked"))
+    .map((cb) => cb.value);
   const body = {
-    manager_enabled: $("#manager-enabled").checked,
     manager_interval: parseInt($("#manager-interval").value) || 10,
     manager_min_solve_time: parseInt($("#manager-min-time").value) || 5,
     manager_model: $("#manager-model").value.trim() || "sonnet",
+    manager_agent_pool: agentPool,
   };
   const res = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
   if (res && res.ok) {

@@ -3,6 +3,12 @@
 
 Spawns CLI coding agents to solve CTF challenges, streaming JSONL
 output to authenticated users via WebSocket.
+
+Supports 4 solving modes:
+- single: One run, no manager.
+- single_managed: One active run with manager (STEER, HANDOFF, SHELVE).
+- parallel: Multiple runs (one per agent), no manager. Auto-stop on solve.
+- parallel_managed: Multiple runs with manager (WAIT, SUMMARIZE, SHELVE).
 """
 
 import asyncio
@@ -66,6 +72,8 @@ _login_attempts: dict[str, list[float]] = defaultdict(list)
 
 challenges: dict[str, dict] = {}
 
+VALID_MODES = {"single", "single_managed", "parallel", "parallel_managed"}
+
 METADATA_FILE = "challenge.json"
 OUTPUT_FILE = "output.jsonl"
 SETTINGS_FILE = CHALLENGES_DIR / "settings.json"
@@ -75,6 +83,85 @@ _bulk_previews: dict[str, dict] = {}
 _SKILLS_ROOT = "/root/all-things-ai/skills"
 _METHODOLOGY_SKILL = f"{_SKILLS_ROOT}/methodology/SKILL.md"
 
+
+# ---------------------------------------------------------------------------
+# Challenge status derivation
+# ---------------------------------------------------------------------------
+
+def derive_challenge_status(challenge: dict) -> str:
+    """Derive challenge-level status from run statuses."""
+    statuses = {r["status"] for r in challenge["runs"].values()}
+    if "solved" in statuses:
+        return "solved"
+    if "solving" in statuses:
+        return "solving"
+    if "shelved" in statuses and not (statuses - {"shelved", "failed"}):
+        return "shelved"
+    if statuses <= {"failed"}:
+        return "failed"
+    if statuses <= {"pending"}:
+        return "pending"
+    return "failed"
+
+
+# ---------------------------------------------------------------------------
+# Run helpers
+# ---------------------------------------------------------------------------
+
+def make_run(
+    run_id: str,
+    agent: str,
+    model: str,
+    effort: str,
+    status: str = "pending",
+) -> dict:
+    """Create a new run dict with all required fields."""
+    return {
+        "id": run_id,
+        "agent": agent,
+        "model": model,
+        "effort": effort,
+        "status": status,
+        "process": None,
+        "task": None,
+        "output_lines": [],
+        "ws_clients": set(),
+        "error": None,
+        "solve_start": None,
+        "duration_ms": None,
+        "_codex_thread_id": None,
+        "_opencode_session_id": None,
+        "_saw_provider_message": False,
+        "_last_stream_error": None,
+        "_last_stderr_lines": [],
+        "_last_unknown_events": [],
+    }
+
+
+def get_run_cwd(challenge_id: str, run: dict) -> Path:
+    """Return the working directory for a run."""
+    challenge = challenges[challenge_id]
+    if challenge["mode"] in ("parallel", "parallel_managed"):
+        return CHALLENGES_DIR / challenge_id / "_runs" / run["id"]
+    return CHALLENGES_DIR / challenge_id
+
+
+def setup_parallel_run_dir(challenge_id: str, run_id: str) -> Path:
+    """Create run directory with symlinks to challenge files."""
+    files_dir = CHALLENGES_DIR / challenge_id / "_files"
+    run_dir = CHALLENGES_DIR / challenge_id / "_runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if files_dir.exists():
+        for item in files_dir.iterdir():
+            link = run_dir / item.name
+            if not link.exists():
+                link.symlink_to(item)
+    return run_dir
+
+
+# ---------------------------------------------------------------------------
+# Bulk preview cleanup
+# ---------------------------------------------------------------------------
 
 def _cleanup_old_previews() -> None:
     now = _time.monotonic()
@@ -108,14 +195,17 @@ def normalize_uploaded_path(raw_path: str) -> str | None:
     return "/".join(parts)
 
 
-def provider_state_for_metadata(challenge: dict) -> dict:
+# ---------------------------------------------------------------------------
+# Provider state helpers
+# ---------------------------------------------------------------------------
+
+def provider_state_for_metadata(run: dict) -> dict:
+    """Extract provider-specific state from a run dict."""
     state = {}
-    if challenge.get("_codex_thread_id"):
-        state["codex_thread_id"] = challenge["_codex_thread_id"]
-    if challenge.get("_opencode_session_id"):
-        state["opencode_session_id"] = challenge[
-            "_opencode_session_id"
-        ]
+    if run.get("_codex_thread_id"):
+        state["codex_thread_id"] = run["_codex_thread_id"]
+    if run.get("_opencode_session_id"):
+        state["opencode_session_id"] = run["_opencode_session_id"]
     return state
 
 
@@ -138,6 +228,10 @@ def manager_state_for_metadata(challenge: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# State directories and persistence
+# ---------------------------------------------------------------------------
+
 def challenge_state_dir(challenge_id: str) -> Path:
     return STATE_ROOT_DIR / challenge_id
 
@@ -147,20 +241,6 @@ def metadata_path(challenge_id: str) -> Path:
     legacy_candidates = [
         CHALLENGES_DIR / challenge_id / METADATA_FILE,
         CHALLENGES_DIR / challenge_id / ".ctf-solver" / METADATA_FILE,
-    ]
-    for legacy_path in legacy_candidates:
-        if legacy_path.exists() and not new_path.exists():
-            return legacy_path
-    if new_path.exists():
-        return new_path
-    return legacy_candidates[0]
-
-
-def output_log_path(challenge_id: str) -> Path:
-    new_path = challenge_state_dir(challenge_id) / OUTPUT_FILE
-    legacy_candidates = [
-        CHALLENGES_DIR / challenge_id / OUTPUT_FILE,
-        CHALLENGES_DIR / challenge_id / ".ctf-solver" / OUTPUT_FILE,
     ]
     for legacy_path in legacy_candidates:
         if legacy_path.exists() and not new_path.exists():
@@ -197,75 +277,65 @@ def migrate_legacy_state(challenge_id: str) -> None:
     if hidden_dir.exists():
         shutil.rmtree(hidden_dir, ignore_errors=True)
 
-def load_settings() -> dict:
-    """Load global settings from disk."""
-    defaults = {
-        "default_agent": DEFAULT_AGENT,
-        "default_flag_format": "",
-        "theme": "dark",
-        "manager_enabled": False,
-        "manager_interval": 10,
-        "manager_model": "sonnet",
-        "manager_min_solve_time": 5,
-    }
-    if SETTINGS_FILE.exists():
-        try:
-            loaded = json.loads(SETTINGS_FILE.read_text())
-            if isinstance(loaded, dict):
-                defaults.update({
-                    k: v for k, v in loaded.items()
-                    if k in defaults
-                })
-        except (json.JSONDecodeError, OSError):
-            pass
-    return defaults
+
+# ---------------------------------------------------------------------------
+# Output log persistence — per-run
+# ---------------------------------------------------------------------------
+
+def _run_output_path(challenge_id: str, run_id: str) -> Path:
+    """Return the path for a run's output log."""
+    return ensure_state_dir(challenge_id) / f"{run_id}.jsonl"
 
 
-def save_settings(settings: dict) -> None:
-    """Persist global settings to disk."""
-    SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+def _legacy_output_log_path(challenge_id: str) -> Path:
+    """Legacy output log path (pre-runs)."""
+    new_path = challenge_state_dir(challenge_id) / OUTPUT_FILE
+    legacy_candidates = [
+        CHALLENGES_DIR / challenge_id / OUTPUT_FILE,
+        CHALLENGES_DIR / challenge_id / ".ctf-solver" / OUTPUT_FILE,
+    ]
+    for legacy_path in legacy_candidates:
+        if legacy_path.exists() and not new_path.exists():
+            return legacy_path
+    if new_path.exists():
+        return new_path
+    return legacy_candidates[0]
 
 
-def save_metadata(challenge: dict) -> None:
-    """Persist challenge metadata to disk."""
-    meta = {
-        "id": challenge["id"],
-        "name": challenge["name"],
-        "description": challenge["description"],
-        "flag_format": challenge["flag_format"],
-        "agent": challenge["agent"],
-        "model": challenge["model"],
-        "effort": challenge.get("effort", ""),
-        "autonomous": challenge.get("autonomous", False),
-        "status": challenge["status"],
-        "created_at": challenge["created_at"],
-        "files": challenge["files"],
-        "error": challenge["error"],
-        "duration_ms": challenge.get("duration_ms"),
-        "provider_state": provider_state_for_metadata(challenge),
-        "manager": manager_state_for_metadata(challenge),
-    }
-    meta_path = ensure_state_dir(challenge["id"]) / METADATA_FILE
-    meta_path.write_text(json.dumps(meta, indent=2))
-
-
-def append_output_event(challenge_id: str, event: dict) -> None:
-    """Append a single event to the output log on disk."""
-    out_path = ensure_state_dir(challenge_id) / OUTPUT_FILE
+def append_output_event(challenge_id: str, run_id: str, event: dict) -> None:
+    """Append a single event to the run's output log on disk."""
+    out_path = _run_output_path(challenge_id, run_id)
     with out_path.open("a") as f:
         f.write(json.dumps(event) + "\n")
 
 
-def clear_output_log(challenge_id: str) -> None:
+def clear_output_log(challenge_id: str, run_id: str) -> None:
     """Clear the output log file for a fresh run."""
-    out_path = output_log_path(challenge_id)
+    out_path = _run_output_path(challenge_id, run_id)
     if out_path.exists():
         out_path.unlink()
 
 
-def load_output_log(challenge_id: str) -> list[dict]:
-    """Load saved output events from disk."""
-    out_path = output_log_path(challenge_id)
+def load_output_log(challenge_id: str, run_id: str) -> list[dict]:
+    """Load saved output events from disk for a specific run."""
+    out_path = _run_output_path(challenge_id, run_id)
+    if not out_path.exists():
+        return []
+    events = []
+    for line in out_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
+def _load_legacy_output_log(challenge_id: str) -> list[dict]:
+    """Load legacy output log (pre-runs format)."""
+    out_path = _legacy_output_log_path(challenge_id)
     if not out_path.exists():
         return []
     events = []
@@ -285,6 +355,85 @@ def _normalize_output_lines(
 ) -> list[dict]:
     return get_provider(agent).normalize_saved_events(events)
 
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+
+def load_settings() -> dict:
+    """Load global settings from disk."""
+    defaults = {
+        "default_agent": DEFAULT_AGENT,
+        "default_flag_format": "",
+        "theme": "dark",
+        "manager_interval": 10,
+        "manager_model": "sonnet",
+        "manager_min_solve_time": 5,
+        "manager_agent_pool": list(VALID_AGENTS),
+    }
+    if SETTINGS_FILE.exists():
+        try:
+            loaded = json.loads(SETTINGS_FILE.read_text())
+            if isinstance(loaded, dict):
+                defaults.update({
+                    k: v for k, v in loaded.items()
+                    if k in defaults
+                })
+        except (json.JSONDecodeError, OSError):
+            pass
+    return defaults
+
+
+def save_settings(settings: dict) -> None:
+    """Persist global settings to disk."""
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Metadata persistence
+# ---------------------------------------------------------------------------
+
+def _serialize_runs(challenge: dict) -> dict:
+    """Serialize runs for metadata (strip non-serializable fields)."""
+    serialized = {}
+    for run_id, run in challenge["runs"].items():
+        serialized[run_id] = {
+            "id": run["id"],
+            "agent": run["agent"],
+            "model": run["model"],
+            "effort": run.get("effort", ""),
+            "status": run["status"],
+            "error": run.get("error"),
+            "duration_ms": run.get("duration_ms"),
+            "solve_start": run.get("solve_start"),
+            "provider_state": provider_state_for_metadata(run),
+        }
+    return serialized
+
+
+def save_metadata(challenge: dict) -> None:
+    """Persist challenge metadata to disk."""
+    meta = {
+        "id": challenge["id"],
+        "name": challenge["name"],
+        "description": challenge["description"],
+        "flag_format": challenge["flag_format"],
+        "mode": challenge["mode"],
+        "autonomous": challenge.get("autonomous", False),
+        "status": challenge["status"],
+        "created_at": challenge["created_at"],
+        "files": challenge["files"],
+        "error": challenge.get("error"),
+        "manager": manager_state_for_metadata(challenge),
+        "runs": _serialize_runs(challenge),
+    }
+    meta_path = ensure_state_dir(challenge["id"]) / METADATA_FILE
+    meta_path.write_text(json.dumps(meta, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Agent/model resolution helpers
+# ---------------------------------------------------------------------------
 
 def resolved_default_model(agent: str) -> str:
     return get_provider(agent).resolved_default_model()
@@ -309,21 +458,9 @@ def normalize_effort_for_agent(agent: str, effort: str) -> str:
     return resolved_default_effort(agent)
 
 
-def expand_agent_selection(
-    agent: str, model: str
-) -> list[tuple[str, str]]:
-    if agent in {PARALLEL_AGENT_VALUE, "both"}:
-        return [
-            (
-                provider.name,
-                provider.resolved_default_model(),
-            )
-            for provider in PROVIDERS.values()
-        ]
-
-    provider = get_provider(agent)
-    return [(provider.name, model or provider.resolved_default_model())]
-
+# ---------------------------------------------------------------------------
+# Load challenges from disk
+# ---------------------------------------------------------------------------
 
 def load_challenges_from_disk() -> None:
     """Scan CHALLENGES_DIR for existing challenges on startup."""
@@ -342,58 +479,121 @@ def load_challenges_from_disk() -> None:
                 meta = {}
         else:
             meta = {}
-        provider_state = meta.get("provider_state", {})
 
-        # If it was solving when the app died, mark failed
-        status = meta.get("status", "unknown")
-        if status == "solving":
-            status = "failed"
+        mode = meta.get("mode", "single")
+        if mode not in VALID_MODES:
+            mode = "single"
 
-        challenges[challenge_id] = {
+        # Restore runs from saved metadata, or migrate old format
+        saved_runs = meta.get("runs", {})
+        runs: dict[str, dict] = {}
+
+        if saved_runs:
+            # New format: restore runs
+            for run_id, run_meta in saved_runs.items():
+                run_agent = run_meta.get("agent", DEFAULT_AGENT)
+                run_status = run_meta.get("status", "unknown")
+                if run_status == "solving":
+                    run_status = "failed"
+                provider_state = run_meta.get("provider_state", {})
+                run = make_run(
+                    run_id=run_id,
+                    agent=run_agent,
+                    model=run_meta.get(
+                        "model",
+                        resolved_default_model(run_agent),
+                    ),
+                    effort=run_meta.get(
+                        "effort",
+                        resolved_default_effort(run_agent),
+                    ),
+                    status=run_status,
+                )
+                run["error"] = run_meta.get("error")
+                run["duration_ms"] = run_meta.get("duration_ms")
+                run["_codex_thread_id"] = provider_state.get(
+                    "codex_thread_id"
+                )
+                run["_opencode_session_id"] = provider_state.get(
+                    "opencode_session_id"
+                )
+                run["output_lines"] = _normalize_output_lines(
+                    load_output_log(challenge_id, run_id),
+                    run_agent,
+                )
+                runs[run_id] = run
+        else:
+            # Legacy format: migrate to single run
+            old_agent = meta.get("agent", DEFAULT_AGENT)
+            old_status = meta.get("status", "unknown")
+            if old_status == "solving":
+                old_status = "failed"
+            provider_state = meta.get("provider_state", {})
+            run_id = uuid.uuid4().hex[:8]
+            run = make_run(
+                run_id=run_id,
+                agent=old_agent,
+                model=meta.get(
+                    "model",
+                    resolved_default_model(old_agent),
+                ),
+                effort=meta.get(
+                    "effort",
+                    resolved_default_effort(old_agent),
+                ),
+                status=old_status,
+            )
+            run["error"] = meta.get("error")
+            run["duration_ms"] = meta.get("duration_ms")
+            run["_codex_thread_id"] = provider_state.get(
+                "codex_thread_id"
+            )
+            run["_opencode_session_id"] = provider_state.get(
+                "opencode_session_id"
+            )
+            # Try legacy output log
+            legacy_events = _load_legacy_output_log(challenge_id)
+            run["output_lines"] = _normalize_output_lines(
+                legacy_events, old_agent
+            )
+            # Migrate legacy output to run-specific file
+            if legacy_events:
+                out_path = _run_output_path(challenge_id, run_id)
+                if not out_path.exists():
+                    with out_path.open("w") as f:
+                        for evt in legacy_events:
+                            f.write(json.dumps(evt) + "\n")
+            runs[run_id] = run
+
+        challenge = {
             "id": challenge_id,
             "name": meta.get("name", f"Challenge {challenge_id}"),
             "description": meta.get("description", ""),
             "flag_format": meta.get("flag_format", ""),
-            "agent": meta.get("agent", DEFAULT_AGENT),
-            "model": meta.get(
-                "model",
-                resolved_default_model(meta.get("agent", DEFAULT_AGENT)),
-            ),
-            "effort": meta.get(
-                "effort",
-                resolved_default_effort(meta.get("agent", DEFAULT_AGENT)),
-            ),
+            "mode": mode,
             "autonomous": meta.get("autonomous", False),
-            "status": status,
+            "status": "pending",
             "created_at": meta.get(
                 "created_at", datetime.now().isoformat()
             ),
             "files": meta.get("files", []),
-            "process": None,
-            "task": None,
-            "output_lines": _normalize_output_lines(
-                load_output_log(challenge_id),
-                meta.get("agent", DEFAULT_AGENT),
-            ),
-            "ws_clients": set(),
             "error": meta.get("error"),
-            "duration_ms": meta.get("duration_ms"),
-            "solve_start": None,
-            "_codex_thread_id": provider_state.get(
-                "codex_thread_id"
-            ),
-            "_opencode_session_id": provider_state.get(
-                "opencode_session_id"
-            ),
             "manager": {
                 **_default_manager_state(),
                 **meta.get("manager", {}),
             },
+            "runs": runs,
         }
+        challenge["status"] = derive_challenge_status(challenge)
+        challenges[challenge_id] = challenge
 
 
 load_challenges_from_disk()
 
+
+# ---------------------------------------------------------------------------
+# Auth and CSRF
+# ---------------------------------------------------------------------------
 
 def require_auth(request: Request) -> JSONResponse | None:
     if not request.session.get("authenticated"):
@@ -431,6 +631,10 @@ def _check_rate_limit(client_ip: str) -> JSONResponse | None:
         )
     return None
 
+
+# ---------------------------------------------------------------------------
+# Basic routes
+# ---------------------------------------------------------------------------
 
 async def index(request: Request) -> Response:
     html_path = Path(__file__).parent / "static" / "index.html"
@@ -470,29 +674,83 @@ async def csrf_token(request: Request) -> JSONResponse:
     return JSONResponse({"csrf_token": token})
 
 
+# ---------------------------------------------------------------------------
+# Broadcast helpers
+# ---------------------------------------------------------------------------
+
+async def broadcast(challenge_id: str, run_id: str, data: dict):
+    """Send data to a specific run's WebSocket clients."""
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return
+    run = challenge["runs"].get(run_id)
+    if not run:
+        return
+    dead = []
+    for ws in list(run["ws_clients"]):
+        try:
+            await ws.send_json(data)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        run["ws_clients"].discard(ws)
+
+
+async def broadcast_challenge(challenge_id: str, data: dict):
+    """Send data to ALL runs' WebSocket clients (challenge-level updates)."""
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return
+    for run in challenge["runs"].values():
+        dead = []
+        for ws in list(run["ws_clients"]):
+            try:
+                await ws.send_json(data)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            run["ws_clients"].discard(ws)
+
+
+# ---------------------------------------------------------------------------
+# Challenge listing
+# ---------------------------------------------------------------------------
+
 async def list_challenges(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
     result = []
     for c in challenges.values():
+        runs_summary = []
+        for run in c["runs"].values():
+            runs_summary.append({
+                "id": run["id"],
+                "agent": run["agent"],
+                "model": run["model"],
+                "status": run["status"],
+                "error": run.get("error"),
+                "duration_ms": run.get("duration_ms"),
+            })
         result.append({
             "id": c["id"],
             "name": c["name"],
             "description": c["description"],
             "flag_format": c["flag_format"],
-            "agent": c["agent"],
-            "model": c["model"],
-            "effort": c.get("effort", ""),
+            "mode": c["mode"],
             "status": c["status"],
-            "error": c["error"],
+            "error": c.get("error"),
             "created_at": c["created_at"],
             "files": c["files"],
-            "duration_ms": c.get("duration_ms"),
+            "runs": runs_summary,
             "manager": manager_state_for_metadata(c),
         })
     result.sort(key=lambda x: x["created_at"], reverse=True)
     return JSONResponse(result)
 
+
+# ---------------------------------------------------------------------------
+# Create challenge
+# ---------------------------------------------------------------------------
 
 async def create_challenge(request: Request) -> JSONResponse:
     if err := require_auth(request):
@@ -504,12 +762,37 @@ async def create_challenge(request: Request) -> JSONResponse:
     name = form.get("name", "").strip()
     description = form.get("description", "").strip()
     flag_format = form.get("flag_format", "").strip()
-    agent = form.get("agent", "").strip() or DEFAULT_AGENT
+    mode = form.get("mode", "single").strip()
+    agents_str = form.get("agents", "").strip()
     model = form.get("model", "").strip()
     effort = form.get("effort", "").strip()
     autonomous = form.get("autonomous", "").strip() == "true"
 
-    # Read uploaded files into memory so we can copy to multiple dirs
+    if mode not in VALID_MODES:
+        return JSONResponse(
+            {"error": f"invalid mode: {mode}"}, status_code=400
+        )
+
+    # Determine agent list
+    if agents_str:
+        agent_names = [a.strip() for a in agents_str.split(",") if a.strip()]
+    else:
+        # Fallback: use agent field from form for single modes
+        single_agent = form.get("agent", "").strip() or DEFAULT_AGENT
+        agent_names = [single_agent]
+
+    # Validate agents
+    for a in agent_names:
+        if a not in VALID_AGENTS:
+            return JSONResponse(
+                {"error": f"invalid agent: {a}"}, status_code=400
+            )
+
+    # For single modes, only use first agent
+    if mode in ("single", "single_managed"):
+        agent_names = agent_names[:1]
+
+    # Read uploaded files into memory
     file_data: dict[str, bytes] = {}
     for _, field in form.multi_items():
         if hasattr(field, "filename") and field.filename:
@@ -523,61 +806,78 @@ async def create_challenge(request: Request) -> JSONResponse:
                 )
             file_data[safe_path] = await field.read()
 
-    agents_to_run = expand_agent_selection(agent, model)
+    challenge_id = uuid.uuid4().hex[:12]
+    display_name = name or f"Challenge {challenge_id}"
+    challenge_dir = CHALLENGES_DIR / challenge_id
+    challenge_dir.mkdir(parents=True)
 
-    created = []
-    for run_agent_name, run_model in agents_to_run:
-        challenge_id = uuid.uuid4().hex[:12]
-        display_name = name or f"Challenge {challenge_id}"
-        if len(agents_to_run) > 1:
-            prefix = f"[{get_provider(run_agent_name).label}] "
-            display_name = f"{prefix}{display_name}"
+    is_parallel = mode in ("parallel", "parallel_managed")
 
-        challenge_dir = CHALLENGES_DIR / challenge_id
-        challenge_dir.mkdir(parents=True)
+    if is_parallel:
+        # Files go to _files/ subdirectory
+        files_dir = challenge_dir / "_files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+        for rel_path, fdata in file_data.items():
+            dest = files_dir / rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(fdata)
+    else:
+        # Files go directly to challenge root
         for rel_path, fdata in file_data.items():
             dest = challenge_dir / rel_path
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(fdata)
 
-        challenge = {
-            "id": challenge_id,
-            "name": display_name,
-            "description": description,
-            "flag_format": flag_format,
-            "agent": run_agent_name,
-            "model": run_model,
-            "effort": normalize_effort_for_agent(run_agent_name, effort),
-            "autonomous": autonomous,
-            "status": "solving",
-            "created_at": datetime.now().isoformat(),
-            "files": sorted(file_data.keys()),
-            "process": None,
-            "task": None,
-            "output_lines": [],
-            "ws_clients": set(),
-            "error": None,
-            "duration_ms": None,
-            "solve_start": None,
-            "manager": _default_manager_state(),
-        }
-        challenges[challenge_id] = challenge
-        save_metadata(challenge)
-        challenge["task"] = asyncio.create_task(
-            run_agent(challenge_id)
+    # Create runs
+    runs: dict[str, dict] = {}
+    for agent_name in agent_names:
+        run_id = uuid.uuid4().hex[:8]
+        run_model = model or resolved_default_model(agent_name)
+        run_effort = normalize_effort_for_agent(agent_name, effort)
+        run = make_run(
+            run_id=run_id,
+            agent=agent_name,
+            model=run_model,
+            effort=run_effort,
+            status="solving",
         )
-        created.append({"id": challenge_id, "name": display_name})
+        runs[run_id] = run
 
-    if len(created) == 1:
-        return JSONResponse(
-            {"id": created[0]["id"], "status": "solving"},
-            status_code=201,
+        if is_parallel:
+            setup_parallel_run_dir(challenge_id, run_id)
+
+    challenge = {
+        "id": challenge_id,
+        "name": display_name,
+        "description": description,
+        "flag_format": flag_format,
+        "mode": mode,
+        "autonomous": autonomous,
+        "status": "solving",
+        "created_at": datetime.now().isoformat(),
+        "files": sorted(file_data.keys()),
+        "error": None,
+        "manager": _default_manager_state(),
+        "runs": runs,
+    }
+    challenges[challenge_id] = challenge
+    save_metadata(challenge)
+
+    # Start all runs
+    for run_id, run in runs.items():
+        run["task"] = asyncio.create_task(
+            run_agent_task(challenge_id, run_id)
         )
+
     return JSONResponse(
-        {"created": created, "status": "solving"},
+        {"id": challenge_id, "status": "solving"},
         status_code=201,
     )
 
+
+# ---------------------------------------------------------------------------
+# Bulk preview (preserved exactly)
+# ---------------------------------------------------------------------------
 
 async def bulk_preview(request: Request) -> JSONResponse:
     """Preview uploaded bulk archive and return editable challenge rows."""
@@ -725,6 +1025,10 @@ async def bulk_preview(request: Request) -> JSONResponse:
     })
 
 
+# ---------------------------------------------------------------------------
+# Bulk upload — with mode support
+# ---------------------------------------------------------------------------
+
 async def bulk_upload(request: Request) -> JSONResponse:
     """Create challenges from a previously previewed bulk archive."""
     if err := require_auth(request):
@@ -752,16 +1056,36 @@ async def bulk_upload(request: Request) -> JSONResponse:
 
     try:
         global_flag_format = body.get("flag_format", "").strip()
-        agent = body.get("agent", "").strip() or DEFAULT_AGENT
+        mode = body.get("mode", "single").strip()
+        if mode not in VALID_MODES:
+            mode = "single"
+
+        # Determine agents
+        agents_str = body.get("agents", "").strip()
+        if agents_str:
+            agent_names = [a.strip() for a in agents_str.split(",") if a.strip()]
+        else:
+            single_agent = body.get("agent", "").strip() or DEFAULT_AGENT
+            agent_names = [single_agent]
+
+        # Validate agents
+        for a in agent_names:
+            if a not in VALID_AGENTS:
+                agent_names = [DEFAULT_AGENT]
+                break
+
+        if mode in ("single", "single_managed"):
+            agent_names = agent_names[:1]
+
         model = body.get("model", "").strip()
         effort = body.get("effort", "").strip()
         autonomous = bool(body.get("autonomous", False))
         paused = bool(body.get("paused", False))
         challenges_cfg = body.get("challenges", [])
 
-        agents_to_run = expand_agent_selection(agent, model)
-
+        is_parallel = mode in ("parallel", "parallel_managed")
         created = []
+
         for cfg in challenges_cfg:
             if not cfg.get("enabled", True):
                 continue
@@ -779,61 +1103,76 @@ async def bulk_upload(request: Request) -> JSONResponse:
                 or global_flag_format
             )
 
-            for run_agent_name, run_model in agents_to_run:
-                challenge_id = uuid.uuid4().hex[:12]
-                challenge_dir = CHALLENGES_DIR / challenge_id
-                challenge_dir.mkdir(parents=True)
-                for fname in file_names:
-                    src = folder_dir / fname
-                    if src.exists():
-                        shutil.copy2(src, challenge_dir / fname)
+            challenge_id = uuid.uuid4().hex[:12]
+            challenge_dir = CHALLENGES_DIR / challenge_id
+            challenge_dir.mkdir(parents=True)
 
-                prefix = (
-                    f"[{get_provider(run_agent_name).label}] "
-                    if len(agents_to_run) > 1
-                    else ""
+            if is_parallel:
+                files_dest = challenge_dir / "_files"
+                files_dest.mkdir(parents=True, exist_ok=True)
+            else:
+                files_dest = challenge_dir
+
+            for fname in file_names:
+                src = folder_dir / fname
+                if src.exists():
+                    shutil.copy2(src, files_dest / fname)
+
+            challenge_status = "pending" if paused else "solving"
+
+            runs: dict[str, dict] = {}
+            for agent_name in agent_names:
+                run_id = uuid.uuid4().hex[:8]
+                run_model = model or resolved_default_model(agent_name)
+                run_effort = normalize_effort_for_agent(agent_name, effort)
+                run = make_run(
+                    run_id=run_id,
+                    agent=agent_name,
+                    model=run_model,
+                    effort=run_effort,
+                    status=challenge_status,
                 )
-                display_name = f"{prefix}{ch_name}"
-                challenge_status = "pending" if paused else "solving"
-                challenge = {
-                    "id": challenge_id,
-                    "name": display_name,
-                    "description": ch_description,
-                    "flag_format": ch_flag_format,
-                    "agent": run_agent_name,
-                    "model": run_model,
-                    "effort": normalize_effort_for_agent(
-                        run_agent_name, effort
-                    ),
-                    "autonomous": autonomous,
-                    "status": challenge_status,
-                    "created_at": datetime.now().isoformat(),
-                    "files": file_names,
-                    "process": None,
-                    "task": None,
-                    "output_lines": [],
-                    "ws_clients": set(),
-                    "error": None,
-                    "duration_ms": None,
-                    "solve_start": None,
-                    "manager": _default_manager_state(),
-                }
-                challenges[challenge_id] = challenge
-                save_metadata(challenge)
-                if challenge_status == "solving":
-                    challenge["task"] = asyncio.create_task(
-                        run_agent(challenge_id)
+                runs[run_id] = run
+                if is_parallel:
+                    setup_parallel_run_dir(challenge_id, run_id)
+
+            challenge = {
+                "id": challenge_id,
+                "name": ch_name,
+                "description": ch_description,
+                "flag_format": ch_flag_format,
+                "mode": mode,
+                "autonomous": autonomous,
+                "status": challenge_status,
+                "created_at": datetime.now().isoformat(),
+                "files": file_names,
+                "error": None,
+                "manager": _default_manager_state(),
+                "runs": runs,
+            }
+            challenges[challenge_id] = challenge
+            save_metadata(challenge)
+
+            if challenge_status == "solving":
+                for run_id, run in runs.items():
+                    run["task"] = asyncio.create_task(
+                        run_agent_task(challenge_id, run_id)
                     )
-                created.append({
-                    "id": challenge_id,
-                    "name": display_name,
-                    "status": challenge_status,
-                })
+
+            created.append({
+                "id": challenge_id,
+                "name": ch_name,
+                "status": challenge_status,
+            })
 
         return JSONResponse({"created": created}, status_code=201)
     finally:
         shutil.rmtree(base_dir, ignore_errors=True)
 
+
+# ---------------------------------------------------------------------------
+# Solve / Stop / Steer / Unshelve / Unsolve / Delete
+# ---------------------------------------------------------------------------
 
 async def solve_challenge(request: Request) -> JSONResponse:
     if err := require_auth(request):
@@ -848,11 +1187,34 @@ async def solve_challenge(request: Request) -> JSONResponse:
     if challenge["status"] == "solving":
         return JSONResponse({"error": "already solving"}, status_code=409)
 
-    challenge["status"] = "solving"
-    challenge["output_lines"] = []
-    clear_output_log(challenge_id)
-    challenge["task"] = asyncio.create_task(run_agent(challenge_id))
-    return JSONResponse({"status": "solving"})
+    target_run_id = request.query_params.get("run_id")
+
+    if target_run_id:
+        # Restart a specific run
+        run = challenge["runs"].get(target_run_id)
+        if not run:
+            return JSONResponse(
+                {"error": "run not found"}, status_code=404
+            )
+        run["status"] = "solving"
+        run["output_lines"] = []
+        clear_output_log(challenge_id, target_run_id)
+        run["task"] = asyncio.create_task(
+            run_agent_task(challenge_id, target_run_id)
+        )
+    else:
+        # Restart all runs
+        for run_id, run in challenge["runs"].items():
+            run["status"] = "solving"
+            run["output_lines"] = []
+            clear_output_log(challenge_id, run_id)
+            run["task"] = asyncio.create_task(
+                run_agent_task(challenge_id, run_id)
+            )
+
+    challenge["status"] = derive_challenge_status(challenge)
+    save_metadata(challenge)
+    return JSONResponse({"status": challenge["status"]})
 
 
 async def stop_challenge(request: Request) -> JSONResponse:
@@ -866,17 +1228,106 @@ async def stop_challenge(request: Request) -> JSONResponse:
     if not challenge:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    proc = challenge.get("process")
+    target_run_id = request.query_params.get("run_id")
+
+    if target_run_id:
+        runs_to_stop = {target_run_id: challenge["runs"].get(target_run_id)}
+        if not runs_to_stop[target_run_id]:
+            return JSONResponse(
+                {"error": "run not found"}, status_code=404
+            )
+    else:
+        runs_to_stop = dict(challenge["runs"])
+
+    for run_id, run in runs_to_stop.items():
+        if not run:
+            continue
+        proc = run.get("process")
+        if proc and proc.returncode is None:
+            proc.terminate()
+            run["status"] = "failed"
+            stop_event = {
+                "type": "system",
+                "message": "Agent stopped by user.",
+            }
+            run["output_lines"].append(stop_event)
+            append_output_event(challenge_id, run_id, stop_event)
+            await broadcast(challenge_id, run_id, stop_event)
+
+    challenge["status"] = derive_challenge_status(challenge)
+    save_metadata(challenge)
+    return JSONResponse({"status": challenge["status"]})
+
+
+async def steer_challenge(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    body = await request.json()
+    message = body.get("message", "").strip()
+    if not message:
+        return JSONResponse(
+            {"error": "message required"}, status_code=400
+        )
+
+    target_run_id = body.get("run_id")
+
+    if target_run_id:
+        run = challenge["runs"].get(target_run_id)
+        if not run:
+            return JSONResponse(
+                {"error": "run not found"}, status_code=404
+            )
+    else:
+        # Find the first solving run
+        run = None
+        target_run_id = None
+        for rid, r in challenge["runs"].items():
+            if r["status"] == "solving":
+                run = r
+                target_run_id = rid
+                break
+        if not run:
+            # Fall back to first run
+            target_run_id = next(iter(challenge["runs"]), None)
+            if target_run_id:
+                run = challenge["runs"][target_run_id]
+        if not run or not target_run_id:
+            return JSONResponse(
+                {"error": "no run to steer"}, status_code=404
+            )
+
+    # Stop current process if running
+    proc = run.get("process")
     if proc and proc.returncode is None:
         proc.terminate()
-        challenge["status"] = "failed"
-        save_metadata(challenge)
-        stop_event = {
-            "type": "system", "message": "Agent stopped by user.",
-        }
-        challenge["output_lines"].append(stop_event)
-        append_output_event(challenge_id, stop_event)
-        await broadcast(challenge_id, stop_event)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+
+    steer_event = {"type": "user_steer", "message": message}
+    run["output_lines"].append(steer_event)
+    append_output_event(challenge_id, target_run_id, steer_event)
+    await broadcast(challenge_id, target_run_id, steer_event)
+
+    run["status"] = "solving"
+    run["error"] = None
+    run["task"] = asyncio.create_task(
+        run_agent_task(
+            challenge_id, target_run_id, continue_msg=message
+        )
+    )
+
+    challenge["status"] = derive_challenge_status(challenge)
+    save_metadata(challenge)
     return JSONResponse({"status": challenge["status"]})
 
 
@@ -899,26 +1350,34 @@ async def unshelve_challenge(request: Request) -> JSONResponse:
     last_summary = manager_state.get("last_summary", "")
     continue_msg = last_summary if last_summary else None
 
-    unshelve_event = {
-        "type": "system",
-        "message": "Challenge un-shelved by user.",
-    }
-    challenge["output_lines"].append(unshelve_event)
-    append_output_event(challenge_id, unshelve_event)
-    await broadcast(challenge_id, unshelve_event)
+    for run_id, run in challenge["runs"].items():
+        if run["status"] == "shelved":
+            unshelve_event = {
+                "type": "system",
+                "message": "Challenge un-shelved by user.",
+            }
+            run["output_lines"].append(unshelve_event)
+            append_output_event(challenge_id, run_id, unshelve_event)
+            await broadcast(challenge_id, run_id, unshelve_event)
 
-    challenge["status"] = "solving"
-    challenge["error"] = None
+            run["status"] = "solving"
+            run["error"] = None
+            run["task"] = asyncio.create_task(
+                run_agent_task(
+                    challenge_id, run_id, continue_msg=continue_msg
+                )
+            )
+
     manager_state["shelve_reason"] = None
     challenge["manager"] = manager_state
+    challenge["error"] = None
+    challenge["status"] = derive_challenge_status(challenge)
     save_metadata(challenge)
-    challenge["task"] = asyncio.create_task(
-        run_agent(challenge_id, continue_msg=continue_msg)
-    )
-    return JSONResponse({"status": "solving"})
+    return JSONResponse({"status": challenge["status"]})
 
 
-async def steer_challenge(request: Request) -> JSONResponse:
+async def unsolve_challenge(request: Request) -> JSONResponse:
+    """Set solved run(s) back to failed so user can retry."""
     if err := require_auth(request):
         return err
     if err := require_csrf(request):
@@ -929,33 +1388,24 @@ async def steer_challenge(request: Request) -> JSONResponse:
     if not challenge:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    body = await request.json()
-    message = body.get("message", "").strip()
-    if not message:
+    changed = False
+    for run in challenge["runs"].values():
+        if run["status"] == "solved":
+            run["status"] = "failed"
+            changed = True
+
+    if not changed:
         return JSONResponse(
-            {"error": "message required"}, status_code=400
+            {"error": "no solved runs to unsolve"}, status_code=409
         )
 
-    # Stop current process if running
-    proc = challenge.get("process")
-    if proc and proc.returncode is None:
-        proc.terminate()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            proc.kill()
-
-    steer_event = {"type": "user_steer", "message": message}
-    challenge["output_lines"].append(steer_event)
-    append_output_event(challenge_id, steer_event)
-    await broadcast(challenge_id, steer_event)
-
-    challenge["status"] = "solving"
-    challenge["error"] = None
-    challenge["task"] = asyncio.create_task(
-        run_agent(challenge_id, continue_msg=message)
-    )
-    return JSONResponse({"status": "solving"})
+    challenge["status"] = derive_challenge_status(challenge)
+    save_metadata(challenge)
+    await broadcast_challenge(challenge_id, {
+        "type": "status",
+        "status": challenge["status"],
+    })
+    return JSONResponse({"status": challenge["status"]})
 
 
 async def delete_challenge(request: Request) -> JSONResponse:
@@ -969,9 +1419,11 @@ async def delete_challenge(request: Request) -> JSONResponse:
     if not challenge:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    proc = challenge.get("process")
-    if proc and proc.returncode is None:
-        proc.terminate()
+    # Stop all runs
+    for run in challenge["runs"].values():
+        proc = run.get("process")
+        if proc and proc.returncode is None:
+            proc.terminate()
 
     challenge_dir = CHALLENGES_DIR / challenge_id
     if challenge_dir.exists():
@@ -981,6 +1433,10 @@ async def delete_challenge(request: Request) -> JSONResponse:
     del challenges[challenge_id]
     return JSONResponse({"ok": True})
 
+
+# ---------------------------------------------------------------------------
+# File viewer
+# ---------------------------------------------------------------------------
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"}
 TEXT_EXTS = {
@@ -1008,6 +1464,20 @@ def classify_file(path: Path) -> str:
         return "binary"
 
 
+def _resolve_file_dir(challenge_id: str, run_id: str | None) -> Path | None:
+    """Resolve the directory for file listing based on mode and run_id."""
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return None
+    if (
+        run_id
+        and challenge["mode"] in ("parallel", "parallel_managed")
+        and run_id in challenge["runs"]
+    ):
+        return CHALLENGES_DIR / challenge_id / "_runs" / run_id
+    return CHALLENGES_DIR / challenge_id
+
+
 async def list_files(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
@@ -1015,8 +1485,10 @@ async def list_files(request: Request) -> JSONResponse:
     challenge_id = request.path_params["id"]
     if challenge_id not in challenges:
         return JSONResponse({"error": "not found"}, status_code=404)
-    challenge_dir = CHALLENGES_DIR / challenge_id
-    if not challenge_dir.exists():
+
+    run_id = request.query_params.get("run_id")
+    challenge_dir = _resolve_file_dir(challenge_id, run_id)
+    if not challenge_dir or not challenge_dir.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
 
     files = []
@@ -1041,7 +1513,11 @@ async def get_file(request: Request) -> Response:
         return JSONResponse({"error": "not found"}, status_code=404)
     file_path = request.path_params["path"]
 
-    challenge_dir = CHALLENGES_DIR / challenge_id
+    run_id = request.query_params.get("run_id")
+    challenge_dir = _resolve_file_dir(challenge_id, run_id)
+    if not challenge_dir:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
     full_path = (challenge_dir / file_path).resolve()
 
     try:
@@ -1104,18 +1580,43 @@ async def get_file(request: Request) -> Response:
     })
 
 
-async def broadcast(challenge_id: str, data: dict):
-    challenge = challenges.get(challenge_id)
-    if not challenge:
-        return
-    dead = []
-    for ws in list(challenge["ws_clients"]):
-        try:
-            await ws.send_json(data)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        challenge["ws_clients"].discard(ws)
+async def download_file(request: Request) -> Response:
+    if err := require_auth(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    if challenge_id not in challenges:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    file_path = request.path_params["path"]
+
+    run_id = request.query_params.get("run_id")
+    challenge_dir = _resolve_file_dir(challenge_id, run_id)
+    if not challenge_dir:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    full_path = (challenge_dir / file_path).resolve()
+
+    try:
+        full_path.relative_to(challenge_dir.resolve())
+    except ValueError:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if not full_path.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    mime = (
+        mimetypes.guess_type(str(full_path))[0]
+        or "application/octet-stream"
+    )
+    data = full_path.read_bytes()
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{full_path.name}"'
+            ),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1198,14 +1699,31 @@ def truncate_log_for_manager(
 
 
 def build_manager_prompt(challenge: dict, truncated_log: str) -> str:
-    """Build the prompt sent to the manager LLM."""
+    """Build the prompt sent to the manager LLM (single_managed mode)."""
     manager_state = challenge.get("manager", {})
-    elapsed_ms = challenge.get("duration_ms") or 0
-    if challenge.get("solve_start"):
+
+    # Find the active run for elapsed time
+    active_run = None
+    for run in challenge["runs"].values():
+        if run["status"] == "solving":
+            active_run = run
+            break
+    if not active_run:
+        active_run = next(iter(challenge["runs"].values()), None)
+
+    elapsed_ms = 0
+    if active_run and active_run.get("solve_start"):
         elapsed_ms = int(
-            (_time.monotonic() - challenge["solve_start"]) * 1000
+            (_time.monotonic() - active_run["solve_start"]) * 1000
         )
+    elif active_run:
+        elapsed_ms = active_run.get("duration_ms") or 0
     elapsed_min = elapsed_ms / 60_000
+
+    agent_name = active_run["agent"] if active_run else "unknown"
+
+    settings = load_settings()
+    pool = settings.get("manager_agent_pool", list(VALID_AGENTS))
 
     parts = [
         "You are a CTF challenge manager agent. Your job is to review "
@@ -1219,9 +1737,10 @@ def build_manager_prompt(challenge: dict, truncated_log: str) -> str:
     if challenge.get("flag_format"):
         parts.append(f"Flag format: {challenge['flag_format']}")
     parts.extend([
-        f"Agent: {challenge.get('agent', 'unknown')}",
+        f"Agent: {agent_name}",
         f"Elapsed time: {elapsed_min:.1f} minutes",
         f"Times steered so far: {manager_state.get('steer_count', 0)}",
+        f"Available agents for handoff: {', '.join(pool)}",
     ])
 
     last_summary = manager_state.get("last_summary", "")
@@ -1255,6 +1774,10 @@ def build_manager_prompt(challenge: dict, truncated_log: str) -> str:
         "for what to try next. Be concrete: name specific tools, "
         "techniques, or commands.",
         "",
+        "HANDOFF — The current agent is not well-suited for this "
+        "challenge. Hand off to a different agent from the pool. "
+        "Specify which agent and provide context/findings for them.",
+        "",
         "SHELVE — The solver has exhausted reasonable approaches and "
         "further steering is unlikely to yield progress. The challenge "
         "may require capabilities the agent doesn't have, or the "
@@ -1270,15 +1793,90 @@ def build_manager_prompt(challenge: dict, truncated_log: str) -> str:
         "- Is it repeating the same failed approaches?",
         "- Are there unconventional techniques worth suggesting?",
         "- Is partial progress being made with each attempt?",
+        "- Would a different agent handle this better?",
         "",
         "Respond in EXACTLY this format:",
-        "VERDICT: STEER | SHELVE | WAIT",
+        "VERDICT: STEER | HANDOFF | SHELVE | WAIT",
         "REASONING: <your analysis>",
         "INSTRUCTIONS: <specific instructions for the solver, "
         "only if VERDICT is STEER>",
+        "HANDOFF_AGENT: <agent name from pool, only if VERDICT is HANDOFF>",
+        "HANDOFF_CONTEXT: <findings and instructions for the new agent, "
+        "only if VERDICT is HANDOFF>",
         "SUMMARY: <concise summary of what has been tried and current "
         "state, for future reference>",
     ])
+    return "\n".join(parts)
+
+
+def build_parallel_manager_prompt(
+    challenge: dict, run_logs: dict[str, str]
+) -> str:
+    """Build the prompt for parallel_managed mode."""
+    manager_state = challenge.get("manager", {})
+
+    parts = [
+        "You are a CTF challenge manager agent coordinating multiple "
+        "solver agents working on the same CTF challenge in parallel.",
+        "",
+        f"Challenge: {challenge['name']}",
+    ]
+    if challenge.get("description"):
+        parts.append(f"Description: {challenge['description']}")
+    if challenge.get("flag_format"):
+        parts.append(f"Flag format: {challenge['flag_format']}")
+
+    last_summary = manager_state.get("last_summary", "")
+    if last_summary:
+        parts.extend([
+            "",
+            "Summary from your previous review:",
+            last_summary,
+        ])
+
+    review_history = manager_state.get("review_history", [])
+    if review_history:
+        parts.append("")
+        parts.append("Previous manager decisions:")
+        for entry in review_history[-5:]:
+            parts.append(
+                f"  [{entry.get('verdict', '?')}] "
+                f"{entry.get('reasoning', '')[:200]}"
+            )
+
+    parts.append("")
+    for agent_name, log_text in run_logs.items():
+        parts.extend([
+            f"=== {agent_name} OUTPUT LOG ===",
+            log_text,
+            f"=== END {agent_name} LOG ===",
+            "",
+        ])
+
+    parts.extend([
+        "Analyze ALL agents' progress and decide ONE of:",
+        "",
+        "SUMMARIZE — Cross-pollinate findings between agents. Provide "
+        "a summary of what ALL agents have found, and provide tailored "
+        "steering instructions for each agent based on what others found.",
+        "",
+        "SHELVE — All agents have exhausted reasonable approaches.",
+        "",
+        "WAIT — Agents are making reasonable progress.",
+        "",
+        "Respond in EXACTLY this format:",
+        "VERDICT: SUMMARIZE | SHELVE | WAIT",
+        "REASONING: <your analysis>",
+        "SUMMARY: <overall summary of findings across all agents>",
+    ])
+
+    # Add per-agent steer fields
+    for agent_name in run_logs:
+        parts.append(
+            f"STEER_{agent_name}: <tailored instructions for "
+            f"{agent_name}, only if VERDICT is SUMMARIZE>"
+        )
+
     return "\n".join(parts)
 
 
@@ -1289,19 +1887,43 @@ def parse_manager_response(text: str) -> dict:
         "reasoning": "",
         "instructions": "",
         "summary": "",
+        "handoff_agent": "",
+        "handoff_context": "",
     }
     current_field = None
     current_lines: list[str] = []
 
+    field_prefixes = [
+        ("VERDICT:", "verdict"),
+        ("REASONING:", "reasoning"),
+        ("INSTRUCTIONS:", "instructions"),
+        ("HANDOFF_AGENT:", "handoff_agent"),
+        ("HANDOFF_CONTEXT:", "handoff_context"),
+        ("SUMMARY:", "summary"),
+    ]
+
+    # Dynamically detect STEER_<agent> fields
+    for line in text.splitlines():
+        stripped = line.strip()
+        for prefix_str, field_name in field_prefixes:
+            if stripped.upper().startswith(prefix_str):
+                break
+        else:
+            # Check for STEER_<agent> pattern
+            upper = stripped.upper()
+            if upper.startswith("STEER_"):
+                colon_idx = stripped.find(":")
+                if colon_idx > 0:
+                    dynamic_field = stripped[:colon_idx].strip()
+                    field_prefixes.append(
+                        (f"{dynamic_field.upper()}:", dynamic_field.lower())
+                    )
+
+    # Re-parse with all fields
     for line in text.splitlines():
         stripped = line.strip()
         matched = False
-        for prefix, field in (
-            ("VERDICT:", "verdict"),
-            ("REASONING:", "reasoning"),
-            ("INSTRUCTIONS:", "instructions"),
-            ("SUMMARY:", "summary"),
-        ):
+        for prefix, field in field_prefixes:
             if stripped.upper().startswith(prefix):
                 if current_field:
                     result[current_field] = "\n".join(
@@ -1318,9 +1940,13 @@ def parse_manager_response(text: str) -> dict:
         result[current_field] = "\n".join(current_lines).strip()
 
     verdict = result["verdict"].upper().strip()
-    if verdict not in ("STEER", "SHELVE", "WAIT"):
+    if verdict not in ("STEER", "SHELVE", "WAIT", "HANDOFF", "SUMMARIZE"):
         if "STEER" in verdict:
             verdict = "STEER"
+        elif "HANDOFF" in verdict:
+            verdict = "HANDOFF"
+        elif "SUMMARIZE" in verdict:
+            verdict = "SUMMARIZE"
         elif "SHELVE" in verdict:
             verdict = "SHELVE"
         else:
@@ -1333,15 +1959,32 @@ def _manager_should_review(challenge: dict, settings: dict) -> bool:
     """Check if a challenge is due for manager review."""
     if challenge["status"] != "solving":
         return False
-    solve_start = challenge.get("solve_start")
-    if not solve_start:
+    if challenge["mode"] not in ("single_managed", "parallel_managed"):
         return False
 
     now = _time.monotonic()
-    elapsed = now - solve_start
     min_time = settings.get("manager_min_solve_time", 5) * 60
-    if elapsed < min_time:
-        return False
+
+    if challenge["mode"] == "single_managed":
+        # Check the active run's solve_start
+        for run in challenge["runs"].values():
+            if run["status"] == "solving" and run.get("solve_start"):
+                elapsed = now - run["solve_start"]
+                if elapsed >= min_time:
+                    break
+        else:
+            return False
+    elif challenge["mode"] == "parallel_managed":
+        # Check if any run is solving with enough time
+        has_solving = False
+        for run in challenge["runs"].values():
+            if run["status"] == "solving" and run.get("solve_start"):
+                elapsed = now - run["solve_start"]
+                if elapsed >= min_time:
+                    has_solving = True
+                    break
+        if not has_solving:
+            return False
 
     manager_state = challenge.get("manager", {})
     last_review = manager_state.get("last_review_at")
@@ -1362,17 +2005,46 @@ async def run_manager_review(challenge_id: str) -> None:
     manager_state = challenge.setdefault("manager", _default_manager_state())
     manager_state["last_review_at"] = _time.monotonic()
 
+    # Notify all runs about manager review
     review_event = {
         "type": "system",
         "subtype": "manager_review",
         "message": "Manager agent reviewing progress...",
     }
-    challenge["output_lines"].append(review_event)
-    append_output_event(challenge_id, review_event)
-    await broadcast(challenge_id, review_event)
+    for run_id, run in challenge["runs"].items():
+        if run["status"] == "solving":
+            run["output_lines"].append(review_event)
+            append_output_event(challenge_id, run_id, review_event)
+            await broadcast(challenge_id, run_id, review_event)
 
-    truncated_log = truncate_log_for_manager(challenge["output_lines"])
-    prompt = build_manager_prompt(challenge, truncated_log)
+    if challenge["mode"] == "single_managed":
+        # Find active run
+        active_run = None
+        active_run_id = None
+        for rid, run in challenge["runs"].items():
+            if run["status"] == "solving":
+                active_run = run
+                active_run_id = rid
+                break
+        if not active_run:
+            return
+
+        truncated_log = truncate_log_for_manager(
+            active_run["output_lines"]
+        )
+        prompt = build_manager_prompt(challenge, truncated_log)
+    elif challenge["mode"] == "parallel_managed":
+        run_logs: dict[str, str] = {}
+        for rid, run in challenge["runs"].items():
+            if run["status"] == "solving":
+                run_logs[run["agent"]] = truncate_log_for_manager(
+                    run["output_lines"]
+                )
+        if not run_logs:
+            return
+        prompt = build_parallel_manager_prompt(challenge, run_logs)
+    else:
+        return
 
     model = settings.get("manager_model", "sonnet")
     cmd = [
@@ -1409,9 +2081,11 @@ async def run_manager_review(challenge_id: str) -> None:
             "subtype": "manager_review",
             "message": "Manager review failed — no response.",
         }
-        challenge["output_lines"].append(err_event)
-        append_output_event(challenge_id, err_event)
-        await broadcast(challenge_id, err_event)
+        for run_id, run in challenge["runs"].items():
+            if run["status"] == "solving":
+                run["output_lines"].append(err_event)
+                append_output_event(challenge_id, run_id, err_event)
+                await broadcast(challenge_id, run_id, err_event)
         return
 
     parsed = parse_manager_response(response_text)
@@ -1421,14 +2095,45 @@ async def run_manager_review(challenge_id: str) -> None:
         "timestamp": datetime.now().isoformat(),
         "verdict": verdict,
         "reasoning": parsed["reasoning"],
-        "instructions": parsed["instructions"],
-        "summary": parsed["summary"],
+        "instructions": parsed.get("instructions", ""),
+        "summary": parsed.get("summary", ""),
     }
     manager_state["review_history"].append(review_entry)
-    if parsed["summary"]:
+    if parsed.get("summary"):
         manager_state["last_summary"] = parsed["summary"]
 
-    if verdict == "STEER" and parsed["instructions"]:
+    if challenge["mode"] == "single_managed":
+        await _handle_single_managed_verdict(
+            challenge_id, challenge, parsed, manager_state, settings
+        )
+    elif challenge["mode"] == "parallel_managed":
+        await _handle_parallel_managed_verdict(
+            challenge_id, challenge, parsed, manager_state
+        )
+
+
+async def _handle_single_managed_verdict(
+    challenge_id: str,
+    challenge: dict,
+    parsed: dict,
+    manager_state: dict,
+    settings: dict,
+) -> None:
+    """Handle manager verdict for single_managed mode."""
+    verdict = parsed["verdict"]
+
+    # Find active run
+    active_run = None
+    active_run_id = None
+    for rid, run in challenge["runs"].items():
+        if run["status"] == "solving":
+            active_run = run
+            active_run_id = rid
+            break
+    if not active_run or not active_run_id:
+        return
+
+    if verdict == "STEER" and parsed.get("instructions"):
         manager_state["steer_count"] = (
             manager_state.get("steer_count", 0) + 1
         )
@@ -1441,7 +2146,7 @@ async def run_manager_review(challenge_id: str) -> None:
         )
 
         # Stop current process
-        proc = challenge.get("process")
+        proc = active_run.get("process")
         if proc and proc.returncode is None:
             proc.terminate()
             try:
@@ -1454,24 +2159,100 @@ async def run_manager_review(challenge_id: str) -> None:
             "subtype": "manager_steer",
             "message": steer_msg,
         }
-        challenge["output_lines"].append(steer_event)
-        append_output_event(challenge_id, steer_event)
-        await broadcast(challenge_id, steer_event)
+        active_run["output_lines"].append(steer_event)
+        append_output_event(challenge_id, active_run_id, steer_event)
+        await broadcast(challenge_id, active_run_id, steer_event)
 
-        challenge["status"] = "solving"
-        challenge["error"] = None
-        challenge["task"] = asyncio.create_task(
-            run_agent(
-                challenge_id, continue_msg=parsed["instructions"]
+        active_run["status"] = "solving"
+        active_run["error"] = None
+        active_run["task"] = asyncio.create_task(
+            run_agent_task(
+                challenge_id,
+                active_run_id,
+                continue_msg=parsed["instructions"],
+            )
+        )
+
+    elif verdict == "HANDOFF" and parsed.get("handoff_agent"):
+        target_agent = parsed["handoff_agent"].strip()
+        pool = settings.get("manager_agent_pool", list(VALID_AGENTS))
+        if target_agent not in pool:
+            target_agent = pool[0] if pool else DEFAULT_AGENT
+
+        # Stop current run
+        proc = active_run.get("process")
+        if proc and proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+        active_run["status"] = "failed"
+        active_run["error"] = f"Handed off to {target_agent}"
+
+        handoff_event = {
+            "type": "system",
+            "subtype": "manager_handoff",
+            "message": (
+                f"[Manager Agent — Handoff to {target_agent}]\n"
+                f"Reasoning: {parsed['reasoning']}"
+            ),
+        }
+        active_run["output_lines"].append(handoff_event)
+        append_output_event(challenge_id, active_run_id, handoff_event)
+        await broadcast(challenge_id, active_run_id, handoff_event)
+
+        # Write FINDINGS.md in challenge dir for the new agent
+        findings_context = parsed.get("handoff_context", "")
+        if not findings_context and parsed.get("summary"):
+            findings_context = parsed["summary"]
+        if findings_context:
+            cwd = get_run_cwd(challenge_id, active_run)
+            findings_path = cwd / "FINDINGS.md"
+            findings_path.write_text(
+                f"# Findings from previous agent ({active_run['agent']})\n\n"
+                f"{findings_context}\n"
+            )
+
+        # Create new run
+        new_run_id = uuid.uuid4().hex[:8]
+        new_run = make_run(
+            run_id=new_run_id,
+            agent=target_agent,
+            model=resolved_default_model(target_agent),
+            effort=resolved_default_effort(target_agent),
+            status="solving",
+        )
+        challenge["runs"][new_run_id] = new_run
+
+        # For single mode, the new run works in the same dir
+        # so FINDINGS.md is already there
+
+        continue_context = None
+        if findings_context:
+            continue_context = (
+                f"Previous agent ({active_run['agent']}) findings:\n"
+                f"{findings_context}\n\n"
+                "Continue from where the previous agent left off. "
+                "Check FINDINGS.md for details."
+            )
+
+        challenge["status"] = derive_challenge_status(challenge)
+        save_metadata(challenge)
+
+        new_run["task"] = asyncio.create_task(
+            run_agent_task(
+                challenge_id,
+                new_run_id,
+                continue_msg=continue_context,
             )
         )
 
     elif verdict == "SHELVE":
         manager_state["shelve_reason"] = parsed["reasoning"]
-        save_metadata(challenge)
 
         # Stop current process
-        proc = challenge.get("process")
+        proc = active_run.get("process")
         if proc and proc.returncode is None:
             proc.terminate()
             try:
@@ -1479,8 +2260,9 @@ async def run_manager_review(challenge_id: str) -> None:
             except asyncio.TimeoutError:
                 proc.kill()
 
-        challenge["status"] = "shelved"
-        challenge["error"] = None
+        active_run["status"] = "shelved"
+        active_run["error"] = None
+        challenge["status"] = derive_challenge_status(challenge)
         save_metadata(challenge)
 
         shelve_event = {
@@ -1491,10 +2273,10 @@ async def run_manager_review(challenge_id: str) -> None:
                 f"Reasoning: {parsed['reasoning']}"
             ),
         }
-        challenge["output_lines"].append(shelve_event)
-        append_output_event(challenge_id, shelve_event)
-        await broadcast(challenge_id, shelve_event)
-        await broadcast(challenge_id, {
+        active_run["output_lines"].append(shelve_event)
+        append_output_event(challenge_id, active_run_id, shelve_event)
+        await broadcast(challenge_id, active_run_id, shelve_event)
+        await broadcast_challenge(challenge_id, {
             "type": "status",
             "status": "shelved",
         })
@@ -1510,9 +2292,130 @@ async def run_manager_review(challenge_id: str) -> None:
                 f"Reasoning: {parsed['reasoning']}"
             ),
         }
-        challenge["output_lines"].append(wait_event)
-        append_output_event(challenge_id, wait_event)
-        await broadcast(challenge_id, wait_event)
+        active_run["output_lines"].append(wait_event)
+        append_output_event(challenge_id, active_run_id, wait_event)
+        await broadcast(challenge_id, active_run_id, wait_event)
+
+
+async def _handle_parallel_managed_verdict(
+    challenge_id: str,
+    challenge: dict,
+    parsed: dict,
+    manager_state: dict,
+) -> None:
+    """Handle manager verdict for parallel_managed mode."""
+    verdict = parsed["verdict"]
+
+    if verdict == "SUMMARIZE":
+        summary = parsed.get("summary", "")
+        manager_state["steer_count"] = (
+            manager_state.get("steer_count", 0) + 1
+        )
+
+        for run_id, run in challenge["runs"].items():
+            if run["status"] != "solving":
+                continue
+
+            # Write SUMMARY_FINDINGS.md to each run's dir
+            if summary:
+                run_cwd = get_run_cwd(challenge_id, run)
+                findings_path = run_cwd / "SUMMARY_FINDINGS.md"
+                findings_path.write_text(
+                    f"# Cross-Agent Summary (from manager)\n\n"
+                    f"{summary}\n"
+                )
+
+            # Find tailored steer for this run's agent
+            steer_key = f"steer_{run['agent']}"
+            tailored_steer = parsed.get(steer_key, "")
+
+            if tailored_steer:
+                # Stop current process
+                proc = run.get("process")
+                if proc and proc.returncode is None:
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+
+                steer_event = {
+                    "type": "system",
+                    "subtype": "manager_steer",
+                    "message": (
+                        f"[Manager Agent — Summarize & Steer]\n"
+                        f"Summary: {summary}\n\n"
+                        f"Instructions: {tailored_steer}"
+                    ),
+                }
+                run["output_lines"].append(steer_event)
+                append_output_event(challenge_id, run_id, steer_event)
+                await broadcast(challenge_id, run_id, steer_event)
+
+                run["status"] = "solving"
+                run["error"] = None
+                run["task"] = asyncio.create_task(
+                    run_agent_task(
+                        challenge_id,
+                        run_id,
+                        continue_msg=tailored_steer,
+                    )
+                )
+
+        save_metadata(challenge)
+
+    elif verdict == "SHELVE":
+        manager_state["shelve_reason"] = parsed["reasoning"]
+
+        for run_id, run in challenge["runs"].items():
+            if run["status"] != "solving":
+                continue
+            proc = run.get("process")
+            if proc and proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    proc.kill()
+            run["status"] = "shelved"
+            run["error"] = None
+
+            shelve_event = {
+                "type": "system",
+                "subtype": "manager_shelve",
+                "message": (
+                    f"[Manager Agent — Shelved]\n"
+                    f"Reasoning: {parsed['reasoning']}"
+                ),
+            }
+            run["output_lines"].append(shelve_event)
+            append_output_event(challenge_id, run_id, shelve_event)
+            await broadcast(challenge_id, run_id, shelve_event)
+
+        challenge["status"] = derive_challenge_status(challenge)
+        save_metadata(challenge)
+        await broadcast_challenge(challenge_id, {
+            "type": "status",
+            "status": challenge["status"],
+        })
+
+    else:
+        # WAIT
+        save_metadata(challenge)
+        for run_id, run in challenge["runs"].items():
+            if run["status"] != "solving":
+                continue
+            wait_event = {
+                "type": "system",
+                "subtype": "manager_wait",
+                "message": (
+                    f"[Manager Agent — No intervention needed]\n"
+                    f"Reasoning: {parsed['reasoning']}"
+                ),
+            }
+            run["output_lines"].append(wait_event)
+            append_output_event(challenge_id, run_id, wait_event)
+            await broadcast(challenge_id, run_id, wait_event)
 
 
 async def manager_loop() -> None:
@@ -1520,14 +2423,16 @@ async def manager_loop() -> None:
     while True:
         await asyncio.sleep(60)
         settings = load_settings()
-        if not settings.get("manager_enabled"):
-            continue
         for challenge_id, challenge in list(challenges.items()):
             if _manager_should_review(challenge, settings):
                 asyncio.create_task(run_manager_review(challenge_id))
 
 
-def build_prompt(challenge: dict) -> str:
+# ---------------------------------------------------------------------------
+# Build prompt
+# ---------------------------------------------------------------------------
+
+def build_prompt(challenge: dict, run: dict) -> str:
     """Build the CTF solving prompt."""
     parts = [
         "You are solving a CTF challenge.",
@@ -1565,21 +2470,55 @@ def build_prompt(challenge: dict) -> str:
             "flag. If one technique fails, move on to the "
             "next. Exhaust all options before giving up.",
         ])
+
+    # For managed modes, instruct about FINDINGS.md
+    if challenge["mode"] in ("single_managed", "parallel_managed"):
+        if challenge["mode"] == "parallel_managed":
+            findings_name = f"FINDINGS_{run['agent']}.md"
+        else:
+            findings_name = "FINDINGS.md"
+        parts.extend([
+            "",
+            f"Maintain a {findings_name} file in your working directory. "
+            "Document: files analyzed, tools/techniques tried, results found, dead ends, hypotheses. "
+            "Update it as you work — it will be read by the next agent if there's a handoff.",
+        ])
+
+    # For retry-with-context: if the run already has output_lines, summarize
+    if run.get("output_lines"):
+        log_summary = truncate_log_for_manager(
+            run["output_lines"], max_chars=4000
+        )
+        if log_summary.strip():
+            parts.extend([
+                "",
+                "Previous attempt summary (avoid repeating failed approaches):",
+                log_summary,
+            ])
+
     return "\n".join(parts)
 
 
-async def run_agent(
-    challenge_id: str, continue_msg: str | None = None
+# ---------------------------------------------------------------------------
+# Run agent
+# ---------------------------------------------------------------------------
+
+async def run_agent_task(
+    challenge_id: str,
+    run_id: str,
+    continue_msg: str | None = None,
 ):
+    """Run an agent for a specific run of a challenge."""
     challenge = challenges[challenge_id]
-    challenge_dir = CHALLENGES_DIR / challenge_id
-    challenge["solve_start"] = _time.monotonic()
-    provider = get_provider(challenge.get("agent", DEFAULT_AGENT))
+    run = challenge["runs"][run_id]
+    run_cwd = get_run_cwd(challenge_id, run)
+    run["solve_start"] = _time.monotonic()
+    provider = get_provider(run["agent"])
 
     if continue_msg:
         prompt = continue_msg
     else:
-        prompt = build_prompt(challenge)
+        prompt = build_prompt(challenge, run)
 
     if continue_msg:
         sys_event = {
@@ -1592,30 +2531,42 @@ async def run_agent(
             "type": "system",
             "message": f"{provider.label} agent starting...",
         }
-    challenge["output_lines"].append(sys_event)
-    append_output_event(challenge_id, sys_event)
-    await broadcast(challenge_id, sys_event)
+    run["output_lines"].append(sys_event)
+    append_output_event(challenge_id, run_id, sys_event)
+    await broadcast(challenge_id, run_id, sys_event)
 
     env = os.environ.copy()
     env["IS_SANDBOX"] = "1"
 
-    cmd = provider.build_command(
-        challenge, prompt, bool(continue_msg)
-    )
+    # Build command using run data instead of challenge data
+    # We pass a dict that looks like the old challenge format for provider compatibility
+    compat_dict = {
+        "id": challenge["id"],
+        "name": challenge["name"],
+        "description": challenge["description"],
+        "flag_format": challenge["flag_format"],
+        "agent": run["agent"],
+        "model": run["model"],
+        "effort": run.get("effort", ""),
+        "autonomous": challenge.get("autonomous", False),
+        "_codex_thread_id": run.get("_codex_thread_id"),
+        "_opencode_session_id": run.get("_opencode_session_id"),
+    }
+    cmd = provider.build_command(compat_dict, prompt, bool(continue_msg))
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        cwd=str(challenge_dir),
+        cwd=str(run_cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
         limit=2 ** 24,  # 16 MB — default 64 KB is too small for large JSON events
     )
-    challenge["process"] = proc
-    challenge["_saw_provider_message"] = False
-    challenge["_last_stream_error"] = None
-    challenge["_last_stderr_lines"] = []
-    challenge["_last_unknown_events"] = []
+    run["process"] = proc
+    run["_saw_provider_message"] = False
+    run["_last_stream_error"] = None
+    run["_last_stderr_lines"] = []
+    run["_last_unknown_events"] = []
 
     try:
         async def stream_events(
@@ -1639,12 +2590,10 @@ async def run_agent(
                         "stream": stream_name,
                     }
 
-                provider_state_before = provider_state_for_metadata(
-                    challenge
-                )
-                event = provider.normalize_live_event(event, challenge)
+                provider_state_before = provider_state_for_metadata(run)
+                event = provider.normalize_live_event(event, run)
                 if (
-                    provider_state_for_metadata(challenge)
+                    provider_state_for_metadata(run)
                     != provider_state_before
                 ):
                     save_metadata(challenge)
@@ -1652,15 +2601,15 @@ async def run_agent(
                     continue
 
                 if event.get("type") in {"assistant", "user", "result"}:
-                    challenge["_saw_provider_message"] = True
+                    run["_saw_provider_message"] = True
                 elif (
                     event.get("type") == "raw"
                     and event.get("stream") == "stdout"
                 ):
-                    challenge["_saw_provider_message"] = True
+                    run["_saw_provider_message"] = True
 
                 if event.get("type") == "error":
-                    challenge["_last_stream_error"] = event.get(
+                    run["_last_stream_error"] = event.get(
                         "message"
                     )
                 elif (
@@ -1668,7 +2617,7 @@ async def run_agent(
                     and event.get("stream") == "stderr"
                     and event.get("text")
                 ):
-                    stderr_lines = challenge.setdefault(
+                    stderr_lines = run.setdefault(
                         "_last_stderr_lines", []
                     )
                     stderr_lines.append(event["text"])
@@ -1684,7 +2633,7 @@ async def run_agent(
                     "user_steer",
                     "raw",
                 }:
-                    unknown_events = challenge.setdefault(
+                    unknown_events = run.setdefault(
                         "_last_unknown_events", []
                     )
                     try:
@@ -1695,9 +2644,9 @@ async def run_agent(
                     if len(unknown_events) > 5:
                         del unknown_events[:-5]
 
-                challenge["output_lines"].append(event)
-                append_output_event(challenge_id, event)
-                await broadcast(challenge_id, event)
+                run["output_lines"].append(event)
+                append_output_event(challenge_id, run_id, event)
+                await broadcast(challenge_id, run_id, event)
 
         await asyncio.gather(
             stream_events(proc.stdout, "stdout"),
@@ -1706,22 +2655,43 @@ async def run_agent(
 
         await proc.wait()
 
-        stream_error = challenge.get("_last_stream_error")
-        saw_provider_message = challenge.get(
+        stream_error = run.get("_last_stream_error")
+        saw_provider_message = run.get(
             "_saw_provider_message", False
         )
         stderr_tail = "\n".join(
-            challenge.get("_last_stderr_lines", [])
+            run.get("_last_stderr_lines", [])
         ).strip()
         unknown_tail = "\n".join(
-            challenge.get("_last_unknown_events", [])
+            run.get("_last_unknown_events", [])
         ).strip()
 
         if proc.returncode == 0 and not stream_error and saw_provider_message:
-            challenge["status"] = "solved"
-            challenge["error"] = None
+            run["status"] = "solved"
+            run["error"] = None
+
+            # Auto-stop other runs in parallel modes
+            if challenge["mode"] in ("parallel", "parallel_managed"):
+                for other_id, other_run in challenge["runs"].items():
+                    if other_id != run_id and other_run.get("process"):
+                        other_proc = other_run["process"]
+                        if other_proc.returncode is None:
+                            other_proc.terminate()
+                            other_run["status"] = "failed"
+                            other_run["process"] = None
+                            stop_event = {
+                                "type": "system",
+                                "message": f"Stopped: another agent ({run['agent']}) solved the challenge.",
+                            }
+                            other_run["output_lines"].append(stop_event)
+                            append_output_event(
+                                challenge_id, other_id, stop_event
+                            )
+                            await broadcast(
+                                challenge_id, other_id, stop_event
+                            )
         else:
-            challenge["status"] = "failed"
+            run["status"] = "failed"
             if proc.returncode != 0:
                 error_msg = (
                     f"Agent exited with code {proc.returncode}"
@@ -1743,35 +2713,44 @@ async def run_agent(
                         "\nLast provider events:\n"
                         f"{unknown_tail}"
                     )
-            challenge["error"] = error_msg
+            run["error"] = error_msg
             err_event = {
                 "type": "error",
                 "message": error_msg,
                 "exit_code": proc.returncode,
             }
-            challenge["output_lines"].append(err_event)
-            append_output_event(challenge_id, err_event)
-            await broadcast(challenge_id, err_event)
+            run["output_lines"].append(err_event)
+            append_output_event(challenge_id, run_id, err_event)
+            await broadcast(challenge_id, run_id, err_event)
 
     except Exception as exc:
-        challenge["status"] = "failed"
-        challenge["error"] = str(exc)
+        run["status"] = "failed"
+        run["error"] = str(exc)
         err_event = {"type": "error", "message": str(exc)}
-        challenge["output_lines"].append(err_event)
-        append_output_event(challenge_id, err_event)
-        await broadcast(challenge_id, err_event)
+        run["output_lines"].append(err_event)
+        append_output_event(challenge_id, run_id, err_event)
+        await broadcast(challenge_id, run_id, err_event)
     finally:
-        challenge["process"] = None
-        if challenge.get("solve_start"):
-            elapsed = _time.monotonic() - challenge["solve_start"]
-            challenge["duration_ms"] = int(elapsed * 1000)
+        run["process"] = None
+        if run.get("solve_start"):
+            elapsed = _time.monotonic() - run["solve_start"]
+            run["duration_ms"] = int(elapsed * 1000)
+        challenge["status"] = derive_challenge_status(challenge)
         save_metadata(challenge)
-        await broadcast(challenge_id, {
+        await broadcast(challenge_id, run_id, {
+            "type": "status",
+            "status": run["status"],
+            "error": run.get("error"),
+        })
+        await broadcast_challenge(challenge_id, {
             "type": "status",
             "status": challenge["status"],
-            "error": challenge.get("error"),
         })
 
+
+# ---------------------------------------------------------------------------
+# WebSocket handler
+# ---------------------------------------------------------------------------
 
 async def challenge_ws(websocket: WebSocket):
     if not websocket.session.get("authenticated"):
@@ -1779,21 +2758,26 @@ async def challenge_ws(websocket: WebSocket):
         return
 
     challenge_id = websocket.path_params["id"]
+    run_id = websocket.path_params["run_id"]
     challenge = challenges.get(challenge_id)
     if not challenge:
         await websocket.close(code=4004)
         return
+    run = challenge["runs"].get(run_id)
+    if not run:
+        await websocket.close(code=4004)
+        return
 
     await websocket.accept()
-    challenge["ws_clients"].add(websocket)
+    run["ws_clients"].add(websocket)
 
     # Send history
-    for event in challenge["output_lines"]:
+    for event in run["output_lines"]:
         await websocket.send_json(event)
 
     # Send current status
     await websocket.send_json({
-        "type": "status", "status": challenge["status"]
+        "type": "status", "status": run["status"]
     })
 
     try:
@@ -1802,43 +2786,12 @@ async def challenge_ws(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
-        challenge["ws_clients"].discard(websocket)
+        run["ws_clients"].discard(websocket)
 
 
-async def download_file(request: Request) -> Response:
-    if err := require_auth(request):
-        return err
-
-    challenge_id = request.path_params["id"]
-    if challenge_id not in challenges:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    file_path = request.path_params["path"]
-
-    challenge_dir = CHALLENGES_DIR / challenge_id
-    full_path = (challenge_dir / file_path).resolve()
-
-    try:
-        full_path.relative_to(challenge_dir.resolve())
-    except ValueError:
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    if not full_path.is_file():
-        return JSONResponse({"error": "not found"}, status_code=404)
-
-    mime = (
-        mimetypes.guess_type(str(full_path))[0]
-        or "application/octet-stream"
-    )
-    data = full_path.read_bytes()
-    return Response(
-        content=data,
-        media_type=mime,
-        headers={
-            "Content-Disposition": (
-                f'attachment; filename="{full_path.name}"'
-            ),
-        },
-    )
-
+# ---------------------------------------------------------------------------
+# Settings / Agents / Usage
+# ---------------------------------------------------------------------------
 
 async def get_settings(request: Request) -> JSONResponse:
     if err := require_auth(request):
@@ -1888,8 +2841,6 @@ async def update_settings(request: Request) -> JSONResponse:
         theme = str(body["theme"])
         if theme in ("dark", "light"):
             settings["theme"] = theme
-    if "manager_enabled" in body:
-        settings["manager_enabled"] = bool(body["manager_enabled"])
     if "manager_interval" in body:
         val = int(body["manager_interval"])
         if 1 <= val <= 120:
@@ -1900,12 +2851,18 @@ async def update_settings(request: Request) -> JSONResponse:
         val = int(body["manager_min_solve_time"])
         if 1 <= val <= 60:
             settings["manager_min_solve_time"] = val
+    if "manager_agent_pool" in body:
+        pool = body["manager_agent_pool"]
+        if isinstance(pool, list):
+            validated = [a for a in pool if a in VALID_AGENTS]
+            if validated:
+                settings["manager_agent_pool"] = validated
     save_settings(settings)
     return JSONResponse(settings)
 
 
 def get_challenge_stats() -> dict:
-    """Aggregate per-agent stats from challenge metadata."""
+    """Aggregate per-agent stats from challenge/run metadata."""
     stats = {
         name: {
             "total": 0, "solved": 0, "failed": 0,
@@ -1914,20 +2871,21 @@ def get_challenge_stats() -> dict:
         for name in VALID_AGENTS
     }
     for c in challenges.values():
-        agent = c.get("agent", DEFAULT_AGENT)
-        bucket = stats.setdefault(agent, {
-            "total": 0,
-            "solved": 0,
-            "failed": 0,
-            "total_duration_ms": 0,
-        })
-        bucket["total"] += 1
-        if c["status"] == "solved":
-            bucket["solved"] += 1
-        elif c["status"] == "failed":
-            bucket["failed"] += 1
-        if c.get("duration_ms"):
-            bucket["total_duration_ms"] += c["duration_ms"]
+        for run in c["runs"].values():
+            agent = run.get("agent", DEFAULT_AGENT)
+            bucket = stats.setdefault(agent, {
+                "total": 0,
+                "solved": 0,
+                "failed": 0,
+                "total_duration_ms": 0,
+            })
+            bucket["total"] += 1
+            if run["status"] == "solved":
+                bucket["solved"] += 1
+            elif run["status"] == "failed":
+                bucket["failed"] += 1
+            if run.get("duration_ms"):
+                bucket["total_duration_ms"] += run["duration_ms"]
     return stats
 
 
@@ -1945,14 +2903,6 @@ async def get_usage(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
-_manager_task: asyncio.Task | None = None
-
-
-async def on_startup():
-    global _manager_task
-    _manager_task = asyncio.create_task(manager_loop())
-
-
 async def get_manager_state(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
@@ -1963,17 +2913,34 @@ async def get_manager_state(request: Request) -> JSONResponse:
     return JSONResponse(manager_state_for_metadata(challenge))
 
 
+# ---------------------------------------------------------------------------
+# Startup / Shutdown
+# ---------------------------------------------------------------------------
+
+_manager_task: asyncio.Task | None = None
+
+
+async def on_startup():
+    global _manager_task
+    _manager_task = asyncio.create_task(manager_loop())
+
+
 async def on_shutdown():
     if _manager_task and not _manager_task.done():
         _manager_task.cancel()
     for challenge in challenges.values():
-        proc = challenge.get("process")
-        if proc and proc.returncode is None:
-            proc.terminate()
+        for run in challenge["runs"].values():
+            proc = run.get("process")
+            if proc and proc.returncode is None:
+                proc.terminate()
     for preview in _bulk_previews.values():
         shutil.rmtree(preview["base_dir"], ignore_errors=True)
     _bulk_previews.clear()
 
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 routes = [
     Route("/", index),
@@ -1996,12 +2963,13 @@ routes = [
     Route("/api/challenges/{id}/stop", stop_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/steer", steer_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/unshelve", unshelve_challenge, methods=["POST"]),
+    Route("/api/challenges/{id}/unsolve", unsolve_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/manager", get_manager_state, methods=["GET"]),
     Route("/api/challenges/{id}", delete_challenge, methods=["DELETE"]),
     Route("/api/challenges/{id}/files", list_files, methods=["GET"]),
     Route("/api/challenges/{id}/files/{path:path}", get_file, methods=["GET"]),
     Route("/api/challenges/{id}/download/{path:path}", download_file, methods=["GET"]),
-    WebSocketRoute("/ws/{id}", challenge_ws),
+    WebSocketRoute("/ws/{id}/{run_id}", challenge_ws),
     Mount(
         "/static",
         StaticFiles(directory=str(Path(__file__).parent / "static")),
@@ -2017,8 +2985,8 @@ app = Starlette(
         Middleware(
             SessionMiddleware,
             secret_key=SESSION_SECRET,
-            session_cookie="ctf_session",
             max_age=86400,
+            session_cookie="ctf_session",
             same_site="strict",
             https_only=TLS_ENABLED,
         ),

@@ -83,6 +83,19 @@
             <input type="text" id="challenge-name" placeholder="e.g. Secret Image">
           </div>
           <div class="form-group flex-1">
+            <label for="challenge-mode">Mode</label>
+            <select id="challenge-mode">
+              <option value="single">Single</option>
+              <option value="single_managed">Single (Managed)</option>
+              <option value="parallel">Parallel</option>
+              <option value="parallel_managed">Parallel (Managed)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Single mode: agent + model + effort -->
+        <div id="single-agent-group" class="form-row">
+          <div class="form-group flex-1">
             <label for="challenge-agent">Agent</label>
             <select id="challenge-agent"></select>
           </div>
@@ -94,6 +107,12 @@
             <label for="challenge-effort">Effort</label>
             <select id="challenge-effort"></select>
           </div>
+        </div>
+
+        <!-- Parallel mode: agent checkboxes -->
+        <div id="parallel-agent-group" class="form-group hidden">
+          <label>Agents</label>
+          <div id="parallel-agent-checkboxes" class="agent-checkbox-group"></div>
         </div>
 
         <div class="form-group">
@@ -160,6 +179,18 @@
         <div class="bulk-global-bar">
           <div class="form-row">
             <div class="form-group flex-1">
+              <label for="bulk-mode">Mode</label>
+              <select id="bulk-mode">
+                <option value="single">Single</option>
+                <option value="single_managed">Single (Managed)</option>
+                <option value="parallel">Parallel</option>
+                <option value="parallel_managed">Parallel (Managed)</option>
+              </select>
+            </div>
+          </div>
+          <!-- Single mode options for bulk -->
+          <div id="bulk-single-group" class="form-row">
+            <div class="form-group flex-1">
               <label for="bulk-agent">Agent</label>
               <select id="bulk-agent"></select>
             </div>
@@ -171,6 +202,13 @@
               <label for="bulk-effort">Effort</label>
               <select id="bulk-effort"></select>
             </div>
+          </div>
+          <!-- Parallel mode options for bulk -->
+          <div id="bulk-parallel-group" class="form-group hidden">
+            <label>Agents</label>
+            <div id="bulk-parallel-checkboxes" class="agent-checkbox-group"></div>
+          </div>
+          <div class="form-row">
             <div class="form-group flex-1">
               <label for="bulk-flag">Default Flag Format</label>
               <input type="text" id="bulk-flag" placeholder="e.g. flag{...}">
@@ -202,12 +240,14 @@
       <div class="challenge-header-info">
         <h1 id="detail-name"></h1>
         <span id="detail-status" class="badge"></span>
+        <span id="detail-mode" class="badge badge-mode"></span>
         <span id="detail-model" class="badge badge-model"></span>
         <span id="detail-timer" class="header-stat"></span>
         <span id="detail-cost" class="header-stat"></span>
       </div>
       <div class="header-actions">
         <button id="btn-retry" class="btn-primary hidden">Retry</button>
+        <button id="btn-unsolve" class="btn-primary hidden">Un-solve</button>
         <button id="btn-unshelve" class="btn-primary hidden">Un-shelve</button>
         <button id="btn-stop" class="btn-danger hidden">Stop</button>
         <button id="btn-sidebar-toggle" class="btn-ghost btn-sidebar-toggle">Panel</button>
@@ -228,14 +268,12 @@
             <button id="btn-export" class="btn-ghost btn-xs" title="Export as markdown">Export</button>
           </div>
         </div>
-        <div id="agent-tabs" class="agent-tabs">
-          <button class="agent-tab active" data-agent="main">Main</button>
-        </div>
-        <div id="agent-feeds" class="agent-feeds">
-          <div id="feed-main" class="panel-body agent-feed active"></div>
+        <div id="run-tabs" class="agent-tabs"></div>
+        <div id="run-feeds" class="agent-feeds">
           <button id="btn-scroll-bottom" class="btn-scroll-bottom hidden" title="Scroll to bottom">&#8595; Latest</button>
         </div>
         <div id="steer-bar" class="steer-bar">
+          <select id="steer-run-select" class="hidden"></select>
           <input type="text" id="steer-input" placeholder="Send guidance to the agent..." autocomplete="off">
           <button id="btn-steer" class="btn-primary btn-sm">Send</button>
         </div>
@@ -273,6 +311,7 @@
         <div id="tab-files" class="sidebar-content">
           <div class="panel-body panel-body-scroll">
             <div id="files-toolbar">
+              <select id="files-run-select" class="hidden"></select>
               <button id="btn-refresh-files" class="btn-ghost btn-sm">Refresh</button>
             </div>
             <div id="files-tree"></div>
@@ -313,13 +352,7 @@
         <h2>Manager Agent</h2>
         <button id="manager-close" class="btn-icon">&times;</button>
       </div>
-      <p class="manager-hint">The manager agent periodically reviews solving challenges and steers or shelves them if stuck.</p>
-      <div class="form-group form-group-inline">
-        <label class="checkbox-label">
-          <input type="checkbox" id="manager-enabled">
-          <span>Enable manager agent</span>
-        </label>
-      </div>
+      <p class="manager-hint">The manager agent periodically reviews solving challenges and steers or shelves them if stuck. Manager behavior is controlled by challenge mode (managed modes enable the manager automatically).</p>
       <div class="form-row">
         <div class="form-group flex-1">
           <label for="manager-interval">Review interval (min)</label>
@@ -333,6 +366,10 @@
           <label for="manager-model">Model</label>
           <input type="text" id="manager-model" value="sonnet" placeholder="e.g. sonnet">
         </div>
+      </div>
+      <div class="form-group">
+        <label>Agent Pool</label>
+        <div id="manager-agent-pool" class="agent-checkbox-group"></div>
       </div>
       <button id="btn-manager-save" class="btn-primary btn-full">Save</button>
     </div>
