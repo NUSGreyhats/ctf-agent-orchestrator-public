@@ -1,21 +1,16 @@
 ---
 name: ctf-methodology
 description: >
-  Methodology for solving CTF challenges. Use this skill whenever the user is
-  working on a CTF challenge — forensics, reverse engineering, crypto, web,
-  misc, or any category. Trigger when the user mentions CTF, capture the flag,
-  flag format, "find the flag", challenge descriptions, or is clearly working
-  through a competition challenge. Also trigger when the user pastes a
-  challenge description, mentions a flag format like flag{}, CTF{}, HTB{},
-  picoCTF{}, or asks to analyze a file in a CTF context. This skill covers
-  the thinking process and search techniques — it complements domain-specific
-  skills (memory-forensics, apk-analysis, etc.) that handle the actual tools.
+  Entrypoint methodology for solving CTF challenges. This is the first skill
+  to read for every challenge. It covers triage, flag searching, and routes
+  you to the correct category or tool skill based on what you find.
 ---
 
 # CTF Methodology
 
-This skill covers how to think about and approach CTF challenges. It focuses
-on the process of finding flags — the domain-specific skills handle the tools.
+This is the **entrypoint skill** for every CTF challenge. Follow it step by
+step. It will route you to the correct domain-specific skill after triage —
+do not read other skill files until this methodology tells you to.
 
 ## Step 1: Know What You're Looking For
 
@@ -66,32 +61,47 @@ ctfgrep reports which encoding the match was found in (PLAINTEXT, BASE64,
 HEX, or XOR with the key), along with the decoded content. This catches
 flags that are trivially obfuscated — a very common CTF technique.
 
-## Step 3: Identify Category and Load Skills Immediately
+## Step 3: Identify Category and Load the Right Skill
 
-After the quick search, identify category and load the required skill files
-**before** deeper analysis. Do not continue with ad-hoc tooling first.
+After the quick search, identify the category and **read the matching skill
+file before doing any deeper analysis**. Do not continue with ad-hoc tooling.
 
-Required mapping:
+All skill paths are relative to `/root/all-things-ai/skills/`.
 
-| Category | Required skill(s) to load now |
+### Category skills — read ONE based on triage
+
+| Triage signal | Read this skill |
 |---|---|
-| Memory forensics | `memory-forensics` |
-| Disk forensics | `disk-forensics` |
-| File/stego/docs | `file-forensics` |
-| Network/pcap | `network-forensics` |
-| Reverse engineering | `rev` + `headless-ida-analysis`; add `libdebug-debugging` for runtime |
-| Binary exploitation | `pwn`; add `headless-ida-analysis` and `libdebug-debugging` as needed |
-| Kernel exploitation/debug | `kernel-gef-debugging` |
-| Android | `apk-analysis` |
-| Cryptography | `crypto` |
-| Web exploitation | `web` |
-| Mixed/unclear | `misc` |
+| `.raw`, `.mem`, `.vmem`, `.dmp`, `.lime` memory dump | `categories/forensics/memory/SKILL.md` |
+| `.dd`, `.img`, `.iso`, `.E01`, `.vmdk`, `.qcow2` disk image | `categories/forensics/disk/SKILL.md` |
+| Image with suspected stego, corrupted file, PDF, Office doc | `categories/forensics/file/SKILL.md` |
+| `.pcap`, `.pcapng` network capture | `categories/forensics/network/SKILL.md` |
+| ELF/PE/Mach-O binary to understand logic | `categories/rev/SKILL.md` |
+| ELF/PE binary to exploit (buffer overflow, ROP, heap) | `categories/pwn/SKILL.md` |
+| `.sage`, ciphertext, RSA/AES parameters, modular arithmetic | `categories/crypto/SKILL.md` |
+| HTTP service, web app, API endpoint | `categories/web/SKILL.md` |
+| `.apk` Android package | Read `tools/apk-analysis/SKILL.md` directly |
+| Kernel image, `.ko` module, qemu launch script | Read `tools/kernel-gef/SKILL.md` directly |
+| Mixed, unclear, puzzle, encoding chain | `categories/misc/SKILL.md` |
 
-Rules:
-- If challenge spans multiple categories, load all relevant skills.
-- For ELF reversing or pwn, use IDA workflow (`headless-ida-analysis`) instead of
+### Tool skills — read when the category skill tells you to
+
+These provide tool-specific workflows. Only read them when you need the tool:
+
+| Tool skill | When to read |
+|---|---|
+| `tools/ida/SKILL.md` | Static analysis of ELF/PE binaries (rev or pwn categories) |
+| `tools/libdebug/SKILL.md` | Dynamic/runtime analysis of Linux ELF binaries |
+| `tools/kernel-gef/SKILL.md` | Kernel debugging with GDB + GEF |
+| `tools/apk-analysis/SKILL.md` | Android APK reverse engineering |
+
+### Rules
+
+- If the challenge spans multiple categories, read all relevant skills.
+- For ELF reversing or pwn, prefer IDA (`tools/ida/SKILL.md`) over
   `objdump`/`readelf`-only analysis.
-- For kernel targets, prefer GDB MCP flow from `kernel-gef-debugging`.
+- For kernel targets, prefer GDB MCP flow from `tools/kernel-gef/SKILL.md`.
+- **Do not read every skill up front.** Read only what triage tells you to.
 
 ## Step 4: Work Methodically
 

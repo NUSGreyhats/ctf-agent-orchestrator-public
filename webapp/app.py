@@ -73,68 +73,7 @@ _PREVIEW_TTL = 3600
 _bulk_previews: dict[str, dict] = {}
 
 _SKILLS_ROOT = "/root/all-things-ai/skills"
-
-SKILL_CATALOG = (
-    # Methodology (entrypoint)
-    (
-        f"{_SKILLS_ROOT}/methodology/SKILL.md",
-        "overall CTF workflow, triage, and flag-finding process",
-    ),
-    # Categories
-    (
-        f"{_SKILLS_ROOT}/categories/crypto/SKILL.md",
-        "cryptography, RSA, AES, lattices, PRNGs, ECC, and Z3/SageMath style attacks",
-    ),
-    (
-        f"{_SKILLS_ROOT}/categories/forensics/disk/SKILL.md",
-        "disk images, partitions, filesystem analysis, carving, and timelines",
-    ),
-    (
-        f"{_SKILLS_ROOT}/categories/forensics/file/SKILL.md",
-        "steganography, corrupted files, embedded data, PDFs, and Office documents",
-    ),
-    (
-        f"{_SKILLS_ROOT}/categories/forensics/memory/SKILL.md",
-        "memory dumps, Volatility 3, mquire, processes, files, and network artifacts",
-    ),
-    (
-        f"{_SKILLS_ROOT}/categories/forensics/network/SKILL.md",
-        "PCAP/PCAPNG analysis, stream reconstruction, credential recovery, and file extraction",
-    ),
-    (
-        f"{_SKILLS_ROOT}/categories/misc/SKILL.md",
-        "miscellaneous CTF workflows for mixed, ambiguous, or layered challenge types",
-    ),
-    (
-        f"{_SKILLS_ROOT}/categories/pwn/SKILL.md",
-        "binary exploitation, mitigations, ROP, heap bugs, shellcode, and seccomp bypasses",
-    ),
-    (
-        f"{_SKILLS_ROOT}/categories/rev/SKILL.md",
-        "reverse engineering binaries, custom VMs, anti-debugging, and runtime checks",
-    ),
-    (
-        f"{_SKILLS_ROOT}/categories/web/SKILL.md",
-        "web app exploitation, auth/session flaws, injection, traversal, and API abuse",
-    ),
-    # Tools
-    (
-        f"{_SKILLS_ROOT}/tools/apk-analysis/SKILL.md",
-        "Android APK triage with apktool, jadx, and native library analysis",
-    ),
-    (
-        f"{_SKILLS_ROOT}/tools/ida/SKILL.md",
-        "headless IDA Pro analysis using ida-domain and idalib",
-    ),
-    (
-        f"{_SKILLS_ROOT}/tools/kernel-gef/SKILL.md",
-        "kernel debugging with GDB + GEF via persistent MCP tools",
-    ),
-    (
-        f"{_SKILLS_ROOT}/tools/libdebug/SKILL.md",
-        "scripted Linux ELF debugging with libdebug instead of gdb",
-    ),
-)
+_METHODOLOGY_SKILL = f"{_SKILLS_ROOT}/methodology/SKILL.md"
 
 
 def _cleanup_old_previews() -> None:
@@ -1590,23 +1529,12 @@ async def manager_loop() -> None:
 
 def build_prompt(challenge: dict) -> str:
     """Build the CTF solving prompt."""
-    skill_lines = [
-        "Available skill files you can read if they become relevant:",
-    ]
-    for path, summary in SKILL_CATALOG:
-        skill_lines.append(f"- {path} — {summary}")
-
     parts = [
         "You are solving a CTF challenge.",
-        "The source of truth for all methodology and domain skills is "
-        f"{_SKILLS_ROOT}/.",
-        "Start by reading "
-        f"{_SKILLS_ROOT}/methodology/SKILL.md and "
-        "follow it for the full solve.",
-        "Do not read every skill up front. Read a skill file only after "
-        "you decide it is relevant to the current challenge.",
-        "",
-        *skill_lines,
+        f"Read {_METHODOLOGY_SKILL} first and follow it for the full "
+        "solve. It contains the triage workflow and routes you to the "
+        "correct category/tool skill — do not read any other skill "
+        "files until the methodology tells you to.",
         "",
         f"Challenge: {challenge['name']}",
     ]
@@ -1623,24 +1551,12 @@ def build_prompt(challenge: dict) -> str:
     parts.extend([
         "",
         "The challenge files are in the current directory.",
-        f"The shared skill files are under {_SKILLS_ROOT}/.",
         "Do not inspect parent directories, repository root files, .git metadata, "
         "or unrelated system paths.",
         "If the current directory has no challenge files, report that clearly and stop. "
         "Do not search elsewhere for surrogate targets.",
         "Keep command output bounded: avoid unbounded recursive listings, and use "
         "targeted commands with limits (for example, head/tail).",
-        "",
-        "Follow the methodology strictly:",
-        "1. Run ctfgrep first for a quick flag search "
-        "across all encodings",
-        "2. Triage the files (file, exiftool, strings, "
-        "binwalk)",
-        "3. Identify the category and then read only the relevant "
-        "skill file from the catalog above before using specialized tools",
-        "4. Work methodically, save outputs, correlate "
-        "findings",
-        "5. When you find the flag, print it clearly",
     ])
     if challenge.get("autonomous"):
         parts.extend([
