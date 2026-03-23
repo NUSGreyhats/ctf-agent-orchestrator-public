@@ -72,61 +72,66 @@ SETTINGS_FILE = CHALLENGES_DIR / "settings.json"
 _PREVIEW_TTL = 3600
 _bulk_previews: dict[str, dict] = {}
 
+_SKILLS_ROOT = "/root/all-things-ai/skills"
+
 SKILL_CATALOG = (
+    # Methodology (entrypoint)
     (
-        "/root/all-things-ai/skills/ctf-methodology/SKILL.md",
+        f"{_SKILLS_ROOT}/methodology/SKILL.md",
         "overall CTF workflow, triage, and flag-finding process",
     ),
+    # Categories
     (
-        "/root/all-things-ai/skills/memory-forensics/SKILL.md",
-        "memory dumps, Volatility 3, mquire, processes, files, and network artifacts",
-    ),
-    (
-        "/root/all-things-ai/skills/disk-forensics/SKILL.md",
-        "disk images, partitions, filesystem analysis, carving, and timelines",
-    ),
-    (
-        "/root/all-things-ai/skills/file-forensics/SKILL.md",
-        "steganography, corrupted files, embedded data, PDFs, and Office documents",
-    ),
-    (
-        "/root/all-things-ai/skills/network-forensics/SKILL.md",
-        "PCAP/PCAPNG analysis, stream reconstruction, credential recovery, and file extraction",
-    ),
-    (
-        "/root/all-things-ai/skills/web/SKILL.md",
-        "web app exploitation, auth/session flaws, injection, traversal, and API abuse",
-    ),
-    (
-        "/root/all-things-ai/skills/rev/SKILL.md",
-        "reverse engineering binaries, custom VMs, anti-debugging, and runtime checks",
-    ),
-    (
-        "/root/all-things-ai/skills/pwn/SKILL.md",
-        "binary exploitation, mitigations, ROP, heap bugs, shellcode, and seccomp bypasses",
-    ),
-    (
-        "/root/all-things-ai/skills/crypto/SKILL.md",
+        f"{_SKILLS_ROOT}/categories/crypto/SKILL.md",
         "cryptography, RSA, AES, lattices, PRNGs, ECC, and Z3/SageMath style attacks",
     ),
     (
-        "/root/all-things-ai/skills/misc/SKILL.md",
+        f"{_SKILLS_ROOT}/categories/forensics/disk/SKILL.md",
+        "disk images, partitions, filesystem analysis, carving, and timelines",
+    ),
+    (
+        f"{_SKILLS_ROOT}/categories/forensics/file/SKILL.md",
+        "steganography, corrupted files, embedded data, PDFs, and Office documents",
+    ),
+    (
+        f"{_SKILLS_ROOT}/categories/forensics/memory/SKILL.md",
+        "memory dumps, Volatility 3, mquire, processes, files, and network artifacts",
+    ),
+    (
+        f"{_SKILLS_ROOT}/categories/forensics/network/SKILL.md",
+        "PCAP/PCAPNG analysis, stream reconstruction, credential recovery, and file extraction",
+    ),
+    (
+        f"{_SKILLS_ROOT}/categories/misc/SKILL.md",
         "miscellaneous CTF workflows for mixed, ambiguous, or layered challenge types",
     ),
     (
-        "/root/all-things-ai/skills/apk-analysis/SKILL.md",
+        f"{_SKILLS_ROOT}/categories/pwn/SKILL.md",
+        "binary exploitation, mitigations, ROP, heap bugs, shellcode, and seccomp bypasses",
+    ),
+    (
+        f"{_SKILLS_ROOT}/categories/rev/SKILL.md",
+        "reverse engineering binaries, custom VMs, anti-debugging, and runtime checks",
+    ),
+    (
+        f"{_SKILLS_ROOT}/categories/web/SKILL.md",
+        "web app exploitation, auth/session flaws, injection, traversal, and API abuse",
+    ),
+    # Tools
+    (
+        f"{_SKILLS_ROOT}/tools/apk-analysis/SKILL.md",
         "Android APK triage with apktool, jadx, and native library analysis",
     ),
     (
-        "/root/all-things-ai/skills/headless-ida-analysis/SKILL.md",
+        f"{_SKILLS_ROOT}/tools/ida/SKILL.md",
         "headless IDA Pro analysis using ida-domain and idalib",
     ),
     (
-        "/root/all-things-ai/skills/kernel-gef-debugging/SKILL.md",
+        f"{_SKILLS_ROOT}/tools/kernel-gef/SKILL.md",
         "kernel debugging with GDB + GEF via persistent MCP tools",
     ),
     (
-        "/root/all-things-ai/skills/libdebug-debugging/SKILL.md",
+        f"{_SKILLS_ROOT}/tools/libdebug/SKILL.md",
         "scripted Linux ELF debugging with libdebug instead of gdb",
     ),
 )
@@ -1594,9 +1599,9 @@ def build_prompt(challenge: dict) -> str:
     parts = [
         "You are solving a CTF challenge.",
         "The source of truth for all methodology and domain skills is "
-        "/root/all-things-ai/skills/.",
+        f"{_SKILLS_ROOT}/.",
         "Start by reading "
-        "/root/all-things-ai/skills/ctf-methodology/SKILL.md and "
+        f"{_SKILLS_ROOT}/methodology/SKILL.md and "
         "follow it for the full solve.",
         "Do not read every skill up front. Read a skill file only after "
         "you decide it is relevant to the current challenge.",
@@ -1618,7 +1623,7 @@ def build_prompt(challenge: dict) -> str:
     parts.extend([
         "",
         "The challenge files are in the current directory.",
-        "The shared skill files are under /root/all-things-ai/skills/.",
+        f"The shared skill files are under {_SKILLS_ROOT}/.",
         "Do not inspect parent directories, repository root files, .git metadata, "
         "or unrelated system paths.",
         "If the current directory has no challenge files, report that clearly and stop. "
