@@ -1533,8 +1533,7 @@ def build_prompt(challenge: dict) -> str:
         "You are solving a CTF challenge.",
         f"Read {_METHODOLOGY_SKILL} first and follow it for the full "
         "solve. It contains the triage workflow and routes you to the "
-        "correct category/tool skill — do not read any other skill "
-        "files until the methodology tells you to.",
+        "correct category and tool skills.",
         "",
         f"Challenge: {challenge['name']}",
     ]

@@ -9,8 +9,7 @@ description: >
 # CTF Methodology
 
 This is the **entrypoint skill** for every CTF challenge. Follow it step by
-step. It will route you to the correct domain-specific skill after triage —
-do not read other skill files until this methodology tells you to.
+step. It will route you to the correct domain-specific skill after triage.
 
 ## Step 1: Know What You're Looking For
 
@@ -84,16 +83,17 @@ All skill paths are relative to `/root/all-things-ai/skills/`.
 | Kernel image, `.ko` module, qemu launch script | Read `tools/kernel-gef/SKILL.md` directly |
 | Mixed, unclear, puzzle, encoding chain | `categories/misc/SKILL.md` |
 
-### Tool skills — read when the category skill tells you to
+### Tool skills — read whenever you need the tool
 
-These provide tool-specific workflows. Only read them when you need the tool:
-
-| Tool skill | When to read |
+| Tool skill | What it covers |
 |---|---|
-| `tools/ida/SKILL.md` | Static analysis of ELF/PE binaries (rev or pwn categories) |
+| `tools/ida/SKILL.md` | Static analysis of ELF/PE binaries with IDA Pro |
 | `tools/libdebug/SKILL.md` | Dynamic/runtime analysis of Linux ELF binaries |
 | `tools/kernel-gef/SKILL.md` | Kernel debugging with GDB + GEF |
 | `tools/apk-analysis/SKILL.md` | Android APK reverse engineering |
+
+Read a tool skill as soon as you recognize you need it — you don't have to
+wait for a category skill to tell you.
 
 ### Rules
 
@@ -101,7 +101,6 @@ These provide tool-specific workflows. Only read them when you need the tool:
 - For ELF reversing or pwn, prefer IDA (`tools/ida/SKILL.md`) over
   `objdump`/`readelf`-only analysis.
 - For kernel targets, prefer GDB MCP flow from `tools/kernel-gef/SKILL.md`.
-- **Do not read every skill up front.** Read only what triage tells you to.
 
 ## Step 4: Work Methodically
 
