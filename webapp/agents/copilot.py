@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import os
-import pty
 import re
-import select
 import signal
 import subprocess
+import sys
 import time
+
+if sys.platform != "win32":
+    import pty
+    import select
 from pathlib import Path
 
 from .base import AgentProvider
@@ -289,7 +292,8 @@ def _discover_models() -> tuple[tuple[str, str], ...]:
     models: list[tuple[str, str]] = [("", "Provider default")]
     seen = {""}
 
-    _merge_models(models, seen, _discover_models_via_pty())
+    if sys.platform != "win32":
+        _merge_models(models, seen, _discover_models_via_pty())
     _merge_models(models, seen, _discover_models_from_files())
 
     return tuple(models)
