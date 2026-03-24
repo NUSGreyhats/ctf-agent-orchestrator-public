@@ -2209,6 +2209,226 @@ function renderDailyChart(activity) {
   }).join("");
 }
 
+// === Import from Platform ===
+let importPlugins = [];
+let importPluginConfig = {};
+let importFetchedChallenges = [];
+
+async function loadPlugins() {
+  const res = await api("/api/plugins");
+  if (!res) return;
+  importPlugins = await res.json();
+  const sel = $("#import-plugin");
+  sel.innerHTML = importPlugins.map((p) =>
+    `<option value="${esc(p.name)}">${esc(p.label)}</option>`
+  ).join("");
+  if (importPlugins.length) renderImportConfigFields(importPlugins[0]);
+}
+
+function renderImportConfigFields(plugin) {
+  const container = $("#import-config-fields");
+  container.innerHTML = (plugin.config_schema || []).map((f) => `
+    <div class="form-group">
+      <label for="import-cfg-${esc(f.name)}">${esc(f.label)}</label>
+      <input type="${esc(f.type)}" id="import-cfg-${esc(f.name)}"
+        placeholder="${esc(f.placeholder || "")}"
+        value="${esc(f.default || "")}"
+        ${f.required ? "required" : ""}>
+    </div>
+  `).join("");
+}
+
+function getImportConfig() {
+  const plugin = importPlugins.find((p) => p.name === $("#import-plugin").value);
+  if (!plugin) return {};
+  const config = {};
+  for (const f of plugin.config_schema || []) {
+    const el = document.getElementById(`import-cfg-${f.name}`);
+    if (el) config[f.name] = el.value;
+  }
+  return config;
+}
+
+$("#btn-import").addEventListener("click", async () => {
+  await loadPlugins();
+  if (!importPlugins.length) {
+    showToast("No platform plugins available", "error");
+    return;
+  }
+  // Reset state
+  importFetchedChallenges = [];
+  $("#import-phase-config").classList.remove("hidden");
+  $("#import-phase-loading").classList.add("hidden");
+  $("#import-phase-preview").classList.add("hidden");
+  $("#import-status").classList.add("hidden");
+  renderAgentSelect($("#import-agent"));
+  $("#import-overlay").classList.remove("hidden");
+});
+
+$("#import-close").addEventListener("click", () => {
+  $("#import-overlay").classList.add("hidden");
+});
+$("#import-overlay").addEventListener("click", (e) => {
+  if (e.target === $("#import-overlay")) $("#import-overlay").classList.add("hidden");
+});
+
+$("#import-plugin").addEventListener("change", () => {
+  const plugin = importPlugins.find((p) => p.name === $("#import-plugin").value);
+  if (plugin) renderImportConfigFields(plugin);
+});
+
+$("#btn-import-test").addEventListener("click", async () => {
+  const statusEl = $("#import-status");
+  statusEl.textContent = "Testing...";
+  statusEl.className = "import-status";
+  statusEl.classList.remove("hidden");
+
+  const res = await api("/api/plugins/test", {
+    method: "POST",
+    body: JSON.stringify({
+      plugin: $("#import-plugin").value,
+      config: getImportConfig(),
+    }),
+  });
+  if (!res) return;
+  const data = await res.json();
+  if (data.ok) {
+    statusEl.textContent = data.message;
+    statusEl.className = "import-status import-status-ok";
+  } else {
+    statusEl.textContent = data.error || "Connection failed";
+    statusEl.className = "import-status import-status-error";
+  }
+});
+
+$("#btn-import-fetch").addEventListener("click", async () => {
+  importPluginConfig = getImportConfig();
+  $("#import-phase-config").classList.add("hidden");
+  $("#import-phase-loading").classList.remove("hidden");
+
+  const res = await api("/api/plugins/fetch", {
+    method: "POST",
+    body: JSON.stringify({
+      plugin: $("#import-plugin").value,
+      config: importPluginConfig,
+    }),
+  });
+
+  if (!res || !res.ok) {
+    const err = res ? await res.json().catch(() => ({})) : {};
+    showToast(err.error || "Fetch failed", "error");
+    $("#import-phase-loading").classList.add("hidden");
+    $("#import-phase-config").classList.remove("hidden");
+    return;
+  }
+
+  importFetchedChallenges = await res.json();
+  renderImportPreview();
+  $("#import-phase-loading").classList.add("hidden");
+  $("#import-phase-preview").classList.remove("hidden");
+});
+
+function renderImportPreview() {
+  const list = $("#import-challenge-list");
+  list.innerHTML = importFetchedChallenges.map((c, i) => {
+    const fileLabel = c.files.length
+      ? `${c.files.length} file${c.files.length !== 1 ? "s" : ""}`
+      : "No files";
+    const solvedClass = c.solved ? "import-ch-solved" : "";
+    return `
+    <div class="bulk-ch-row ${solvedClass}" data-index="${i}">
+      <div class="bulk-ch-row-header">
+        <input type="checkbox" class="import-ch-enabled" ${c.solved ? "" : "checked"}>
+        <input type="text" class="bulk-ch-name" value="${esc(c.name)}">
+        <span class="bulk-ch-files-label">${esc(fileLabel)}</span>
+        <span class="card-agent">${esc(c.category || "misc")}</span>
+        ${c.points ? `<span class="card-agent">${c.points} pts</span>` : ""}
+        ${c.solved ? '<span class="badge badge-solved">solved</span>' : ""}
+      </div>
+      <div class="bulk-ch-row-body">
+        <div class="bulk-ch-col">
+          <div class="bulk-field-label">Description</div>
+          <textarea class="bulk-ch-desc" rows="2">${esc(c.description || "")}</textarea>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+
+  // Apply skip-solved default
+  updateImportSkipSolved();
+}
+
+function updateImportSkipSolved() {
+  const skip = $("#import-skip-solved").checked;
+  const rows = document.querySelectorAll("#import-challenge-list .bulk-ch-row");
+  rows.forEach((row, i) => {
+    const ch = importFetchedChallenges[i];
+    const cb = row.querySelector(".import-ch-enabled");
+    if (ch && ch.solved && skip) {
+      cb.checked = false;
+      row.classList.add("bulk-ch-disabled");
+    }
+  });
+}
+
+$("#import-skip-solved").addEventListener("change", () => {
+  const rows = document.querySelectorAll("#import-challenge-list .bulk-ch-row");
+  const skip = $("#import-skip-solved").checked;
+  rows.forEach((row, i) => {
+    const ch = importFetchedChallenges[i];
+    const cb = row.querySelector(".import-ch-enabled");
+    if (ch && ch.solved) {
+      cb.checked = !skip;
+      row.classList.toggle("bulk-ch-disabled", skip);
+    }
+  });
+});
+
+$("#btn-import-submit").addEventListener("click", async () => {
+  const rows = document.querySelectorAll("#import-challenge-list .bulk-ch-row");
+  const selected = Array.from(rows).map((row, i) => ({
+    enabled: row.querySelector(".import-ch-enabled").checked,
+    remote_id: importFetchedChallenges[i].remote_id,
+    name: row.querySelector(".bulk-ch-name").value.trim(),
+    description: row.querySelector(".bulk-ch-desc").value.trim(),
+    category: importFetchedChallenges[i].category,
+    files: importFetchedChallenges[i].files,
+  }));
+
+  const btn = $("#btn-import-submit");
+  btn.disabled = true;
+  btn.textContent = "Importing...";
+
+  try {
+    const res = await api("/api/plugins/import", {
+      method: "POST",
+      body: JSON.stringify({
+        plugin: $("#import-plugin").value,
+        config: importPluginConfig,
+        challenges: selected,
+        mode: $("#import-mode").value,
+        agents: $("#import-agent").value,
+        flag_format: $("#import-flag").value.trim(),
+        autonomous: $("#import-autonomous").checked,
+        paused: $("#import-paused").checked,
+      }),
+    });
+
+    if (!res || !res.ok) {
+      const err = res ? await res.json().catch(() => ({})) : {};
+      showToast(err.error || "Import failed", "error");
+      return;
+    }
+    const data = await res.json();
+    showToast(`Imported ${data.created.length} challenge(s)`, "success");
+    $("#import-overlay").classList.add("hidden");
+    loadChallenges();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Import Selected";
+  }
+});
+
 // === VPN Modal ===
 $("#btn-vpn").addEventListener("click", async () => {
   const res = await api("/api/vpn");

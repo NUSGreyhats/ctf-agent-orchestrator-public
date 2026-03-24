@@ -35,6 +35,7 @@
         </div>
         <button id="btn-new-challenge" class="btn-primary">+ New Challenge</button>
         <button id="btn-bulk-upload" class="btn-ghost">Bulk Upload</button>
+        <button id="btn-import" class="btn-ghost">Import</button>
         <button id="btn-usage" class="btn-ghost">Usage</button>
         <button id="btn-vpn" class="btn-ghost">VPN</button>
         <button id="btn-manager-settings" class="btn-ghost">Manager</button>
@@ -343,6 +344,79 @@
         <button id="file-viewer-close" class="btn-icon">&times;</button>
       </div>
       <div id="file-viewer-content" class="file-viewer-body"></div>
+    </div>
+  </div>
+
+  <!-- Import from Platform Modal -->
+  <div id="import-overlay" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h2>Import from Platform</h2>
+        <button id="import-close" class="btn-icon">&times;</button>
+      </div>
+
+      <!-- Phase 1: Select plugin and configure -->
+      <div id="import-phase-config">
+        <div class="form-group">
+          <label for="import-plugin">Platform</label>
+          <select id="import-plugin"></select>
+        </div>
+        <div id="import-config-fields"></div>
+        <div class="form-row">
+          <button id="btn-import-test" class="btn-ghost">Test Connection</button>
+          <button id="btn-import-fetch" class="btn-primary">Fetch Challenges</button>
+        </div>
+        <div id="import-status" class="hidden"></div>
+      </div>
+
+      <!-- Phase 2: Loading -->
+      <div id="import-phase-loading" class="hidden">
+        <div class="bulk-loading">
+          <div class="bulk-spinner"></div>
+          <p class="bulk-loading-text">Fetching challenges...</p>
+        </div>
+      </div>
+
+      <!-- Phase 3: Preview and select -->
+      <div id="import-phase-preview" class="hidden">
+        <div class="bulk-global-bar">
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label for="import-mode">Mode</label>
+              <select id="import-mode">
+                <option value="single">Single</option>
+                <option value="single_managed">Single (Managed)</option>
+                <option value="parallel">Parallel</option>
+                <option value="parallel_managed">Parallel (Managed)</option>
+              </select>
+            </div>
+            <div class="form-group flex-1">
+              <label for="import-agent">Agent</label>
+              <select id="import-agent"></select>
+            </div>
+            <div class="form-group flex-1">
+              <label for="import-flag">Flag Format</label>
+              <input type="text" id="import-flag" placeholder="e.g. flag{...}">
+            </div>
+          </div>
+          <div class="form-group form-group-inline">
+            <label class="checkbox-label">
+              <input type="checkbox" id="import-autonomous">
+              <span>Autonomous</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="import-paused">
+              <span>Pause (start manually)</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="import-skip-solved">
+              <span>Skip already solved</span>
+            </label>
+          </div>
+        </div>
+        <div id="import-challenge-list" class="bulk-challenge-list"></div>
+        <button id="btn-import-submit" class="btn-primary btn-full">Import Selected</button>
+      </div>
     </div>
   </div>
 

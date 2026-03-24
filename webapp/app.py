@@ -42,6 +42,11 @@ except ImportError:
         VALID_AGENTS,
         get_provider,
     )
+try:
+    from .plugins import get_plugins, get_plugin
+except ImportError:
+    from plugins import get_plugins, get_plugin  # type: ignore
+
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.sessions import SessionMiddleware
@@ -374,6 +379,7 @@ def load_settings() -> dict:
         "manager_agent_pool": [
             {"agent": a, "model": ""} for a in VALID_AGENTS
         ],
+        "auto_submit_flags": False,
     }
     if SETTINGS_FILE.exists():
         try:
@@ -2934,6 +2940,8 @@ async def update_settings(request: Request) -> JSONResponse:
                     })
             if validated:
                 settings["manager_agent_pool"] = validated
+    if "auto_submit_flags" in body:
+        settings["auto_submit_flags"] = bool(body["auto_submit_flags"])
     save_settings(settings)
     return JSONResponse(settings)
 
@@ -2988,6 +2996,271 @@ async def get_manager_state(request: Request) -> JSONResponse:
     if not challenge:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(manager_state_for_metadata(challenge))
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Plugins (CTF platform integrations)
+# ---------------------------------------------------------------------------
+
+
+async def list_plugins(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    plugins = get_plugins()
+    return JSONResponse([
+        {
+            "name": p.name,
+            "label": p.label,
+            "config_schema": [
+                {
+                    "name": f.name,
+                    "label": f.label,
+                    "type": f.field_type,
+                    "required": f.required,
+                    "placeholder": f.placeholder,
+                    "default": f.default,
+                }
+                for f in p.config_schema()
+            ],
+        }
+        for p in plugins.values()
+    ])
+
+
+async def plugin_test_connection(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    body = await request.json()
+    plugin_name = body.get("plugin", "")
+    config = body.get("config", {})
+
+    plugin = get_plugin(plugin_name)
+    if not plugin:
+        return JSONResponse(
+            {"error": f"Unknown plugin: {plugin_name}"},
+            status_code=404,
+        )
+
+    try:
+        message = await plugin.test_connection(config)
+        return JSONResponse({"ok": True, "message": message})
+    except Exception as exc:
+        return JSONResponse(
+            {"error": str(exc)}, status_code=400
+        )
+
+
+async def plugin_fetch_challenges(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    body = await request.json()
+    plugin_name = body.get("plugin", "")
+    config = body.get("config", {})
+
+    plugin = get_plugin(plugin_name)
+    if not plugin:
+        return JSONResponse(
+            {"error": f"Unknown plugin: {plugin_name}"},
+            status_code=404,
+        )
+
+    try:
+        remote_challenges = await plugin.fetch_challenges(config)
+        return JSONResponse([
+            {
+                "remote_id": c.remote_id,
+                "name": c.name,
+                "description": c.description,
+                "category": c.category,
+                "points": c.points,
+                "files": [
+                    {"name": f.name, "url": f.url}
+                    for f in c.files
+                ],
+                "solved": c.solved,
+                "tags": c.tags,
+            }
+            for c in remote_challenges
+        ])
+    except Exception as exc:
+        return JSONResponse(
+            {"error": str(exc)}, status_code=400
+        )
+
+
+async def plugin_import_challenges(request: Request) -> JSONResponse:
+    """Download files and create challenges from a plugin fetch."""
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    body = await request.json()
+    plugin_name = body.get("plugin", "")
+    config = body.get("config", {})
+    selected = body.get("challenges", [])
+    mode = body.get("mode", "single")
+    agents = body.get("agents", "").strip()
+    model = body.get("model", "")
+    effort = body.get("effort", "")
+    autonomous = bool(body.get("autonomous", False))
+    flag_format = body.get("flag_format", "").strip()
+    paused = bool(body.get("paused", False))
+
+    plugin = get_plugin(plugin_name)
+    if not plugin:
+        return JSONResponse(
+            {"error": f"Unknown plugin: {plugin_name}"},
+            status_code=404,
+        )
+
+    created = []
+    for ch_cfg in selected:
+        if not ch_cfg.get("enabled", True):
+            continue
+
+        ch_name = ch_cfg.get("name", "")
+        ch_description = ch_cfg.get("description", "")
+        ch_remote_id = ch_cfg.get("remote_id", "")
+        ch_category = ch_cfg.get("category", "")
+        ch_flag_format = ch_cfg.get("flag_format", "") or flag_format
+        remote_files = ch_cfg.get("files", [])
+
+        # Download files
+        file_data: dict[str, bytes] = {}
+        for rf in remote_files:
+            try:
+                from plugins.base import RemoteFile
+                data = await plugin.download_file(
+                    config,
+                    RemoteFile(name=rf["name"], url=rf["url"]),
+                )
+                safe_name = rf["name"].replace("/", "_").replace("\\", "_")
+                file_data[safe_name] = data
+            except Exception:
+                continue
+
+        # Determine which agents to create runs for
+        if mode in ("parallel", "parallel_managed"):
+            agent_list = [
+                a.strip() for a in agents.split(",") if a.strip()
+            ]
+        else:
+            agent_list = [agents.split(",")[0].strip()] if agents else [DEFAULT_AGENT]
+
+        challenge_id = uuid.uuid4().hex[:12]
+        challenge_dir = CHALLENGES_DIR / challenge_id
+
+        if mode in ("parallel", "parallel_managed"):
+            files_dir = challenge_dir / "_files"
+            files_dir.mkdir(parents=True)
+            for fname, fdata in file_data.items():
+                (files_dir / fname).write_bytes(fdata)
+        else:
+            challenge_dir.mkdir(parents=True)
+            for fname, fdata in file_data.items():
+                (challenge_dir / fname).write_bytes(fdata)
+
+        runs = {}
+        challenge_status = "pending" if paused else "solving"
+        for agent_name in agent_list:
+            if agent_name not in VALID_AGENTS:
+                continue
+            run_id = uuid.uuid4().hex[:8]
+            run_model = model or resolved_default_model(agent_name)
+            run_effort = normalize_effort_for_agent(agent_name, effort)
+            runs[run_id] = make_run(
+                run_id=run_id,
+                agent=agent_name,
+                model=run_model,
+                effort=run_effort,
+                status=challenge_status,
+            )
+            if mode in ("parallel", "parallel_managed"):
+                setup_parallel_run_dir(challenge_id, run_id)
+
+        challenge = {
+            "id": challenge_id,
+            "name": ch_name,
+            "description": ch_description,
+            "flag_format": ch_flag_format,
+            "mode": mode,
+            "autonomous": autonomous,
+            "status": challenge_status,
+            "created_at": datetime.now().isoformat(),
+            "files": sorted(file_data.keys()),
+            "error": None,
+            "manager": _default_manager_state(),
+            "runs": runs,
+            "_plugin": plugin_name,
+            "_remote_id": ch_remote_id,
+        }
+        challenges[challenge_id] = challenge
+        save_metadata(challenge)
+
+        if challenge_status == "solving":
+            for run_id, run in runs.items():
+                run["task"] = asyncio.create_task(
+                    run_agent_task(challenge_id, run_id)
+                )
+
+        created.append({
+            "id": challenge_id,
+            "name": ch_name,
+            "status": challenge_status,
+        })
+
+    return JSONResponse({"created": created}, status_code=201)
+
+
+async def plugin_submit_flag(request: Request) -> JSONResponse:
+    """Submit a flag to the remote platform."""
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    body = await request.json()
+    challenge_id = body.get("challenge_id", "")
+    flag = body.get("flag", "").strip()
+
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    plugin_name = challenge.get("_plugin")
+    remote_id = challenge.get("_remote_id")
+    if not plugin_name or not remote_id:
+        return JSONResponse(
+            {"error": "Challenge was not imported from a plugin"},
+            status_code=400,
+        )
+
+    config = body.get("config", {})
+    plugin = get_plugin(plugin_name)
+    if not plugin:
+        return JSONResponse(
+            {"error": f"Plugin {plugin_name} not found"},
+            status_code=404,
+        )
+
+    try:
+        result = await plugin.submit_flag(config, remote_id, flag)
+        return JSONResponse({
+            "correct": result.correct,
+            "message": result.message,
+        })
+    except Exception as exc:
+        return JSONResponse(
+            {"error": str(exc)}, status_code=400
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3345,6 +3618,11 @@ routes = [
     Route("/api/vpn", vpn_status, methods=["GET"]),
     Route("/api/vpn/configure", vpn_configure, methods=["POST"]),
     Route("/api/vpn/toggle", vpn_toggle, methods=["POST"]),
+    Route("/api/plugins", list_plugins, methods=["GET"]),
+    Route("/api/plugins/test", plugin_test_connection, methods=["POST"]),
+    Route("/api/plugins/fetch", plugin_fetch_challenges, methods=["POST"]),
+    Route("/api/plugins/import", plugin_import_challenges, methods=["POST"]),
+    Route("/api/plugins/submit-flag", plugin_submit_flag, methods=["POST"]),
     Route("/api/settings", get_settings, methods=["GET"]),
     Route("/api/settings", update_settings, methods=["PUT"]),
     Route("/api/challenges", list_challenges, methods=["GET"]),

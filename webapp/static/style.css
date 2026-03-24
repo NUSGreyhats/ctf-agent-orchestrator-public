@@ -1060,6 +1060,15 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 
 /* Manager verdict: handoff and summarize */
+/* Import */
+.import-status {
+  padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.78rem;
+  margin-top: 0.5rem;
+}
+.import-status-ok { background: var(--green-dim); color: var(--green); }
+.import-status-error { background: var(--red-dim); color: var(--red); }
+.import-ch-solved { opacity: 0.6; }
+
 .manager-verdict-handoff { background: var(--accent-dim); color: var(--accent); }
 .manager-verdict-summarize { background: var(--purple-dim); color: var(--purple); }
 .manager-pool-list { display: flex; flex-direction: column; gap: 0.4rem; }
