@@ -157,6 +157,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .badge-solved { background: var(--green-dim); color: var(--green); }
 .badge-failed { background: var(--red-dim); color: var(--red); }
 .badge-shelved { background: var(--orange-dim); color: var(--orange); }
+.badge-completed { background: var(--blue-dim); color: var(--blue); }
 .badge-model { background: var(--purple-dim); color: var(--purple); font-family: var(--mono); }
 .badge-mode { background: var(--bg-input); color: var(--text-muted); font-family: var(--mono); font-size: 0.6rem; }
 .badge-agent-codex { background: var(--green-dim); color: var(--green); font-family: var(--mono); }

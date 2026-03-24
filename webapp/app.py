@@ -127,8 +127,12 @@ def derive_challenge_status(challenge: dict) -> str:
         return "solved"
     if "solving" in statuses:
         return "solving"
-    if "shelved" in statuses and not (statuses - {"shelved", "failed"}):
+    if "shelved" in statuses and not (statuses - {"shelved", "failed", "completed"}):
         return "shelved"
+    if statuses <= {"completed"}:
+        return "completed"
+    if statuses <= {"failed", "completed"}:
+        return "completed"
     if statuses <= {"failed"}:
         return "failed"
     if statuses <= {"pending"}:
@@ -1066,9 +1070,10 @@ async def bulk_preview(request: Request) -> JSONResponse:
                     "utf-8", errors="replace"
                 ).strip()
                 continue
-            flat_name = filename.replace("/", "_")
-            (folder_dir / flat_name).write_bytes(raw)
-            file_names.append(flat_name)
+            dest = folder_dir / filename
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(raw)
+            file_names.append(filename)
         preview_folders[folder_name] = {
             "dir": str(folder_dir),
             "files": file_names,
@@ -1478,6 +1483,79 @@ async def unsolve_challenge(request: Request) -> JSONResponse:
     return JSONResponse({"status": challenge["status"]})
 
 
+async def mark_solved(request: Request) -> JSONResponse:
+    """Mark a specific run (or the challenge) as solved.
+
+    Only call this when a flag is confirmed correct — either via
+    auto-submit to the platform or by the user confirming manually.
+    """
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    body = await request.json()
+    run_id = body.get("run_id", "")
+
+    if run_id and run_id in challenge["runs"]:
+        target_runs = [challenge["runs"][run_id]]
+    else:
+        # Mark the first completed/solving run
+        target_runs = [
+            r for r in challenge["runs"].values()
+            if r["status"] in ("completed", "solving")
+        ][:1]
+
+    if not target_runs:
+        return JSONResponse(
+            {"error": "no eligible run to mark as solved"},
+            status_code=409,
+        )
+
+    for run in target_runs:
+        run["status"] = "solved"
+        run["error"] = None
+
+    # Auto-stop other runs in parallel modes
+    if challenge["mode"] in ("parallel", "parallel_managed"):
+        solved_run = target_runs[0]
+        for other_id, other_run in challenge["runs"].items():
+            if other_run is solved_run:
+                continue
+            proc = other_run.get("process")
+            if proc and proc.returncode is None:
+                proc.terminate()
+                other_run["status"] = "failed"
+                other_run["process"] = None
+                stop_event = {
+                    "type": "system",
+                    "message": (
+                        f"Stopped: {solved_run['agent']} solved "
+                        "the challenge."
+                    ),
+                }
+                other_run["output_lines"].append(stop_event)
+                append_output_event(
+                    challenge_id, other_id, stop_event
+                )
+                await broadcast(
+                    challenge_id, other_id, stop_event
+                )
+
+    challenge["status"] = derive_challenge_status(challenge)
+    save_metadata(challenge)
+    await broadcast_challenge(challenge_id, {
+        "type": "status",
+        "status": challenge["status"],
+    })
+    return JSONResponse({"status": challenge["status"]})
+
+
 async def delete_challenge(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
@@ -1539,13 +1617,20 @@ def _resolve_file_dir(challenge_id: str, run_id: str | None) -> Path | None:
     challenge = challenges.get(challenge_id)
     if not challenge:
         return None
-    if (
-        run_id
-        and challenge["mode"] in ("parallel", "parallel_managed")
-        and run_id in challenge["runs"]
-    ):
-        return CHALLENGES_DIR / challenge_id / "_runs" / run_id
-    return CHALLENGES_DIR / challenge_id
+    challenge_dir = CHALLENGES_DIR / challenge_id
+    is_parallel = challenge["mode"] in ("parallel", "parallel_managed")
+
+    if run_id and is_parallel and run_id in challenge["runs"]:
+        return challenge_dir / "_runs" / run_id
+
+    # In parallel mode without a run_id, show the shared _files/ dir
+    # instead of the challenge root (which exposes _files/ and _runs/)
+    if is_parallel:
+        files_dir = challenge_dir / "_files"
+        if files_dir.is_dir():
+            return files_dir
+
+    return challenge_dir
 
 
 async def list_files(request: Request) -> JSONResponse:
@@ -2793,29 +2878,11 @@ async def run_agent_task(
         ).strip()
 
         if proc.returncode == 0 and not stream_error and saw_provider_message:
-            run["status"] = "solved"
+            # Clean exit does NOT mean solved — only flag detection
+            # or successful platform submission counts as solved.
+            # Mark as "completed" (agent finished without error).
+            run["status"] = "completed"
             run["error"] = None
-
-            # Auto-stop other runs in parallel modes
-            if challenge["mode"] in ("parallel", "parallel_managed"):
-                for other_id, other_run in challenge["runs"].items():
-                    if other_id != run_id and other_run.get("process"):
-                        other_proc = other_run["process"]
-                        if other_proc.returncode is None:
-                            other_proc.terminate()
-                            other_run["status"] = "failed"
-                            other_run["process"] = None
-                            stop_event = {
-                                "type": "system",
-                                "message": f"Stopped: another agent ({run['agent']}) solved the challenge.",
-                            }
-                            other_run["output_lines"].append(stop_event)
-                            append_output_event(
-                                challenge_id, other_id, stop_event
-                            )
-                            await broadcast(
-                                challenge_id, other_id, stop_event
-                            )
         else:
             run["status"] = "failed"
             if proc.returncode != 0:
@@ -2864,12 +2931,13 @@ async def run_agent_task(
         challenge["status"] = derive_challenge_status(challenge)
         save_metadata(challenge)
         await broadcast(challenge_id, run_id, {
-            "type": "status",
+            "type": "run_status",
+            "run_id": run_id,
             "status": run["status"],
             "error": run.get("error"),
         })
         await broadcast_challenge(challenge_id, {
-            "type": "status",
+            "type": "challenge_status",
             "status": challenge["status"],
         })
 
@@ -2901,9 +2969,10 @@ async def challenge_ws(websocket: WebSocket):
     for event in run["output_lines"]:
         await websocket.send_json(event)
 
-    # Send current status
+    # Send current run status
     await websocket.send_json({
-        "type": "status", "status": run["status"]
+        "type": "run_status", "run_id": run_id,
+        "status": run["status"],
     })
 
     try:
@@ -3815,6 +3884,7 @@ routes = [
     Route("/api/challenges/{id}/steer", steer_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/unshelve", unshelve_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/unsolve", unsolve_challenge, methods=["POST"]),
+    Route("/api/challenges/{id}/mark-solved", mark_solved, methods=["POST"]),
     Route("/api/challenges/{id}/manager", get_manager_state, methods=["GET"]),
     Route("/api/challenges/{id}", delete_challenge, methods=["DELETE"]),
     Route("/api/challenges/{id}/files", list_files, methods=["GET"]),

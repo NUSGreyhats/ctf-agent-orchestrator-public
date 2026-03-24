@@ -992,7 +992,7 @@ function updateStatusBadge(status) {
 }
 
 function updateButtons(status) {
-  $("#btn-retry").classList.toggle("hidden", status !== "failed");
+  $("#btn-retry").classList.toggle("hidden", status !== "failed" && status !== "completed");
   $("#btn-unsolve").classList.toggle("hidden", status !== "solved");
   $("#btn-unshelve").classList.toggle("hidden", status !== "shelved");
   $("#btn-stop").classList.toggle("hidden", status !== "solving");
@@ -1431,26 +1431,38 @@ function renderRunEvent(runId, event) {
   }
   if (!feed) return;
 
-  // --- Status events: update run tab dot + challenge-level status ---
-  if (event.type === "status") {
-    updateRunTabDot(runId, event.status);
-    updateStatusBadge(event.status);
-    updateButtons(event.status);
-    if (event.status === "solving") startTimer();
-    if (event.status === "solved" || event.status === "failed" || event.status === "shelved") {
-      stopTimer();
-      if (event.status === "shelved") loadManagerState();
-      // Toast if not viewing this challenge
-      if (views.detail.classList.contains("hidden")) {
-        const msgs = { solved: "Challenge solved!", failed: "Challenge failed", shelved: "Challenge shelved by manager" };
-        const types = { solved: "success", failed: "error", shelved: "info" };
-        showToast(msgs[event.status] || event.status, types[event.status] || "info");
-      }
-    }
+  // --- Run-level status: update only this run's tab dot ---
+  if (event.type === "run_status") {
+    updateRunTabDot(event.run_id || runId, event.status);
     if (event.error) {
       $("#error-banner").textContent = event.error;
       $("#error-banner").classList.remove("hidden");
     }
+    return;
+  }
+
+  // --- Challenge-level status: update badge, buttons, timer ---
+  if (event.type === "challenge_status") {
+    updateStatusBadge(event.status);
+    updateButtons(event.status);
+    if (event.status === "solving") startTimer();
+    if (["solved", "failed", "shelved", "completed"].includes(event.status)) {
+      stopTimer();
+      if (event.status === "shelved") loadManagerState();
+      if (views.detail.classList.contains("hidden")) {
+        const msgs = { solved: "Challenge solved!", failed: "Challenge failed", shelved: "Shelved by manager", completed: "Agent finished" };
+        const types = { solved: "success", failed: "error", shelved: "info", completed: "info" };
+        showToast(msgs[event.status] || event.status, types[event.status] || "info");
+      }
+    }
+    return;
+  }
+
+  // --- Legacy "status" type for backward compat with saved logs ---
+  if (event.type === "status") {
+    updateRunTabDot(runId, event.status);
+    updateStatusBadge(event.status);
+    updateButtons(event.status);
     return;
   }
 
@@ -1979,9 +1991,14 @@ async function viewFile(path) {
     body.appendChild(pre);
   }
 
-  // Set download link
+  // Set download link (include run_id if selected)
   const dlBtn = $("#file-viewer-download");
-  dlBtn.href = `/api/challenges/${currentChallengeId}/download/${path}`;
+  let dlUrl = `/api/challenges/${currentChallengeId}/download/${path}`;
+  const dlRunSelect = $("#files-run-select");
+  if (dlRunSelect && dlRunSelect.value) {
+    dlUrl += `?run_id=${encodeURIComponent(dlRunSelect.value)}`;
+  }
+  dlBtn.href = dlUrl;
   dlBtn.download = data.name;
 
   $("#file-viewer-overlay").classList.remove("hidden");
