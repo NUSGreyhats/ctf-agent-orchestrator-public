@@ -2921,6 +2921,8 @@ WG_DIR = Path("/etc/wireguard")
 WG_CONF = WG_DIR / "wg0.conf"
 WG_SERVER_PRIVATE_KEY = WG_DIR / "server_private.key"
 WG_SERVER_PUBLIC_KEY = WG_DIR / "server_public.key"
+WG_SETTINGS = WG_DIR / "wg0.settings.json"
+WG_DNSMASQ_CONF = Path("/etc/dnsmasq.d/wg-ctf.conf")
 VPN_SUBNET = "10.13.37"
 
 
@@ -2992,13 +2994,15 @@ def _build_wg_server_conf(
     allowed_ips = f"{VPN_SUBNET}.2/32"
     if client_networks.strip():
         allowed_ips += f", {client_networks.strip()}"
+    egress_iface_cmd = "$(ip -4 route list default | awk '{print $5; exit}')"
 
     conf = f"""[Interface]
+# dns_forward={"true" if dns_forward else "false"}
 Address = {VPN_SUBNET}.1/24
 ListenPort = 51820
 PrivateKey = {server_private_key}
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o {egress_iface_cmd} -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o {egress_iface_cmd} -j MASQUERADE
 
 [Peer]
 PublicKey = {client_public_key}
@@ -3036,7 +3040,7 @@ PersistentKeepalive = 25
 
 
 def _setup_dns_forwarder() -> None:
-    """Configure systemd-resolved to listen on the WireGuard interface."""
+    """Configure dnsmasq to answer DNS queries on the WireGuard interface."""
     try:
         subprocess.run(
             ["apt-get", "install", "-y", "-qq", "dnsmasq"],
@@ -3045,8 +3049,7 @@ def _setup_dns_forwarder() -> None:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return
 
-    dnsmasq_conf = Path("/etc/dnsmasq.d/wg-ctf.conf")
-    dnsmasq_conf.write_text(
+    WG_DNSMASQ_CONF.write_text(
         f"interface=wg0\n"
         f"bind-interfaces\n"
         f"listen-address={VPN_SUBNET}.1\n"
@@ -3058,12 +3061,33 @@ def _setup_dns_forwarder() -> None:
 
 
 def _teardown_dns_forwarder() -> None:
-    dnsmasq_conf = Path("/etc/dnsmasq.d/wg-ctf.conf")
-    if dnsmasq_conf.exists():
-        dnsmasq_conf.unlink()
+    if WG_DNSMASQ_CONF.exists():
+        WG_DNSMASQ_CONF.unlink()
     subprocess.run(
         ["systemctl", "stop", "dnsmasq"], capture_output=True
     )
+
+
+def _persist_wg_settings(dns_forward: bool) -> None:
+    WG_SETTINGS.write_text(json.dumps({"dns_forward": dns_forward}))
+    os.chmod(str(WG_SETTINGS), 0o600)
+
+
+def _dns_forward_enabled() -> bool:
+    if WG_SETTINGS.exists():
+        try:
+            settings = json.loads(WG_SETTINGS.read_text())
+        except json.JSONDecodeError:
+            settings = {}
+        if "dns_forward" in settings:
+            return bool(settings["dns_forward"])
+
+    if WG_CONF.exists():
+        for line in WG_CONF.read_text().splitlines():
+            if line.startswith("# dns_forward="):
+                return line.split("=", 1)[1].strip().lower() == "true"
+
+    return WG_DNSMASQ_CONF.exists()
 
 
 async def vpn_status(request: Request) -> JSONResponse:
@@ -3126,17 +3150,12 @@ async def vpn_configure(request: Request) -> JSONResponse:
     )
     WG_CONF.write_text(server_conf)
     os.chmod(str(WG_CONF), 0o600)
+    _persist_wg_settings(dns_forward)
 
     # Build client config
     client_conf = _build_wg_client_conf(
         "<YOUR_PRIVATE_KEY>", client_networks, dns_forward
     )
-
-    # Set up DNS forwarding
-    if dns_forward:
-        _setup_dns_forwarder()
-    else:
-        _teardown_dns_forwarder()
 
     # Bring up interface
     result = subprocess.run(
@@ -3148,6 +3167,11 @@ async def vpn_configure(request: Request) -> JSONResponse:
             {"error": f"Failed to start WireGuard: {result.stderr}"},
             status_code=500,
         )
+
+    if dns_forward:
+        _setup_dns_forwarder()
+    else:
+        _teardown_dns_forwarder()
 
     return JSONResponse({
         "ok": True,
@@ -3185,12 +3209,17 @@ async def vpn_toggle(request: Request) -> JSONResponse:
                     {"error": f"Failed: {result.stderr}"},
                     status_code=500,
                 )
+        if _dns_forward_enabled():
+            _setup_dns_forwarder()
+        else:
+            _teardown_dns_forwarder()
     elif action == "down":
+        _persist_wg_settings(_dns_forward_enabled())
         if _wg_interface_up():
             subprocess.run(
                 ["wg-quick", "down", "wg0"], capture_output=True
             )
-            _teardown_dns_forwarder()
+        _teardown_dns_forwarder()
     else:
         return JSONResponse(
             {"error": "action must be 'up' or 'down'"},

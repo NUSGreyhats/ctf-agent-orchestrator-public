@@ -40,7 +40,7 @@ resource "google_compute_instance" "ctf" {
 
   metadata = {
     startup-script = file("${path.module}/startup.sh")
-    ssh-keys       = "root:${file(var.ssh_public_key_path)}"
+    ssh-keys       = "root:${file(pathexpand(var.ssh_public_key_path))}"
   }
 }
 
