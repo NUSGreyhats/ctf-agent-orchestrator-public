@@ -29,17 +29,16 @@
           <span class="toggle-label">Agent:</span>
           <div id="default-agent-buttons"></div>
         </div>
-        <div class="default-flag-wrapper">
-          <span class="toggle-label">Flag:</span>
-          <input type="text" id="default-flag-format" class="default-flag-input" placeholder="e.g. flag{...}">
+        <div class="header-dropdown">
+          <button id="btn-add-challenge" class="btn-primary">+ Add Challenge</button>
+          <div id="add-challenge-menu" class="dropdown-menu hidden">
+            <button id="btn-new-challenge" class="dropdown-item">Add Single Challenge</button>
+            <button id="btn-bulk-upload" class="dropdown-item">Bulk Upload</button>
+            <button id="btn-import" class="dropdown-item">Import from Platform</button>
+          </div>
         </div>
-        <button id="btn-new-challenge" class="btn-primary">+ New Challenge</button>
-        <button id="btn-bulk-upload" class="btn-ghost">Bulk Upload</button>
-        <button id="btn-import" class="btn-ghost">Import</button>
         <button id="btn-usage" class="btn-ghost">Usage</button>
-        <button id="btn-vpn" class="btn-ghost">VPN</button>
-        <button id="btn-manager-settings" class="btn-ghost">Manager</button>
-        <button id="btn-theme-toggle" class="btn-ghost">Light</button>
+        <button id="btn-settings" class="btn-ghost">Settings</button>
         <button id="btn-logout" class="btn-ghost">Logout</button>
       </div>
     </header>
@@ -47,7 +46,7 @@
     <div id="empty-state" class="empty-state hidden">
       <div class="empty-icon">?</div>
       <p>No challenges yet</p>
-      <p class="text-muted">Click "New Challenge" to get started</p>
+      <p class="text-muted">Click "+ Add Challenge" to get started</p>
     </div>
   </div>
 
@@ -67,6 +66,111 @@
       <div id="usage-daily" class="usage-section hidden">
         <h2 id="usage-daily-title" class="usage-section-title">Daily Activity</h2>
         <div id="daily-chart" class="daily-chart"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings View -->
+  <div id="settings-view" class="view hidden">
+    <header>
+      <button id="btn-settings-back" class="btn-ghost">&larr; Back</button>
+      <h1>Settings</h1>
+      <div class="header-actions">
+        <button id="btn-settings-save" class="btn-primary">Save</button>
+      </div>
+    </header>
+    <div class="settings-page">
+      <!-- General -->
+      <div class="settings-section">
+        <h2 class="settings-section-title">General</h2>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label for="settings-flag-format">Default Flag Format</label>
+            <input type="text" id="settings-flag-format" class="default-flag-input" placeholder="e.g. flag{...}">
+          </div>
+          <div class="form-group flex-1">
+            <label for="settings-theme">Theme</label>
+            <select id="settings-theme">
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Manager -->
+      <div class="settings-section">
+        <h2 class="settings-section-title">Manager Agent</h2>
+        <p class="settings-hint">The manager agent periodically reviews solving challenges in managed modes and steers, hands off, or shelves them if stuck.</p>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label for="settings-manager-agent">Agent</label>
+            <select id="settings-manager-agent"></select>
+          </div>
+          <div class="form-group flex-1">
+            <label for="settings-manager-model">Model</label>
+            <select id="settings-manager-model"></select>
+          </div>
+          <div class="form-group flex-1">
+            <label for="settings-manager-effort">Effort</label>
+            <select id="settings-manager-effort"></select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label for="settings-manager-interval">Review interval (min)</label>
+            <input type="number" id="settings-manager-interval" min="1" max="120" value="10">
+          </div>
+          <div class="form-group flex-1">
+            <label for="settings-manager-min-time">Min solve time before first review (min)</label>
+            <input type="number" id="settings-manager-min-time" min="1" max="60" value="5">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Agent Pool (for handoff &amp; parallel)</label>
+          <div id="settings-agent-pool" class="manager-pool-list"></div>
+        </div>
+      </div>
+
+      <!-- VPN -->
+      <div class="settings-section">
+        <h2 class="settings-section-title">VPN (WireGuard)</h2>
+        <div id="settings-vpn-not-installed" class="hidden">
+          <p class="text-muted">WireGuard is not installed. Run <code>012_install-wireguard.sh</code> to install it.</p>
+        </div>
+        <div id="settings-vpn-panel" class="hidden">
+          <div class="vpn-status-row">
+            <span>Status:</span>
+            <span id="settings-vpn-status" class="badge badge-pending">down</span>
+            <button id="btn-settings-vpn-toggle" class="btn-ghost btn-sm">Start</button>
+          </div>
+          <div id="settings-vpn-peer" class="vpn-peer-info hidden">
+            <div class="vpn-kv"><span class="vpn-k">Peer</span> <span id="settings-vpn-peer-key"></span></div>
+            <div class="vpn-kv"><span class="vpn-k">Endpoint</span> <span id="settings-vpn-peer-endpoint"></span></div>
+            <div class="vpn-kv"><span class="vpn-k">Transfer</span> <span id="settings-vpn-peer-transfer"></span></div>
+          </div>
+          <div class="form-group">
+            <label for="settings-vpn-key">Your WireGuard Public Key</label>
+            <input type="text" id="settings-vpn-key" placeholder="Paste your public key (wg pubkey output)">
+          </div>
+          <div class="form-group">
+            <label for="settings-vpn-networks">Internal Network CIDR(s)</label>
+            <input type="text" id="settings-vpn-networks" placeholder="e.g. 10.0.0.0/24, 192.168.1.0/24">
+            <span class="checkbox-hint">Networks the server should route through the VPN tunnel</span>
+          </div>
+          <div class="form-group form-group-inline">
+            <label class="checkbox-label">
+              <input type="checkbox" id="settings-vpn-dns" checked>
+              <span>DNS forwarding</span>
+            </label>
+          </div>
+          <button id="btn-settings-vpn-configure" class="btn-primary">Configure &amp; Start VPN</button>
+          <div id="settings-vpn-client-config" class="hidden">
+            <label>Client Config (copy to your WireGuard client)</label>
+            <pre id="settings-vpn-config-text" class="vpn-config-block"></pre>
+            <button id="btn-settings-vpn-copy" class="btn-ghost btn-sm">Copy</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -442,100 +546,7 @@
     </div>
   </div>
 
-  <!-- VPN Modal -->
-  <div id="vpn-overlay" class="modal-overlay hidden">
-    <div class="modal">
-      <div class="modal-header">
-        <h2>VPN (WireGuard)</h2>
-        <button id="vpn-close" class="btn-icon">&times;</button>
-      </div>
-
-      <div id="vpn-not-installed" class="hidden">
-        <p class="text-muted">WireGuard is not installed on this server. Run the environment setup script <code>012_install-wireguard.sh</code> to install it.</p>
-      </div>
-
-      <div id="vpn-panel" class="hidden">
-        <div class="vpn-status-row">
-          <span>Status:</span>
-          <span id="vpn-status-badge" class="badge badge-pending">down</span>
-          <button id="btn-vpn-toggle" class="btn-ghost btn-sm">Start</button>
-        </div>
-
-        <div id="vpn-peer-info" class="vpn-peer-info hidden">
-          <div class="vpn-kv"><span class="vpn-k">Peer</span> <span id="vpn-peer-key"></span></div>
-          <div class="vpn-kv"><span class="vpn-k">Endpoint</span> <span id="vpn-peer-endpoint"></span></div>
-          <div class="vpn-kv"><span class="vpn-k">Transfer</span> <span id="vpn-peer-transfer"></span></div>
-        </div>
-
-        <hr class="vpn-divider">
-
-        <div class="form-group">
-          <label for="vpn-client-key">Your WireGuard Public Key</label>
-          <input type="text" id="vpn-client-key" placeholder="Paste your public key (wg pubkey output)">
-        </div>
-        <div class="form-group">
-          <label for="vpn-client-networks">Internal Network CIDR(s)</label>
-          <input type="text" id="vpn-client-networks" placeholder="e.g. 10.0.0.0/24, 192.168.1.0/24">
-          <span class="checkbox-hint">Networks the server should route through the VPN tunnel</span>
-        </div>
-        <div class="form-group form-group-inline">
-          <label class="checkbox-label">
-            <input type="checkbox" id="vpn-dns" checked>
-            <span>DNS forwarding</span>
-          </label>
-          <span class="checkbox-hint">Server acts as DNS resolver for VPN clients</span>
-        </div>
-        <button id="btn-vpn-configure" class="btn-primary btn-full">Configure &amp; Start</button>
-
-        <div id="vpn-client-config" class="hidden">
-          <hr class="vpn-divider">
-          <label>Client Config (copy to your WireGuard client)</label>
-          <pre id="vpn-client-config-text" class="vpn-config-block"></pre>
-          <button id="btn-vpn-copy-config" class="btn-ghost btn-sm">Copy</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Manager Settings Modal -->
-  <div id="manager-overlay" class="modal-overlay hidden">
-    <div class="modal">
-      <div class="modal-header">
-        <h2>Manager Agent</h2>
-        <button id="manager-close" class="btn-icon">&times;</button>
-      </div>
-      <p class="manager-hint">The manager agent periodically reviews solving challenges and steers or shelves them if stuck. Manager behavior is controlled by challenge mode (managed modes enable the manager automatically).</p>
-      <div class="form-row">
-        <div class="form-group flex-1">
-          <label for="manager-agent">Agent</label>
-          <select id="manager-agent"></select>
-        </div>
-        <div class="form-group flex-1">
-          <label for="manager-model">Model</label>
-          <select id="manager-model"></select>
-        </div>
-        <div class="form-group flex-1">
-          <label for="manager-effort">Effort</label>
-          <select id="manager-effort"></select>
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group flex-1">
-          <label for="manager-interval">Review interval (min)</label>
-          <input type="number" id="manager-interval" min="1" max="120" value="10">
-        </div>
-        <div class="form-group flex-1">
-          <label for="manager-min-time">Min solve time (min)</label>
-          <input type="number" id="manager-min-time" min="1" max="60" value="5">
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Agent Pool (for handoff &amp; parallel)</label>
-        <div id="manager-agent-pool" class="manager-pool-list"></div>
-      </div>
-      <button id="btn-manager-save" class="btn-primary btn-full">Save</button>
-    </div>
-  </div>
+  <!-- (Manager and VPN settings are now in the Settings view above) -->
 
   <!-- Auth Warning Modal -->
   <div id="auth-warning-overlay" class="modal-overlay hidden">

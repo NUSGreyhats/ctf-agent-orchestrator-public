@@ -1060,6 +1060,53 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 
 /* Manager verdict: handoff and summarize */
+/* Header dropdown */
+.header-dropdown { position: relative; }
+.dropdown-menu {
+  position: absolute; top: 100%; right: 0; z-index: 100;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.3rem; min-width: 200px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  margin-top: 0.3rem;
+}
+.dropdown-item {
+  display: block; width: 100%; text-align: left;
+  padding: 0.5rem 0.75rem; border: none; background: none;
+  color: var(--text); font-size: 0.8rem; cursor: pointer;
+  border-radius: 6px;
+}
+.dropdown-item:hover { background: var(--bg-hover); }
+
+/* Settings page */
+.settings-page {
+  max-width: 720px; margin: 0 auto; padding: 1.5rem;
+}
+.settings-section {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 10px; padding: 1.25rem; margin-bottom: 1.25rem;
+}
+.settings-section-title {
+  font-size: 0.95rem; font-weight: 700; margin-bottom: 0.75rem;
+  color: var(--text);
+}
+.settings-hint {
+  color: var(--text-muted); font-size: 0.78rem; margin-bottom: 0.75rem;
+  line-height: 1.4;
+}
+.settings-page input[type="text"],
+.settings-page input[type="number"],
+.settings-page input[type="password"],
+.settings-page input[type="url"],
+.settings-page textarea,
+.settings-page select {
+  width: 100%; padding: 0.5rem 0.65rem; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+  font-size: 0.85rem; font-family: var(--sans); outline: none;
+}
+.settings-page input:focus, .settings-page select:focus {
+  border-color: var(--accent);
+}
+
 /* Import */
 .import-status {
   padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.78rem;

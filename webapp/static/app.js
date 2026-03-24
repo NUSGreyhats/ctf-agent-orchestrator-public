@@ -44,6 +44,7 @@ const views = {
   dashboard: $("#dashboard-view"),
   detail: $("#detail-view"),
   usage: $("#usage-view"),
+  settings: $("#settings-view"),
 };
 
 function showView(name) {
@@ -210,42 +211,15 @@ async function loadDefaultAgent() {
   currentTheme = settings.theme || "dark";
   applyTheme(currentTheme);
   updateAgentToggleUI();
-  const defaultFlagInput = $("#default-flag-format");
-  if (defaultFlagInput) defaultFlagInput.value = defaultFlagFormat;
 }
 
 function applyTheme(theme) {
   document.body.classList.toggle("light", theme === "light");
-  const btn = $("#btn-theme-toggle");
-  if (btn) btn.textContent = theme === "light" ? "Dark" : "Light";
 }
 
 function updateAgentToggleUI() {
   document.querySelectorAll(".agent-toggle-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.agent === defaultAgent);
-  });
-}
-
-const defaultFlagInput = $("#default-flag-format");
-if (defaultFlagInput) {
-  defaultFlagInput.addEventListener("change", async () => {
-    defaultFlagFormat = defaultFlagInput.value.trim();
-    await api("/api/settings", {
-      method: "PUT",
-      body: JSON.stringify({ default_flag_format: defaultFlagFormat }),
-    });
-  });
-}
-
-const themeToggleBtn = $("#btn-theme-toggle");
-if (themeToggleBtn) {
-  themeToggleBtn.addEventListener("click", async () => {
-    currentTheme = currentTheme === "dark" ? "light" : "dark";
-    applyTheme(currentTheme);
-    await api("/api/settings", {
-      method: "PUT",
-      body: JSON.stringify({ theme: currentTheme }),
-    });
   });
 }
 
@@ -433,6 +407,19 @@ $("#challenge-agent").addEventListener("change", () => {
   updateModelOptions();
   const agent = $("#challenge-agent").value;
   $("#challenge-autonomous").checked = getAgentAutonomousDefault(agent);
+});
+
+// === Add Challenge Dropdown ===
+$("#btn-add-challenge").addEventListener("click", (e) => {
+  e.stopPropagation();
+  $("#add-challenge-menu").classList.toggle("hidden");
+});
+document.addEventListener("click", () => {
+  $("#add-challenge-menu").classList.add("hidden");
+});
+$("#add-challenge-menu").addEventListener("click", (e) => {
+  e.stopPropagation();
+  $("#add-challenge-menu").classList.add("hidden");
 });
 
 // === New Challenge Modal ===
@@ -2514,130 +2501,23 @@ $("#btn-import-submit").addEventListener("click", async () => {
   }
 });
 
-// === VPN Modal ===
-$("#btn-vpn").addEventListener("click", async () => {
-  const res = await api("/api/vpn");
-  if (!res) return;
-  const data = await res.json();
-
-  if (!data.installed) {
-    $("#vpn-not-installed").classList.remove("hidden");
-    $("#vpn-panel").classList.add("hidden");
-  } else {
-    $("#vpn-not-installed").classList.add("hidden");
-    $("#vpn-panel").classList.remove("hidden");
-    updateVpnStatus(data);
-  }
-  $("#vpn-overlay").classList.remove("hidden");
-});
-
-function updateVpnStatus(data) {
-  const badge = $("#vpn-status-badge");
-  const toggleBtn = $("#btn-vpn-toggle");
-  if (data.up) {
-    badge.textContent = "up";
-    badge.className = "badge badge-solved";
-    toggleBtn.textContent = "Stop";
-  } else {
-    badge.textContent = "down";
-    badge.className = "badge badge-pending";
-    toggleBtn.textContent = "Start";
-  }
-
-  const peerInfo = $("#vpn-peer-info");
-  if (data.peer) {
-    peerInfo.classList.remove("hidden");
-    $("#vpn-peer-key").textContent = data.peer.public_key || "—";
-    $("#vpn-peer-endpoint").textContent = data.peer.endpoint || "—";
-    const rx = parseInt(data.peer.transfer_rx || 0);
-    const tx = parseInt(data.peer.transfer_tx || 0);
-    $("#vpn-peer-transfer").textContent = `${formatVpnBytes(rx)} rx / ${formatVpnBytes(tx)} tx`;
-  } else {
-    peerInfo.classList.add("hidden");
-  }
-}
-
+// === Settings View ===
 function formatVpnBytes(bytes) {
   if (bytes < 1024) return bytes + " B";
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
   return (bytes / (1024 * 1024)).toFixed(1) + " MB";
 }
 
-$("#vpn-close").addEventListener("click", () => {
-  $("#vpn-overlay").classList.add("hidden");
-});
-$("#vpn-overlay").addEventListener("click", (e) => {
-  if (e.target === $("#vpn-overlay")) $("#vpn-overlay").classList.add("hidden");
-});
-
-$("#btn-vpn-toggle").addEventListener("click", async () => {
-  const badge = $("#vpn-status-badge");
-  const action = badge.textContent === "up" ? "down" : "up";
-  const res = await api("/api/vpn/toggle", {
-    method: "POST",
-    body: JSON.stringify({ action }),
-  });
-  if (res && res.ok) {
-    const data = await res.json();
-    const vpnRes = await api("/api/vpn");
-    if (vpnRes) updateVpnStatus(await vpnRes.json());
-    showToast(`VPN ${data.up ? "started" : "stopped"}`, "success");
-  }
-});
-
-$("#btn-vpn-configure").addEventListener("click", async () => {
-  const clientKey = $("#vpn-client-key").value.trim();
-  const clientNetworks = $("#vpn-client-networks").value.trim();
-  const dnsForward = $("#vpn-dns").checked;
-
-  if (!clientKey) {
-    showToast("Public key required", "error");
-    return;
-  }
-
-  const res = await api("/api/vpn/configure", {
-    method: "POST",
-    body: JSON.stringify({
-      client_public_key: clientKey,
-      client_networks: clientNetworks,
-      dns_forward: dnsForward,
-    }),
-  });
-  if (!res) return;
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    showToast(err.error || "Configuration failed", "error");
-    return;
-  }
-  const data = await res.json();
-  $("#vpn-client-config-text").textContent = data.client_config;
-  $("#vpn-client-config").classList.remove("hidden");
-
-  const vpnRes = await api("/api/vpn");
-  if (vpnRes) updateVpnStatus(await vpnRes.json());
-  showToast("VPN configured and started", "success");
-});
-
-$("#btn-vpn-copy-config").addEventListener("click", () => {
-  const text = $("#vpn-client-config-text").textContent;
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = $("#btn-vpn-copy-config");
-    btn.textContent = "Copied!";
-    setTimeout(() => { btn.textContent = "Copy"; }, 1200);
-  });
-});
-
-// === Manager Settings Modal ===
-function updateManagerModelOptions(currentModel, currentEffort) {
-  const agentName = $("#manager-agent").value;
+function updateSettingsManagerModels(currentModel, currentEffort) {
+  const agentName = $("#settings-manager-agent").value;
   const meta = getAgentMeta(agentName);
-  const modelSel = $("#manager-model");
+  const modelSel = $("#settings-manager-model");
   modelSel.innerHTML = (meta.models || []).map((m) =>
     `<option value="${esc(m.value)}">${esc(m.label)}</option>`
   ).join("");
   if (currentModel) modelSel.value = currentModel;
 
-  const effortSel = $("#manager-effort");
+  const effortSel = $("#settings-manager-effort");
   const effortLevels = meta.effort_levels || [];
   if (!effortLevels.length) {
     effortSel.innerHTML = '<option value="">Provider default</option>';
@@ -2651,27 +2531,55 @@ function updateManagerModelOptions(currentModel, currentEffort) {
   }
 }
 
-$("#btn-manager-settings").addEventListener("click", async () => {
+function updateSettingsVpnStatus(data) {
+  const badge = $("#settings-vpn-status");
+  const toggleBtn = $("#btn-settings-vpn-toggle");
+  if (data.up) {
+    badge.textContent = "up";
+    badge.className = "badge badge-solved";
+    toggleBtn.textContent = "Stop";
+  } else {
+    badge.textContent = "down";
+    badge.className = "badge badge-pending";
+    toggleBtn.textContent = "Start";
+  }
+  const peerEl = $("#settings-vpn-peer");
+  if (data.peer) {
+    peerEl.classList.remove("hidden");
+    $("#settings-vpn-peer-key").textContent = data.peer.public_key || "—";
+    $("#settings-vpn-peer-endpoint").textContent = data.peer.endpoint || "—";
+    const rx = parseInt(data.peer.transfer_rx || 0);
+    const tx = parseInt(data.peer.transfer_tx || 0);
+    $("#settings-vpn-peer-transfer").textContent = `${formatVpnBytes(rx)} rx / ${formatVpnBytes(tx)} tx`;
+  } else {
+    peerEl.classList.add("hidden");
+  }
+}
+
+$("#btn-settings").addEventListener("click", async () => {
   const res = await api("/api/settings");
   if (!res) return;
   const s = await res.json();
-  $("#manager-interval").value = s.manager_interval || 10;
-  $("#manager-min-time").value = s.manager_min_solve_time || 5;
 
-  // Populate agent dropdown
-  const agentSel = $("#manager-agent");
+  // General
+  $("#settings-flag-format").value = s.default_flag_format || "";
+  $("#settings-theme").value = s.theme || "dark";
+
+  // Manager agent/model/effort
+  const agentSel = $("#settings-manager-agent");
   agentSel.innerHTML = agentCatalog.map((agent) =>
     `<option value="${esc(agent.name)}">${esc(agent.label)}</option>`
   ).join("");
   agentSel.value = s.manager_agent || primaryAgentName();
-  updateManagerModelOptions(s.manager_model || "sonnet", s.manager_effort || "");
+  updateSettingsManagerModels(s.manager_model || "sonnet", s.manager_effort || "");
+  agentSel.onchange = () => updateSettingsManagerModels("", "");
 
-  agentSel.onchange = () => updateManagerModelOptions("", "");
+  $("#settings-manager-interval").value = s.manager_interval || 10;
+  $("#settings-manager-min-time").value = s.manager_min_solve_time || 5;
 
-  // Render agent pool with per-agent model dropdowns
-  const poolContainer = $("#manager-agent-pool");
+  // Agent pool
+  const poolContainer = $("#settings-agent-pool");
   const currentPool = s.manager_agent_pool || [];
-  // Build a lookup: agent name -> configured model
   const poolMap = new Map();
   for (const entry of currentPool) {
     if (typeof entry === "string") poolMap.set(entry, "");
@@ -2693,34 +2601,111 @@ $("#btn-manager-settings").addEventListener("click", async () => {
     </div>`;
   }).join("");
 
-  $("#manager-overlay").classList.remove("hidden");
+  // VPN
+  const vpnRes = await api("/api/vpn");
+  if (vpnRes) {
+    const vpnData = await vpnRes.json();
+    if (!vpnData.installed) {
+      $("#settings-vpn-not-installed").classList.remove("hidden");
+      $("#settings-vpn-panel").classList.add("hidden");
+    } else {
+      $("#settings-vpn-not-installed").classList.add("hidden");
+      $("#settings-vpn-panel").classList.remove("hidden");
+      updateSettingsVpnStatus(vpnData);
+    }
+  }
+
+  showView("settings");
 });
-$("#manager-close").addEventListener("click", () => {
-  $("#manager-overlay").classList.add("hidden");
+
+$("#btn-settings-back").addEventListener("click", () => {
+  showView("dashboard");
+  loadChallenges();
 });
-$("#manager-overlay").addEventListener("click", (e) => {
-  if (e.target === $("#manager-overlay")) $("#manager-overlay").classList.add("hidden");
-});
-$("#btn-manager-save").addEventListener("click", async () => {
-  const agentPool = Array.from($("#manager-agent-pool").querySelectorAll(".pool-agent-cb:checked"))
+
+$("#btn-settings-save").addEventListener("click", async () => {
+  const agentPool = Array.from($("#settings-agent-pool").querySelectorAll(".pool-agent-cb:checked"))
     .map((cb) => {
       const agentName = cb.value;
-      const modelSel = $("#manager-agent-pool").querySelector(`.pool-model-sel[data-agent="${agentName}"]`);
+      const modelSel = $("#settings-agent-pool").querySelector(`.pool-model-sel[data-agent="${agentName}"]`);
       return { agent: agentName, model: modelSel ? modelSel.value : "" };
     });
   const body = {
-    manager_agent: $("#manager-agent").value,
-    manager_interval: parseInt($("#manager-interval").value) || 10,
-    manager_min_solve_time: parseInt($("#manager-min-time").value) || 5,
-    manager_model: $("#manager-model").value.trim() || "",
-    manager_effort: $("#manager-effort").value || "",
+    default_flag_format: $("#settings-flag-format").value.trim(),
+    theme: $("#settings-theme").value,
+    manager_agent: $("#settings-manager-agent").value,
+    manager_model: $("#settings-manager-model").value.trim() || "",
+    manager_effort: $("#settings-manager-effort").value || "",
+    manager_interval: parseInt($("#settings-manager-interval").value) || 10,
+    manager_min_solve_time: parseInt($("#settings-manager-min-time").value) || 5,
     manager_agent_pool: agentPool,
   };
   const res = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
   if (res && res.ok) {
-    showToast("Manager settings saved", "success");
-    $("#manager-overlay").classList.add("hidden");
+    const saved = await res.json();
+    defaultFlagFormat = saved.default_flag_format || "";
+    currentTheme = saved.theme || "dark";
+    applyTheme(currentTheme);
+    showToast("Settings saved", "success");
   }
+});
+
+// VPN controls within settings
+$("#btn-settings-vpn-toggle").addEventListener("click", async () => {
+  const badge = $("#settings-vpn-status");
+  const action = badge.textContent === "up" ? "down" : "up";
+  const res = await api("/api/vpn/toggle", {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  });
+  if (res && res.ok) {
+    const data = await res.json();
+    const vpnRes = await api("/api/vpn");
+    if (vpnRes) updateSettingsVpnStatus(await vpnRes.json());
+    showToast(`VPN ${data.up ? "started" : "stopped"}`, "success");
+  }
+});
+
+$("#btn-settings-vpn-configure").addEventListener("click", async () => {
+  const clientKey = $("#settings-vpn-key").value.trim();
+  const clientNetworks = $("#settings-vpn-networks").value.trim();
+  const dnsForward = $("#settings-vpn-dns").checked;
+
+  if (!clientKey) {
+    showToast("Public key required", "error");
+    return;
+  }
+
+  const res = await api("/api/vpn/configure", {
+    method: "POST",
+    body: JSON.stringify({
+      client_public_key: clientKey,
+      client_networks: clientNetworks,
+      dns_forward: dnsForward,
+    }),
+  });
+  if (!res) return;
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showToast(err.error || "Configuration failed", "error");
+    return;
+  }
+  const data = await res.json();
+  $("#settings-vpn-config-text").textContent = data.client_config;
+  $("#settings-vpn-client-config").classList.remove("hidden");
+
+  const vpnRes = await api("/api/vpn");
+  if (vpnRes) updateSettingsVpnStatus(await vpnRes.json());
+  showToast("VPN configured and started", "success");
+});
+
+$("#btn-settings-vpn-copy").addEventListener("click", () => {
+  const text = $("#settings-vpn-config-text").textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = $("#btn-settings-vpn-copy");
+    btn.textContent = "Copied!";
+    setTimeout(() => { btn.textContent = "Copy"; }, 1200);
+  });
 });
 
 // === Manager Sidebar Tab ===
