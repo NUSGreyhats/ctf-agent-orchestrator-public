@@ -1076,6 +1076,12 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   border-radius: 6px;
 }
 .dropdown-item:hover { background: var(--bg-hover); }
+.dropdown-divider {
+  height: 1px; background: var(--border); margin: 0.3rem 0.5rem;
+}
+.dropdown-item-sync {
+  font-size: 0.75rem; color: var(--text-muted);
+}
 
 /* Settings page */
 .settings-page {

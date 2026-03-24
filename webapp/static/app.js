@@ -410,8 +410,88 @@ $("#challenge-agent").addEventListener("change", () => {
 });
 
 // === Add Challenge Dropdown ===
+let savedConnections = [];
+
+async function loadConnections() {
+  const res = await api("/api/connections");
+  if (!res) return;
+  savedConnections = await res.json();
+  renderSyncConnections();
+}
+
+function renderSyncConnections() {
+  const container = $("#sync-connections");
+  const divider = $("#sync-divider");
+  if (!savedConnections.length) {
+    container.innerHTML = "";
+    divider.classList.add("hidden");
+    return;
+  }
+  divider.classList.remove("hidden");
+  container.innerHTML = savedConnections.map((conn) => `
+    <button class="dropdown-item dropdown-item-sync" data-conn-id="${esc(conn.id)}">
+      Sync: ${esc(conn.label)}
+    </button>
+  `).join("");
+  container.querySelectorAll(".dropdown-item-sync").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      $("#add-challenge-menu").classList.add("hidden");
+      triggerSync(btn.dataset.connId);
+    });
+  });
+}
+
+async function triggerSync(connId) {
+  showToast("Syncing...", "info");
+  const res = await api("/api/connections/sync", {
+    method: "POST",
+    body: JSON.stringify({ id: connId }),
+  });
+  if (!res) return;
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showToast(err.error || "Sync failed", "error");
+    return;
+  }
+  const data = await res.json();
+  if (!data.challenges.length) {
+    showToast(`No new challenges (${data.total} total on platform)`, "info");
+    return;
+  }
+  showToast(`Found ${data.new} new challenge${data.new !== 1 ? "s" : ""}`, "success");
+
+  // Open import modal in preview phase with the fetched challenges
+  importPluginConfig = savedConnections.find((c) => c.id === connId)?.config || {};
+  importFetchedChallenges = data.challenges;
+  const pluginName = data.connection.plugin;
+
+  // Set up import modal
+  await loadPlugins();
+  const pluginSel = $("#import-plugin");
+  pluginSel.value = pluginName;
+
+  $("#import-phase-config").classList.add("hidden");
+  $("#import-phase-loading").classList.add("hidden");
+  $("#import-phase-preview").classList.remove("hidden");
+
+  // Set up preview controls
+  $("#import-mode").value = "single";
+  renderAgentSelect($("#import-agent"));
+  renderAgentCheckboxes($("#import-parallel-checkboxes"));
+  $("#import-agent").value = defaultAgent;
+  updateImportModeOptions();
+  updateImportModels();
+  $("#import-autonomous").checked = getAgentAutonomousDefault(defaultAgent);
+  $("#import-flag").value = defaultFlagFormat;
+
+  renderImportPreview();
+  $("#import-overlay").classList.remove("hidden");
+}
+
 $("#btn-add-challenge").addEventListener("click", (e) => {
   e.stopPropagation();
+  loadConnections();
   $("#add-challenge-menu").classList.toggle("hidden");
 });
 document.addEventListener("click", () => {

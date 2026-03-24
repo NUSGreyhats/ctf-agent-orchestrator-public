@@ -77,6 +77,33 @@ _login_attempts: dict[str, list[float]] = defaultdict(list)
 
 challenges: dict[str, dict] = {}
 
+CONNECTIONS_FILE = STATE_ROOT_DIR / "connections.json"
+
+
+def load_connections() -> list[dict]:
+    if CONNECTIONS_FILE.exists():
+        try:
+            data = json.loads(CONNECTIONS_FILE.read_text())
+            if isinstance(data, list):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return []
+
+
+def save_connections(connections: list[dict]) -> None:
+    CONNECTIONS_FILE.write_text(json.dumps(connections, indent=2))
+
+
+def _imported_remote_ids(plugin_name: str) -> set[str]:
+    """Return set of remote_ids already imported from a plugin."""
+    ids = set()
+    for c in challenges.values():
+        if c.get("_plugin") == plugin_name and c.get("_remote_id"):
+            ids.add(c["_remote_id"])
+    return ids
+
+
 VALID_MODES = {"single", "single_managed", "parallel", "parallel_managed"}
 
 METADATA_FILE = "challenge.json"
@@ -3250,6 +3277,27 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "status": challenge_status,
         })
 
+    # Save connection for future syncs
+    if created:
+        connections = load_connections()
+        # Update existing or add new
+        conn_id = f"{plugin_name}:{config.get('url', '')}"
+        existing = next(
+            (c for c in connections if c.get("id") == conn_id), None
+        )
+        if existing:
+            existing["config"] = config
+            existing["last_sync"] = datetime.now().isoformat()
+        else:
+            connections.append({
+                "id": conn_id,
+                "plugin": plugin_name,
+                "label": f"{get_plugin(plugin_name).label} — {config.get('url', '')}",
+                "config": config,
+                "last_sync": datetime.now().isoformat(),
+            })
+        save_connections(connections)
+
     return JSONResponse({"created": created}, status_code=201)
 
 
@@ -3294,6 +3342,99 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": str(exc)}, status_code=400
         )
+
+
+async def list_connections(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    return JSONResponse(load_connections())
+
+
+async def delete_connection(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    body = await request.json()
+    conn_id = body.get("id", "")
+    connections = load_connections()
+    connections = [c for c in connections if c.get("id") != conn_id]
+    save_connections(connections)
+    return JSONResponse({"ok": True})
+
+
+async def sync_connection(request: Request) -> JSONResponse:
+    """Fetch new challenges from a saved connection."""
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    body = await request.json()
+    conn_id = body.get("id", "")
+
+    connections = load_connections()
+    conn = next(
+        (c for c in connections if c.get("id") == conn_id), None
+    )
+    if not conn:
+        return JSONResponse(
+            {"error": "Connection not found"}, status_code=404
+        )
+
+    plugin_name = conn.get("plugin", "")
+    config = conn.get("config", {})
+    plugin = get_plugin(plugin_name)
+    if not plugin:
+        return JSONResponse(
+            {"error": f"Plugin {plugin_name} not found"},
+            status_code=404,
+        )
+
+    try:
+        remote_challenges = await plugin.fetch_challenges(config)
+    except Exception as exc:
+        return JSONResponse(
+            {"error": str(exc)}, status_code=400
+        )
+
+    # Filter out already-imported challenges
+    imported_ids = _imported_remote_ids(plugin_name)
+    new_challenges = [
+        c for c in remote_challenges
+        if str(c.remote_id) not in imported_ids
+    ]
+
+    # Update last_sync
+    conn["last_sync"] = datetime.now().isoformat()
+    save_connections(connections)
+
+    return JSONResponse({
+        "connection": {
+            "id": conn["id"],
+            "plugin": conn["plugin"],
+            "label": conn["label"],
+        },
+        "total": len(remote_challenges),
+        "new": len(new_challenges),
+        "challenges": [
+            {
+                "remote_id": c.remote_id,
+                "name": c.name,
+                "description": c.description,
+                "category": c.category,
+                "points": c.points,
+                "files": [
+                    {"name": f.name, "url": f.url}
+                    for f in c.files
+                ],
+                "solved": c.solved,
+                "tags": c.tags,
+            }
+            for c in new_challenges
+        ],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -3656,6 +3797,9 @@ routes = [
     Route("/api/plugins/fetch", plugin_fetch_challenges, methods=["POST"]),
     Route("/api/plugins/import", plugin_import_challenges, methods=["POST"]),
     Route("/api/plugins/submit-flag", plugin_submit_flag, methods=["POST"]),
+    Route("/api/connections", list_connections, methods=["GET"]),
+    Route("/api/connections/delete", delete_connection, methods=["POST"]),
+    Route("/api/connections/sync", sync_connection, methods=["POST"]),
     Route("/api/settings", get_settings, methods=["GET"]),
     Route("/api/settings", update_settings, methods=["PUT"]),
     Route("/api/challenges", list_challenges, methods=["GET"]),
