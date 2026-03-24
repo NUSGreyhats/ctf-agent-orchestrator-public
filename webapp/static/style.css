@@ -236,7 +236,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   color: var(--text-muted); margin-bottom: 0.2rem;
   text-transform: uppercase; letter-spacing: 0.04em;
 }
-.modal input[type="text"], .modal input[type="number"], .modal textarea, .modal select {
+.modal input[type="text"], .modal input[type="number"], .modal input[type="password"], .modal input[type="url"], .modal textarea, .modal select {
   width: 100%; padding: 0.5rem 0.65rem; background: var(--bg-input);
   border: 1px solid var(--border); border-radius: 8px; color: var(--text);
   font-size: 0.85rem; font-family: var(--sans); outline: none;
