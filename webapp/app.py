@@ -2914,6 +2914,293 @@ async def get_manager_state(request: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# VPN (WireGuard)
+# ---------------------------------------------------------------------------
+
+WG_DIR = Path("/etc/wireguard")
+WG_CONF = WG_DIR / "wg0.conf"
+WG_SERVER_PRIVATE_KEY = WG_DIR / "server_private.key"
+WG_SERVER_PUBLIC_KEY = WG_DIR / "server_public.key"
+VPN_SUBNET = "10.13.37"
+
+
+def _wg_installed() -> bool:
+    return WG_SERVER_PRIVATE_KEY.exists() and WG_SERVER_PUBLIC_KEY.exists()
+
+
+def _wg_interface_up() -> bool:
+    try:
+        result = subprocess.run(
+            ["wg", "show", "wg0"],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _wg_peer_info() -> dict | None:
+    if not _wg_interface_up():
+        return None
+    try:
+        result = subprocess.run(
+            ["wg", "show", "wg0", "dump"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        lines = result.stdout.strip().splitlines()
+        if len(lines) < 2:
+            return None
+        parts = lines[1].split("\t")
+        return {
+            "public_key": parts[0] if len(parts) > 0 else "",
+            "endpoint": parts[2] if len(parts) > 2 else "",
+            "latest_handshake": parts[4] if len(parts) > 4 else "0",
+            "transfer_rx": parts[5] if len(parts) > 5 else "0",
+            "transfer_tx": parts[6] if len(parts) > 6 else "0",
+        }
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def _get_server_public_ip() -> str:
+    """Best-effort detection of the server's public IP."""
+    for cmd in (
+        ["curl", "-s", "-4", "--max-time", "3", "ifconfig.me"],
+        ["hostname", "-I"],
+    ):
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                ip = result.stdout.strip().split()[0]
+                if ip and not ip.startswith("10.") and not ip.startswith("192.168."):
+                    return ip
+        except (FileNotFoundError, subprocess.TimeoutExpired, IndexError):
+            continue
+    return "YOUR_SERVER_IP"
+
+
+def _build_wg_server_conf(
+    client_public_key: str,
+    client_networks: str,
+    dns_forward: bool,
+) -> str:
+    server_private_key = WG_SERVER_PRIVATE_KEY.read_text().strip()
+    allowed_ips = f"{VPN_SUBNET}.2/32"
+    if client_networks.strip():
+        allowed_ips += f", {client_networks.strip()}"
+
+    conf = f"""[Interface]
+Address = {VPN_SUBNET}.1/24
+ListenPort = 51820
+PrivateKey = {server_private_key}
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+
+[Peer]
+PublicKey = {client_public_key}
+AllowedIPs = {allowed_ips}
+"""
+    return conf
+
+
+def _build_wg_client_conf(
+    client_private_key_placeholder: str,
+    client_networks: str,
+    dns_forward: bool,
+) -> str:
+    server_public_key = WG_SERVER_PUBLIC_KEY.read_text().strip()
+    server_ip = _get_server_public_ip()
+
+    dns_line = f"DNS = {VPN_SUBNET}.1" if dns_forward else ""
+    # Client routes the VPN subnet + internal networks through the tunnel
+    allowed_ips = f"{VPN_SUBNET}.0/24"
+    if client_networks.strip():
+        allowed_ips += f", {client_networks.strip()}"
+
+    conf = f"""[Interface]
+Address = {VPN_SUBNET}.2/24
+PrivateKey = {client_private_key_placeholder}
+{dns_line}
+
+[Peer]
+PublicKey = {server_public_key}
+Endpoint = {server_ip}:51820
+AllowedIPs = {allowed_ips}
+PersistentKeepalive = 25
+"""
+    return conf
+
+
+def _setup_dns_forwarder() -> None:
+    """Configure systemd-resolved to listen on the WireGuard interface."""
+    try:
+        subprocess.run(
+            ["apt-get", "install", "-y", "-qq", "dnsmasq"],
+            capture_output=True, timeout=60,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return
+
+    dnsmasq_conf = Path("/etc/dnsmasq.d/wg-ctf.conf")
+    dnsmasq_conf.write_text(
+        f"interface=wg0\n"
+        f"bind-interfaces\n"
+        f"listen-address={VPN_SUBNET}.1\n"
+        f"no-resolv\n"
+        f"server=8.8.8.8\n"
+        f"server=1.1.1.1\n"
+    )
+    subprocess.run(["systemctl", "restart", "dnsmasq"], capture_output=True)
+
+
+def _teardown_dns_forwarder() -> None:
+    dnsmasq_conf = Path("/etc/dnsmasq.d/wg-ctf.conf")
+    if dnsmasq_conf.exists():
+        dnsmasq_conf.unlink()
+    subprocess.run(
+        ["systemctl", "stop", "dnsmasq"], capture_output=True
+    )
+
+
+async def vpn_status(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+
+    if not _wg_installed():
+        return JSONResponse({
+            "installed": False,
+            "up": False,
+            "peer": None,
+            "server_public_key": None,
+        })
+
+    up = _wg_interface_up()
+    peer = _wg_peer_info()
+    return JSONResponse({
+        "installed": True,
+        "up": up,
+        "peer": peer,
+        "server_public_key": WG_SERVER_PUBLIC_KEY.read_text().strip(),
+    })
+
+
+async def vpn_configure(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    if not _wg_installed():
+        return JSONResponse(
+            {"error": "WireGuard not installed"}, status_code=400
+        )
+
+    body = await request.json()
+    client_public_key = body.get("client_public_key", "").strip()
+    client_networks = body.get("client_networks", "").strip()
+    dns_forward = bool(body.get("dns_forward", True))
+
+    if not client_public_key:
+        return JSONResponse(
+            {"error": "client_public_key required"}, status_code=400
+        )
+
+    # Validate key format (base64, 44 chars with =)
+    if len(client_public_key) != 44 or not client_public_key.endswith("="):
+        return JSONResponse(
+            {"error": "Invalid WireGuard public key format"},
+            status_code=400,
+        )
+
+    # Bring down existing interface if up
+    if _wg_interface_up():
+        subprocess.run(["wg-quick", "down", "wg0"], capture_output=True)
+
+    # Write server config
+    server_conf = _build_wg_server_conf(
+        client_public_key, client_networks, dns_forward
+    )
+    WG_CONF.write_text(server_conf)
+    os.chmod(str(WG_CONF), 0o600)
+
+    # Build client config
+    client_conf = _build_wg_client_conf(
+        "<YOUR_PRIVATE_KEY>", client_networks, dns_forward
+    )
+
+    # Set up DNS forwarding
+    if dns_forward:
+        _setup_dns_forwarder()
+    else:
+        _teardown_dns_forwarder()
+
+    # Bring up interface
+    result = subprocess.run(
+        ["wg-quick", "up", "wg0"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return JSONResponse(
+            {"error": f"Failed to start WireGuard: {result.stderr}"},
+            status_code=500,
+        )
+
+    return JSONResponse({
+        "ok": True,
+        "client_config": client_conf,
+        "server_public_key": WG_SERVER_PUBLIC_KEY.read_text().strip(),
+    })
+
+
+async def vpn_toggle(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    if not _wg_installed():
+        return JSONResponse(
+            {"error": "WireGuard not installed"}, status_code=400
+        )
+
+    body = await request.json()
+    action = body.get("action", "").strip()
+
+    if action == "up":
+        if not WG_CONF.exists():
+            return JSONResponse(
+                {"error": "VPN not configured yet"}, status_code=400
+            )
+        if not _wg_interface_up():
+            result = subprocess.run(
+                ["wg-quick", "up", "wg0"],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                return JSONResponse(
+                    {"error": f"Failed: {result.stderr}"},
+                    status_code=500,
+                )
+    elif action == "down":
+        if _wg_interface_up():
+            subprocess.run(
+                ["wg-quick", "down", "wg0"], capture_output=True
+            )
+            _teardown_dns_forwarder()
+    else:
+        return JSONResponse(
+            {"error": "action must be 'up' or 'down'"},
+            status_code=400,
+        )
+
+    return JSONResponse({"ok": True, "up": _wg_interface_up()})
+
+
+# ---------------------------------------------------------------------------
 # Startup / Shutdown
 # ---------------------------------------------------------------------------
 
@@ -2949,6 +3236,9 @@ routes = [
     Route("/api/csrf-token", csrf_token, methods=["GET"]),
     Route("/api/agents", list_agents, methods=["GET"]),
     Route("/api/usage", get_usage, methods=["GET"]),
+    Route("/api/vpn", vpn_status, methods=["GET"]),
+    Route("/api/vpn/configure", vpn_configure, methods=["POST"]),
+    Route("/api/vpn/toggle", vpn_toggle, methods=["POST"]),
     Route("/api/settings", get_settings, methods=["GET"]),
     Route("/api/settings", update_settings, methods=["PUT"]),
     Route("/api/challenges", list_challenges, methods=["GET"]),

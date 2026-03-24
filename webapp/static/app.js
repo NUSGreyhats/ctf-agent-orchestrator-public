@@ -2206,6 +2206,119 @@ function renderDailyChart(activity) {
   }).join("");
 }
 
+// === VPN Modal ===
+$("#btn-vpn").addEventListener("click", async () => {
+  const res = await api("/api/vpn");
+  if (!res) return;
+  const data = await res.json();
+
+  if (!data.installed) {
+    $("#vpn-not-installed").classList.remove("hidden");
+    $("#vpn-panel").classList.add("hidden");
+  } else {
+    $("#vpn-not-installed").classList.add("hidden");
+    $("#vpn-panel").classList.remove("hidden");
+    updateVpnStatus(data);
+  }
+  $("#vpn-overlay").classList.remove("hidden");
+});
+
+function updateVpnStatus(data) {
+  const badge = $("#vpn-status-badge");
+  const toggleBtn = $("#btn-vpn-toggle");
+  if (data.up) {
+    badge.textContent = "up";
+    badge.className = "badge badge-solved";
+    toggleBtn.textContent = "Stop";
+  } else {
+    badge.textContent = "down";
+    badge.className = "badge badge-pending";
+    toggleBtn.textContent = "Start";
+  }
+
+  const peerInfo = $("#vpn-peer-info");
+  if (data.peer) {
+    peerInfo.classList.remove("hidden");
+    $("#vpn-peer-key").textContent = data.peer.public_key || "—";
+    $("#vpn-peer-endpoint").textContent = data.peer.endpoint || "—";
+    const rx = parseInt(data.peer.transfer_rx || 0);
+    const tx = parseInt(data.peer.transfer_tx || 0);
+    $("#vpn-peer-transfer").textContent = `${formatVpnBytes(rx)} rx / ${formatVpnBytes(tx)} tx`;
+  } else {
+    peerInfo.classList.add("hidden");
+  }
+}
+
+function formatVpnBytes(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+$("#vpn-close").addEventListener("click", () => {
+  $("#vpn-overlay").classList.add("hidden");
+});
+$("#vpn-overlay").addEventListener("click", (e) => {
+  if (e.target === $("#vpn-overlay")) $("#vpn-overlay").classList.add("hidden");
+});
+
+$("#btn-vpn-toggle").addEventListener("click", async () => {
+  const badge = $("#vpn-status-badge");
+  const action = badge.textContent === "up" ? "down" : "up";
+  const res = await api("/api/vpn/toggle", {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  });
+  if (res && res.ok) {
+    const data = await res.json();
+    const vpnRes = await api("/api/vpn");
+    if (vpnRes) updateVpnStatus(await vpnRes.json());
+    showToast(`VPN ${data.up ? "started" : "stopped"}`, "success");
+  }
+});
+
+$("#btn-vpn-configure").addEventListener("click", async () => {
+  const clientKey = $("#vpn-client-key").value.trim();
+  const clientNetworks = $("#vpn-client-networks").value.trim();
+  const dnsForward = $("#vpn-dns").checked;
+
+  if (!clientKey) {
+    showToast("Public key required", "error");
+    return;
+  }
+
+  const res = await api("/api/vpn/configure", {
+    method: "POST",
+    body: JSON.stringify({
+      client_public_key: clientKey,
+      client_networks: clientNetworks,
+      dns_forward: dnsForward,
+    }),
+  });
+  if (!res) return;
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showToast(err.error || "Configuration failed", "error");
+    return;
+  }
+  const data = await res.json();
+  $("#vpn-client-config-text").textContent = data.client_config;
+  $("#vpn-client-config").classList.remove("hidden");
+
+  const vpnRes = await api("/api/vpn");
+  if (vpnRes) updateVpnStatus(await vpnRes.json());
+  showToast("VPN configured and started", "success");
+});
+
+$("#btn-vpn-copy-config").addEventListener("click", () => {
+  const text = $("#vpn-client-config-text").textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = $("#btn-vpn-copy-config");
+    btn.textContent = "Copied!";
+    setTimeout(() => { btn.textContent = "Copy"; }, 1200);
+  });
+});
+
 // === Manager Settings Modal ===
 $("#btn-manager-settings").addEventListener("click", async () => {
   const res = await api("/api/settings");

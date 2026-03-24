@@ -74,6 +74,16 @@ resource "hcloud_firewall" "ctf" {
       "::/0",
     ]
   }
+
+  rule {
+    direction = "in"
+    protocol  = "udp"
+    port      = "51820"
+    source_ips = [
+      "0.0.0.0/0",
+      "::/0",
+    ]
+  }
 }
 
 resource "hcloud_server" "ctf" {

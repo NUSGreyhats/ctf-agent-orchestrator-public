@@ -36,6 +36,7 @@
         <button id="btn-new-challenge" class="btn-primary">+ New Challenge</button>
         <button id="btn-bulk-upload" class="btn-ghost">Bulk Upload</button>
         <button id="btn-usage" class="btn-ghost">Usage</button>
+        <button id="btn-vpn" class="btn-ghost">VPN</button>
         <button id="btn-manager-settings" class="btn-ghost">Manager</button>
         <button id="btn-theme-toggle" class="btn-ghost">Light</button>
         <button id="btn-logout" class="btn-ghost">Logout</button>
@@ -342,6 +343,61 @@
         <button id="file-viewer-close" class="btn-icon">&times;</button>
       </div>
       <div id="file-viewer-content" class="file-viewer-body"></div>
+    </div>
+  </div>
+
+  <!-- VPN Modal -->
+  <div id="vpn-overlay" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>VPN (WireGuard)</h2>
+        <button id="vpn-close" class="btn-icon">&times;</button>
+      </div>
+
+      <div id="vpn-not-installed" class="hidden">
+        <p class="text-muted">WireGuard is not installed on this server. Run the environment setup script <code>012_install-wireguard.sh</code> to install it.</p>
+      </div>
+
+      <div id="vpn-panel" class="hidden">
+        <div class="vpn-status-row">
+          <span>Status:</span>
+          <span id="vpn-status-badge" class="badge badge-pending">down</span>
+          <button id="btn-vpn-toggle" class="btn-ghost btn-sm">Start</button>
+        </div>
+
+        <div id="vpn-peer-info" class="vpn-peer-info hidden">
+          <div class="vpn-kv"><span class="vpn-k">Peer</span> <span id="vpn-peer-key"></span></div>
+          <div class="vpn-kv"><span class="vpn-k">Endpoint</span> <span id="vpn-peer-endpoint"></span></div>
+          <div class="vpn-kv"><span class="vpn-k">Transfer</span> <span id="vpn-peer-transfer"></span></div>
+        </div>
+
+        <hr class="vpn-divider">
+
+        <div class="form-group">
+          <label for="vpn-client-key">Your WireGuard Public Key</label>
+          <input type="text" id="vpn-client-key" placeholder="Paste your public key (wg pubkey output)">
+        </div>
+        <div class="form-group">
+          <label for="vpn-client-networks">Internal Network CIDR(s)</label>
+          <input type="text" id="vpn-client-networks" placeholder="e.g. 10.0.0.0/24, 192.168.1.0/24">
+          <span class="checkbox-hint">Networks the server should route through the VPN tunnel</span>
+        </div>
+        <div class="form-group form-group-inline">
+          <label class="checkbox-label">
+            <input type="checkbox" id="vpn-dns" checked>
+            <span>DNS forwarding</span>
+          </label>
+          <span class="checkbox-hint">Server acts as DNS resolver for VPN clients</span>
+        </div>
+        <button id="btn-vpn-configure" class="btn-primary btn-full">Configure &amp; Start</button>
+
+        <div id="vpn-client-config" class="hidden">
+          <hr class="vpn-divider">
+          <label>Client Config (copy to your WireGuard client)</label>
+          <pre id="vpn-client-config-text" class="vpn-config-block"></pre>
+          <button id="btn-vpn-copy-config" class="btn-ghost btn-sm">Copy</button>
+        </div>
+      </div>
     </div>
   </div>
 

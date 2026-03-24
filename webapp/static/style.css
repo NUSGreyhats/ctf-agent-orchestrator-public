@@ -1053,3 +1053,24 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 /* Manager verdict: handoff and summarize */
 .manager-verdict-handoff { background: var(--accent-dim); color: var(--accent); }
 .manager-verdict-summarize { background: var(--purple-dim); color: var(--purple); }
+
+/* VPN */
+.vpn-status-row {
+  display: flex; align-items: center; gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.vpn-peer-info {
+  background: var(--bg-input); border-radius: 6px; padding: 0.5rem 0.75rem;
+  margin-bottom: 1rem; font-size: 0.78rem;
+}
+.vpn-kv { display: flex; gap: 0.5rem; margin-bottom: 0.2rem; }
+.vpn-k { color: var(--text-dim); min-width: 70px; }
+.vpn-divider {
+  border: none; border-top: 1px solid var(--border); margin: 1rem 0;
+}
+.vpn-config-block {
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.75rem; font-size: 0.72rem;
+  font-family: var(--mono); white-space: pre-wrap; word-break: break-all;
+  max-height: 200px; overflow-y: auto; margin: 0.5rem 0;
+}

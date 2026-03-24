@@ -57,6 +57,19 @@ resource "google_compute_firewall" "webapp" {
   target_tags   = ["ctf-workstation"]
 }
 
+resource "google_compute_firewall" "wireguard" {
+  name    = "allow-ctf-wireguard"
+  network = "default"
+
+  allow {
+    protocol = "udp"
+    ports    = ["51820"]
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["ctf-workstation"]
+}
+
 resource "null_resource" "provision" {
   depends_on = [google_compute_instance.ctf]
 
