@@ -95,6 +95,11 @@ If the challenge spans multiple categories, read all that apply.
 
 ## Step 4: Work Methodically
 
+- **Maintain a `FINDINGS.md` file** in your working directory. Update it as
+  you work — record files analyzed, tools tried, results found, dead ends,
+  and hypotheses. This is critical because your conversation context may be
+  compacted during long solves. FINDINGS.md is your persistent memory that
+  survives compaction. If you lose context, re-read FINDINGS.md first.
 - **Never use `2>/dev/null`** on extraction tools. Many tools (steghide,
   stegseek, binwalk) print success/failure messages to stderr. Suppressing
   stderr makes you blind to whether extraction worked. Use `2>&1` instead.

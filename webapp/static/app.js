@@ -173,10 +173,9 @@ $("#login-form").addEventListener("submit", async (e) => {
     const data = await res.json();
     csrfToken = data.csrf_token;
     if (await loadAgentCatalog()) {
-      showView("dashboard");
-      loadChallenges();
       loadDefaultAgent();
       checkAgentAuth();
+      await handleDeepLink();
     }
   } else {
     const data = await res.json().catch(() => ({}));
@@ -826,6 +825,7 @@ $("#btn-bulk-submit").addEventListener("click", async () => {
 
 // === Detail View ===
 async function openChallenge(id) {
+  history.replaceState(null, "", `#/challenge/${id}`);
   currentChallengeId = id;
   toolCount = 0;
   stepCount = 0;
@@ -929,6 +929,7 @@ function updateCounters() {
 // === Detail Buttons ===
 $("#btn-back").addEventListener("click", () => {
   disconnectAllWS(); stopTimer(); currentChallengeId = null;
+  history.replaceState(null, "", "#");
   showView("dashboard"); loadChallenges();
 });
 
@@ -977,6 +978,7 @@ $("#btn-delete").addEventListener("click", async () => {
   if (!confirm("Delete this challenge?")) return;
   await api(`/api/challenges/${currentChallengeId}`, { method: "DELETE" });
   disconnectAllWS(); stopTimer(); currentChallengeId = null;
+  history.replaceState(null, "", "#");
   showView("dashboard"); loadChallenges();
 });
 
@@ -1983,6 +1985,7 @@ document.addEventListener("keydown", (e) => {
       $("#file-viewer-overlay").classList.add("hidden");
     } else {
       disconnectAllWS(); currentChallengeId = null;
+      history.replaceState(null, "", "#");
       showView("dashboard"); loadChallenges();
     }
     e.preventDefault();
@@ -2411,21 +2414,46 @@ function renderManagerTab(state) {
   }).join("");
 }
 
+// === Deep Linking ===
+function getDeepLinkChallengeId() {
+  const match = location.hash.match(/^#\/challenge\/([a-f0-9]+)$/);
+  return match ? match[1] : null;
+}
+
+async function handleDeepLink() {
+  const challengeId = getDeepLinkChallengeId();
+  if (challengeId) {
+    openChallenge(challengeId);
+  } else {
+    showView("dashboard");
+    loadChallenges();
+  }
+}
+
+window.addEventListener("hashchange", () => {
+  if (!csrfToken) return; // not logged in
+  const challengeId = getDeepLinkChallengeId();
+  if (challengeId && challengeId !== currentChallengeId) {
+    openChallenge(challengeId);
+  } else if (!challengeId && currentChallengeId) {
+    disconnectAllWS(); stopTimer(); currentChallengeId = null;
+    showView("dashboard"); loadChallenges();
+  }
+});
+
 // === Init ===
 (async () => {
   const res = await fetch("/api/challenges");
   if (res.ok) {
-    // Restore CSRF token for existing session
     const csrfRes = await fetch("/api/csrf-token");
     if (csrfRes.ok) {
       const data = await csrfRes.json();
       csrfToken = data.csrf_token;
     }
     if (await loadAgentCatalog()) {
-      showView("dashboard");
-      loadChallenges();
       loadDefaultAgent();
       checkAgentAuth();
+      await handleDeepLink();
     }
   } else {
     showView("login");
