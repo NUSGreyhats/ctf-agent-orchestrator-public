@@ -2261,7 +2261,15 @@ $("#btn-import").addEventListener("click", async () => {
   $("#import-phase-loading").classList.add("hidden");
   $("#import-phase-preview").classList.add("hidden");
   $("#import-status").classList.add("hidden");
+  // Set up preview controls (will be shown after fetch)
+  $("#import-mode").value = "single";
   renderAgentSelect($("#import-agent"));
+  renderAgentCheckboxes($("#import-parallel-checkboxes"));
+  $("#import-agent").value = defaultAgent;
+  updateImportModeOptions();
+  updateImportModels();
+  $("#import-autonomous").checked = getAgentAutonomousDefault(defaultAgent);
+  $("#import-flag").value = defaultFlagFormat;
   $("#import-overlay").classList.remove("hidden");
 });
 
@@ -2371,6 +2379,62 @@ function updateImportSkipSolved() {
   });
 }
 
+function updateImportModeOptions() {
+  const mode = $("#import-mode").value;
+  const singleGroup = $("#import-single-group");
+  const parallelGroup = $("#import-parallel-group");
+
+  if (isParallelMode(mode)) {
+    singleGroup.classList.add("hidden");
+    parallelGroup.classList.remove("hidden");
+  } else {
+    singleGroup.classList.remove("hidden");
+    parallelGroup.classList.add("hidden");
+    updateImportModels();
+  }
+}
+
+function updateImportModels() {
+  const agent = $("#import-agent").value;
+  const modelGroup = $("#import-model-group");
+  const effortGroup = $("#import-effort-group");
+  const sel = $("#import-model");
+  const effortSel = $("#import-effort");
+
+  modelGroup.classList.remove("hidden");
+  const meta = getAgentMeta(agent);
+  sel.disabled = false;
+  sel.innerHTML = (meta.models || []).map((m) =>
+    `<option value="${m.value}">${esc(m.label)}</option>`
+  ).join("");
+  sel.value = meta.default_model;
+
+  const effortLevels = meta.effort_levels || [];
+  if (!effortLevels.length) {
+    effortGroup.classList.add("hidden");
+    effortSel.disabled = true;
+    effortSel.innerHTML = '<option value="">Provider default</option>';
+  } else {
+    effortGroup.classList.remove("hidden");
+    effortSel.disabled = false;
+    effortSel.innerHTML = effortLevels.map((e) =>
+      `<option value="${e.value}">${esc(e.label)}</option>`
+    ).join("");
+    effortSel.value = meta.default_effort || "";
+  }
+}
+
+$("#import-mode").addEventListener("change", () => {
+  updateImportModeOptions();
+  const agent = $("#import-agent").value;
+  $("#import-autonomous").checked = getAgentAutonomousDefault(agent);
+});
+$("#import-agent").addEventListener("change", () => {
+  updateImportModels();
+  const agent = $("#import-agent").value;
+  $("#import-autonomous").checked = getAgentAutonomousDefault(agent);
+});
+
 $("#import-skip-solved").addEventListener("change", () => {
   const rows = document.querySelectorAll("#import-challenge-list .bulk-ch-row");
   const skip = $("#import-skip-solved").checked;
@@ -2383,6 +2447,15 @@ $("#import-skip-solved").addEventListener("change", () => {
     }
   });
 });
+
+function getImportAgents() {
+  const mode = $("#import-mode").value;
+  if (isParallelMode(mode)) {
+    return Array.from($("#import-parallel-checkboxes").querySelectorAll("input:checked"))
+      .map((cb) => cb.value).join(",");
+  }
+  return $("#import-agent").value;
+}
 
 $("#btn-import-submit").addEventListener("click", async () => {
   const rows = document.querySelectorAll("#import-challenge-list .bulk-ch-row");
@@ -2400,14 +2473,17 @@ $("#btn-import-submit").addEventListener("click", async () => {
   btn.textContent = "Importing...";
 
   try {
+    const mode = $("#import-mode").value;
     const res = await api("/api/plugins/import", {
       method: "POST",
       body: JSON.stringify({
         plugin: $("#import-plugin").value,
         config: importPluginConfig,
         challenges: selected,
-        mode: $("#import-mode").value,
-        agents: $("#import-agent").value,
+        mode: mode,
+        agents: getImportAgents(),
+        model: isParallelMode(mode) ? "" : ($("#import-model").disabled ? "" : $("#import-model").value),
+        effort: isParallelMode(mode) ? "" : ($("#import-effort").disabled ? "" : $("#import-effort").value),
         flag_format: $("#import-flag").value.trim(),
         autonomous: $("#import-autonomous").checked,
         paused: $("#import-paused").checked,

@@ -377,7 +377,7 @@
         </div>
       </div>
 
-      <!-- Phase 3: Preview and select -->
+      <!-- Phase 3: Preview and select (mirrors bulk upload) -->
       <div id="import-phase-preview" class="hidden">
         <div class="bulk-global-bar">
           <div class="form-row">
@@ -390,28 +390,50 @@
                 <option value="parallel_managed">Parallel (Managed)</option>
               </select>
             </div>
+          </div>
+          <!-- Single mode options -->
+          <div id="import-single-group" class="form-row">
             <div class="form-group flex-1">
               <label for="import-agent">Agent</label>
               <select id="import-agent"></select>
             </div>
-            <div class="form-group flex-1">
-              <label for="import-flag">Flag Format</label>
-              <input type="text" id="import-flag" placeholder="e.g. flag{...}">
+            <div class="form-group flex-1" id="import-model-group">
+              <label for="import-model">Model</label>
+              <select id="import-model"></select>
+            </div>
+            <div class="form-group flex-1 hidden" id="import-effort-group">
+              <label for="import-effort">Effort</label>
+              <select id="import-effort"></select>
             </div>
           </div>
-          <div class="form-group form-group-inline">
-            <label class="checkbox-label">
-              <input type="checkbox" id="import-autonomous">
-              <span>Autonomous</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" id="import-paused">
-              <span>Pause (start manually)</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" id="import-skip-solved">
-              <span>Skip already solved</span>
-            </label>
+          <!-- Parallel mode options -->
+          <div id="import-parallel-group" class="form-group hidden">
+            <label>Agents</label>
+            <div id="import-parallel-checkboxes" class="agent-checkbox-group"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label for="import-flag">Default Flag Format</label>
+              <input type="text" id="import-flag" placeholder="e.g. flag{...}">
+            </div>
+            <div class="form-group bulk-autonomous-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="import-autonomous">
+                <span>Autonomous</span>
+              </label>
+            </div>
+            <div class="form-group bulk-autonomous-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="import-paused">
+                <span>Pause (start manually)</span>
+              </label>
+            </div>
+            <div class="form-group bulk-autonomous-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="import-skip-solved">
+                <span>Skip already solved</span>
+              </label>
+            </div>
           </div>
         </div>
         <div id="import-challenge-list" class="bulk-challenge-list"></div>
