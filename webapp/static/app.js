@@ -2329,7 +2329,14 @@ $("#btn-manager-settings").addEventListener("click", async () => {
   const s = await res.json();
   $("#manager-interval").value = s.manager_interval || 10;
   $("#manager-min-time").value = s.manager_min_solve_time || 5;
-  $("#manager-model").value = s.manager_model || "sonnet";
+
+  // Populate model dropdown from Claude provider's model list
+  const claudeMeta = getAgentMeta("claude");
+  const modelSel = $("#manager-model");
+  modelSel.innerHTML = (claudeMeta.models || []).map((m) =>
+    `<option value="${esc(m.value)}">${esc(m.label)}</option>`
+  ).join("");
+  modelSel.value = s.manager_model || "sonnet";
 
   // Render agent pool checkboxes
   const poolContainer = $("#manager-agent-pool");
