@@ -1062,6 +1062,17 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 /* Manager verdict: handoff and summarize */
 .manager-verdict-handoff { background: var(--accent-dim); color: var(--accent); }
 .manager-verdict-summarize { background: var(--purple-dim); color: var(--purple); }
+.manager-pool-list { display: flex; flex-direction: column; gap: 0.4rem; }
+.manager-pool-row {
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.manager-pool-row .agent-checkbox-item { min-width: 100px; }
+.manager-pool-row .pool-model-sel {
+  flex: 1; background: var(--bg-input); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  font-size: 0.75rem; padding: 0.2rem 0.4rem;
+  font-family: var(--mono);
+}
 
 /* VPN */
 .vpn-status-row {

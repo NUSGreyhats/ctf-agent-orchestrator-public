@@ -369,8 +369,11 @@ def load_settings() -> dict:
         "manager_interval": 10,
         "manager_agent": DEFAULT_AGENT,
         "manager_model": "sonnet",
+        "manager_effort": "",
         "manager_min_solve_time": 5,
-        "manager_agent_pool": list(VALID_AGENTS),
+        "manager_agent_pool": [
+            {"agent": a, "model": ""} for a in VALID_AGENTS
+        ],
     }
     if SETTINGS_FILE.exists():
         try:
@@ -1724,7 +1727,8 @@ def build_manager_prompt(challenge: dict, truncated_log: str) -> str:
     agent_name = active_run["agent"] if active_run else "unknown"
 
     settings = load_settings()
-    pool = settings.get("manager_agent_pool", list(VALID_AGENTS))
+    pool = settings.get("manager_agent_pool", [])
+    pool_names = _pool_agent_names(pool) or list(VALID_AGENTS)
 
     parts = [
         "You are a CTF challenge manager agent. Your job is to review "
@@ -1741,7 +1745,7 @@ def build_manager_prompt(challenge: dict, truncated_log: str) -> str:
         f"Agent: {agent_name}",
         f"Elapsed time: {elapsed_min:.1f} minutes",
         f"Times steered so far: {manager_state.get('steer_count', 0)}",
-        f"Available agents for handoff: {', '.join(pool)}",
+        f"Available agents for handoff: {', '.join(pool_names)}",
     ])
 
     last_summary = manager_state.get("last_summary", "")
@@ -1996,16 +2000,36 @@ def _manager_should_review(challenge: dict, settings: dict) -> bool:
     return True
 
 
+def _pool_agent_names(pool: list) -> list[str]:
+    """Extract agent names from pool (handles both old and new format)."""
+    names = []
+    for entry in pool:
+        if isinstance(entry, str):
+            names.append(entry)
+        elif isinstance(entry, dict) and entry.get("agent"):
+            names.append(entry["agent"])
+    return names
+
+
+def _pool_model_for_agent(pool: list, agent: str) -> str:
+    """Look up the configured model for an agent in the pool."""
+    for entry in pool:
+        if isinstance(entry, dict) and entry.get("agent") == agent:
+            return entry.get("model", "")
+    return ""
+
+
 async def _run_manager_llm(
     settings: dict, prompt: str, cwd: Path
 ) -> str:
     """Run a manager LLM call using any configured provider."""
     agent_name = settings.get("manager_agent", DEFAULT_AGENT)
     model = settings.get("manager_model", "")
+    effort = settings.get("manager_effort", "")
     provider = get_provider(agent_name)
 
     # Build a minimal challenge-like dict for the provider's build_command
-    fake_challenge = {"model": model, "effort": ""}
+    fake_challenge = {"model": model, "effort": effort}
     cmd = provider.build_command(fake_challenge, prompt, False)
 
     env = {**os.environ, "IS_SANDBOX": "1"}
@@ -2209,9 +2233,10 @@ async def _handle_single_managed_verdict(
 
     elif verdict == "HANDOFF" and parsed.get("handoff_agent"):
         target_agent = parsed["handoff_agent"].strip()
-        pool = settings.get("manager_agent_pool", list(VALID_AGENTS))
-        if target_agent not in pool:
-            target_agent = pool[0] if pool else DEFAULT_AGENT
+        pool = settings.get("manager_agent_pool", [])
+        pool_names = _pool_agent_names(pool) or list(VALID_AGENTS)
+        if target_agent not in pool_names:
+            target_agent = pool_names[0] if pool_names else DEFAULT_AGENT
 
         # Stop current run
         proc = active_run.get("process")
@@ -2248,12 +2273,13 @@ async def _handle_single_managed_verdict(
                 f"{findings_context}\n"
             )
 
-        # Create new run
+        # Create new run using pool-configured model or provider default
+        pool_model = _pool_model_for_agent(pool, target_agent)
         new_run_id = uuid.uuid4().hex[:8]
         new_run = make_run(
             run_id=new_run_id,
             agent=target_agent,
-            model=resolved_default_model(target_agent),
+            model=pool_model or resolved_default_model(target_agent),
             effort=resolved_default_effort(target_agent),
             status="solving",
         )
@@ -2885,6 +2911,8 @@ async def update_settings(request: Request) -> JSONResponse:
             settings["manager_agent"] = agent
     if "manager_model" in body:
         settings["manager_model"] = str(body["manager_model"])
+    if "manager_effort" in body:
+        settings["manager_effort"] = str(body["manager_effort"])
     if "manager_min_solve_time" in body:
         val = int(body["manager_min_solve_time"])
         if 1 <= val <= 60:
@@ -2892,7 +2920,18 @@ async def update_settings(request: Request) -> JSONResponse:
     if "manager_agent_pool" in body:
         pool = body["manager_agent_pool"]
         if isinstance(pool, list):
-            validated = [a for a in pool if a in VALID_AGENTS]
+            validated = []
+            for entry in pool:
+                if isinstance(entry, str) and entry in VALID_AGENTS:
+                    validated.append({"agent": entry, "model": ""})
+                elif (
+                    isinstance(entry, dict)
+                    and entry.get("agent") in VALID_AGENTS
+                ):
+                    validated.append({
+                        "agent": entry["agent"],
+                        "model": str(entry.get("model", "")),
+                    })
             if validated:
                 settings["manager_agent_pool"] = validated
     save_settings(settings)

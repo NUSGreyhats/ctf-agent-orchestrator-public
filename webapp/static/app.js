@@ -2323,7 +2323,7 @@ $("#btn-vpn-copy-config").addEventListener("click", () => {
 });
 
 // === Manager Settings Modal ===
-function updateManagerModelOptions(currentModel) {
+function updateManagerModelOptions(currentModel, currentEffort) {
   const agentName = $("#manager-agent").value;
   const meta = getAgentMeta(agentName);
   const modelSel = $("#manager-model");
@@ -2331,6 +2331,19 @@ function updateManagerModelOptions(currentModel) {
     `<option value="${esc(m.value)}">${esc(m.label)}</option>`
   ).join("");
   if (currentModel) modelSel.value = currentModel;
+
+  const effortSel = $("#manager-effort");
+  const effortLevels = meta.effort_levels || [];
+  if (!effortLevels.length) {
+    effortSel.innerHTML = '<option value="">Provider default</option>';
+    effortSel.disabled = true;
+  } else {
+    effortSel.disabled = false;
+    effortSel.innerHTML = effortLevels.map((e) =>
+      `<option value="${esc(e.value)}">${esc(e.label)}</option>`
+    ).join("");
+    if (currentEffort) effortSel.value = currentEffort;
+  }
 }
 
 $("#btn-manager-settings").addEventListener("click", async () => {
@@ -2346,19 +2359,33 @@ $("#btn-manager-settings").addEventListener("click", async () => {
     `<option value="${esc(agent.name)}">${esc(agent.label)}</option>`
   ).join("");
   agentSel.value = s.manager_agent || primaryAgentName();
-  updateManagerModelOptions(s.manager_model || "sonnet");
+  updateManagerModelOptions(s.manager_model || "sonnet", s.manager_effort || "");
 
-  agentSel.onchange = () => updateManagerModelOptions("");
+  agentSel.onchange = () => updateManagerModelOptions("", "");
 
-  // Render agent pool checkboxes
+  // Render agent pool with per-agent model dropdowns
   const poolContainer = $("#manager-agent-pool");
   const currentPool = s.manager_agent_pool || [];
+  // Build a lookup: agent name -> configured model
+  const poolMap = new Map();
+  for (const entry of currentPool) {
+    if (typeof entry === "string") poolMap.set(entry, "");
+    else if (entry && entry.agent) poolMap.set(entry.agent, entry.model || "");
+  }
   poolContainer.innerHTML = agentCatalog.map((agent) => {
-    const checked = currentPool.length === 0 || currentPool.includes(agent.name) ? "checked" : "";
-    return `<label class="checkbox-label agent-checkbox-item">
-      <input type="checkbox" value="${esc(agent.name)}" ${checked}>
-      <span>${esc(agent.label)}</span>
-    </label>`;
+    const inPool = currentPool.length === 0 || poolMap.has(agent.name);
+    const poolModel = poolMap.get(agent.name) || "";
+    const modelOptions = (agent.models || []).map((m) => {
+      const selected = m.value === poolModel ? "selected" : "";
+      return `<option value="${esc(m.value)}" ${selected}>${esc(m.label)}</option>`;
+    }).join("");
+    return `<div class="manager-pool-row">
+      <label class="checkbox-label agent-checkbox-item">
+        <input type="checkbox" class="pool-agent-cb" value="${esc(agent.name)}" ${inPool ? "checked" : ""}>
+        <span>${esc(agent.label)}</span>
+      </label>
+      <select class="pool-model-sel" data-agent="${esc(agent.name)}">${modelOptions}</select>
+    </div>`;
   }).join("");
 
   $("#manager-overlay").classList.remove("hidden");
@@ -2370,13 +2397,18 @@ $("#manager-overlay").addEventListener("click", (e) => {
   if (e.target === $("#manager-overlay")) $("#manager-overlay").classList.add("hidden");
 });
 $("#btn-manager-save").addEventListener("click", async () => {
-  const agentPool = Array.from($("#manager-agent-pool").querySelectorAll("input[type=checkbox]:checked"))
-    .map((cb) => cb.value);
+  const agentPool = Array.from($("#manager-agent-pool").querySelectorAll(".pool-agent-cb:checked"))
+    .map((cb) => {
+      const agentName = cb.value;
+      const modelSel = $("#manager-agent-pool").querySelector(`.pool-model-sel[data-agent="${agentName}"]`);
+      return { agent: agentName, model: modelSel ? modelSel.value : "" };
+    });
   const body = {
     manager_agent: $("#manager-agent").value,
     manager_interval: parseInt($("#manager-interval").value) || 10,
     manager_min_solve_time: parseInt($("#manager-min-time").value) || 5,
     manager_model: $("#manager-model").value.trim() || "",
+    manager_effort: $("#manager-effort").value || "",
     manager_agent_pool: agentPool,
   };
   const res = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
