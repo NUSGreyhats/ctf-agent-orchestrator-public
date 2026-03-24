@@ -445,6 +445,35 @@ def save_metadata(challenge: dict) -> None:
 # Agent/model resolution helpers
 # ---------------------------------------------------------------------------
 
+def parse_agents_field(agents_str: str) -> list[dict]:
+    """Parse agents field from frontend.
+
+    Accepts either:
+    - A plain agent name: "claude"
+    - Comma-separated names: "claude,codex"
+    - JSON array of {agent, model} objects: '[{"agent":"claude","model":"opus"}]'
+
+    Returns list of {"agent": str, "model": str} dicts.
+    """
+    if not agents_str:
+        return []
+    agents_str = agents_str.strip()
+    if agents_str.startswith("["):
+        try:
+            parsed = json.loads(agents_str)
+            if isinstance(parsed, list):
+                return [
+                    {
+                        "agent": entry.get("agent", "") if isinstance(entry, dict) else str(entry),
+                        "model": entry.get("model", "") if isinstance(entry, dict) else "",
+                    }
+                    for entry in parsed
+                ]
+        except json.JSONDecodeError:
+            pass
+    return [{"agent": a.strip(), "model": ""} for a in agents_str.split(",") if a.strip()]
+
+
 def resolved_default_model(agent: str) -> str:
     return get_provider(agent).resolved_default_model()
 
@@ -783,24 +812,23 @@ async def create_challenge(request: Request) -> JSONResponse:
             {"error": f"invalid mode: {mode}"}, status_code=400
         )
 
-    # Determine agent list
-    if agents_str:
-        agent_names = [a.strip() for a in agents_str.split(",") if a.strip()]
-    else:
-        # Fallback: use agent field from form for single modes
+    # Determine agent list with per-agent models
+    agent_entries = parse_agents_field(agents_str)
+    if not agent_entries:
         single_agent = form.get("agent", "").strip() or DEFAULT_AGENT
-        agent_names = [single_agent]
+        agent_entries = [{"agent": single_agent, "model": model}]
 
     # Validate agents
-    for a in agent_names:
-        if a not in VALID_AGENTS:
+    for entry in agent_entries:
+        if entry["agent"] not in VALID_AGENTS:
             return JSONResponse(
-                {"error": f"invalid agent: {a}"}, status_code=400
+                {"error": f"invalid agent: {entry['agent']}"},
+                status_code=400,
             )
 
     # For single modes, only use first agent
     if mode in ("single", "single_managed"):
-        agent_names = agent_names[:1]
+        agent_entries = agent_entries[:1]
 
     # Read uploaded files into memory
     file_data: dict[str, bytes] = {}
@@ -840,9 +868,10 @@ async def create_challenge(request: Request) -> JSONResponse:
 
     # Create runs
     runs: dict[str, dict] = {}
-    for agent_name in agent_names:
+    for entry in agent_entries:
+        agent_name = entry["agent"]
         run_id = uuid.uuid4().hex[:8]
-        run_model = model or resolved_default_model(agent_name)
+        run_model = entry.get("model") or model or resolved_default_model(agent_name)
         run_effort = normalize_effort_for_agent(agent_name, effort)
         run = make_run(
             run_id=run_id,
@@ -1070,22 +1099,25 @@ async def bulk_upload(request: Request) -> JSONResponse:
         if mode not in VALID_MODES:
             mode = "single"
 
-        # Determine agents
-        agents_str = body.get("agents", "").strip()
-        if agents_str:
-            agent_names = [a.strip() for a in agents_str.split(",") if a.strip()]
-        else:
+        # Determine agents with per-agent models
+        agents_str = body.get("agents", "")
+        if isinstance(agents_str, list):
+            agents_str = json.dumps(agents_str)
+        agents_str = str(agents_str).strip()
+        agent_entries = parse_agents_field(agents_str)
+        if not agent_entries:
             single_agent = body.get("agent", "").strip() or DEFAULT_AGENT
-            agent_names = [single_agent]
+            agent_entries = [{"agent": single_agent, "model": ""}]
 
         # Validate agents
-        for a in agent_names:
-            if a not in VALID_AGENTS:
-                agent_names = [DEFAULT_AGENT]
-                break
+        agent_entries = [
+            e for e in agent_entries if e["agent"] in VALID_AGENTS
+        ]
+        if not agent_entries:
+            agent_entries = [{"agent": DEFAULT_AGENT, "model": ""}]
 
         if mode in ("single", "single_managed"):
-            agent_names = agent_names[:1]
+            agent_entries = agent_entries[:1]
 
         model = body.get("model", "").strip()
         effort = body.get("effort", "").strip()
@@ -1131,9 +1163,10 @@ async def bulk_upload(request: Request) -> JSONResponse:
             challenge_status = "pending" if paused else "solving"
 
             runs: dict[str, dict] = {}
-            for agent_name in agent_names:
+            for entry in agent_entries:
+                agent_name = entry["agent"]
                 run_id = uuid.uuid4().hex[:8]
-                run_model = model or resolved_default_model(agent_name)
+                run_model = entry.get("model") or model or resolved_default_model(agent_name)
                 run_effort = normalize_effort_for_agent(agent_name, effort)
                 run = make_run(
                     run_id=run_id,
@@ -3148,12 +3181,11 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                 continue
 
         # Determine which agents to create runs for
-        if mode in ("parallel", "parallel_managed"):
-            agent_list = [
-                a.strip() for a in agents.split(",") if a.strip()
-            ]
-        else:
-            agent_list = [agents.split(",")[0].strip()] if agents else [DEFAULT_AGENT]
+        agent_entries = parse_agents_field(agents)
+        if not agent_entries:
+            agent_entries = [{"agent": DEFAULT_AGENT, "model": ""}]
+        if mode in ("single", "single_managed"):
+            agent_entries = agent_entries[:1]
 
         challenge_id = uuid.uuid4().hex[:12]
         challenge_dir = CHALLENGES_DIR / challenge_id
@@ -3170,11 +3202,12 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
 
         runs = {}
         challenge_status = "pending" if paused else "solving"
-        for agent_name in agent_list:
+        for entry in agent_entries:
+            agent_name = entry["agent"]
             if agent_name not in VALID_AGENTS:
                 continue
             run_id = uuid.uuid4().hex[:8]
-            run_model = model or resolved_default_model(agent_name)
+            run_model = entry.get("model") or model or resolved_default_model(agent_name)
             run_effort = normalize_effort_for_agent(agent_name, effort)
             runs[run_id] = make_run(
                 run_id=run_id,

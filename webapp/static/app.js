@@ -107,17 +107,27 @@ function renderAgentSelect(selectEl) {
 }
 
 function renderAgentCheckboxes(container) {
-  container.innerHTML = agentCatalog.map((agent) => `
-    <label class="checkbox-label agent-checkbox-item">
-      <input type="checkbox" value="${esc(agent.name)}" checked>
-      <span>${esc(agent.label)}</span>
-    </label>
-  `).join("");
+  container.innerHTML = agentCatalog.map((agent) => {
+    const modelOptions = (agent.models || []).map((m) =>
+      `<option value="${esc(m.value)}">${esc(m.label)}</option>`
+    ).join("");
+    return `<div class="manager-pool-row">
+      <label class="checkbox-label agent-checkbox-item">
+        <input type="checkbox" class="parallel-agent-cb" value="${esc(agent.name)}" checked>
+        <span>${esc(agent.label)}</span>
+      </label>
+      <select class="pool-model-sel" data-agent="${esc(agent.name)}">${modelOptions}</select>
+    </div>`;
+  }).join("");
 }
 
 function getCheckedAgents(container) {
-  return Array.from(container.querySelectorAll("input[type=checkbox]:checked"))
-    .map((cb) => cb.value);
+  return Array.from(container.querySelectorAll(".parallel-agent-cb:checked"))
+    .map((cb) => {
+      const agentName = cb.value;
+      const modelSel = container.querySelector(`.pool-model-sel[data-agent="${agentName}"]`);
+      return { agent: agentName, model: modelSel ? modelSel.value : "" };
+    });
 }
 
 function renderUsageShell() {
@@ -557,7 +567,7 @@ $("#challenge-form").addEventListener("submit", async (e) => {
 
   if (isParallelMode(mode)) {
     const agents = getCheckedAgents($("#parallel-agent-checkboxes"));
-    fd.append("agents", agents.join(","));
+    fd.append("agents", JSON.stringify(agents));
   } else {
     fd.append("agents", $("#challenge-agent").value);
     fd.append("model", $("#challenge-model").disabled ? "" : $("#challenge-model").value);
@@ -781,7 +791,7 @@ $("#btn-bulk-submit").addEventListener("click", async () => {
 
   let agents, model, effort;
   if (isParallelMode(mode)) {
-    agents = getCheckedAgents($("#bulk-parallel-checkboxes")).join(",");
+    agents = JSON.stringify(getCheckedAgents($("#bulk-parallel-checkboxes")));
     model = "";
     effort = "";
   } else {
@@ -2451,8 +2461,7 @@ $("#import-skip-solved").addEventListener("change", () => {
 function getImportAgents() {
   const mode = $("#import-mode").value;
   if (isParallelMode(mode)) {
-    return Array.from($("#import-parallel-checkboxes").querySelectorAll("input:checked"))
-      .map((cb) => cb.value).join(",");
+    return JSON.stringify(getCheckedAgents($("#import-parallel-checkboxes")));
   }
   return $("#import-agent").value;
 }
