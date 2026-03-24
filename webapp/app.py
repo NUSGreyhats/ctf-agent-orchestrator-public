@@ -367,6 +367,7 @@ def load_settings() -> dict:
         "default_flag_format": "",
         "theme": "dark",
         "manager_interval": 10,
+        "manager_agent": DEFAULT_AGENT,
         "manager_model": "sonnet",
         "manager_min_solve_time": 5,
         "manager_agent_pool": list(VALID_AGENTS),
@@ -1995,6 +1996,64 @@ def _manager_should_review(challenge: dict, settings: dict) -> bool:
     return True
 
 
+async def _run_manager_llm(
+    settings: dict, prompt: str, cwd: Path
+) -> str:
+    """Run a manager LLM call using any configured provider."""
+    agent_name = settings.get("manager_agent", DEFAULT_AGENT)
+    model = settings.get("manager_model", "")
+    provider = get_provider(agent_name)
+
+    # Build a minimal challenge-like dict for the provider's build_command
+    fake_challenge = {"model": model, "effort": ""}
+    cmd = provider.build_command(fake_challenge, prompt, False)
+
+    env = {**os.environ, "IS_SANDBOX": "1"}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            limit=2 ** 24,
+        )
+        stdout_data, stderr_data = await asyncio.wait_for(
+            proc.communicate(), timeout=180
+        )
+    except (asyncio.TimeoutError, Exception):
+        return ""
+
+    raw_output = stdout_data.decode("utf-8", errors="replace")
+
+    # Extract assistant text from the provider's output format.
+    # Try JSONL parsing first (works for all providers), fall back to raw text.
+    text_parts: list[str] = []
+    fake_state: dict = {}
+    for line in raw_output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            # Not JSON — could be plain text output (e.g. claude -p --output-format text)
+            text_parts.append(line)
+            continue
+
+        normalized = provider.normalize_live_event(event, fake_state)
+        if normalized is None:
+            continue
+        if normalized.get("type") == "assistant":
+            msg = normalized.get("message", {})
+            for block in msg.get("content", []):
+                if block.get("type") == "text" and block.get("text"):
+                    text_parts.append(block["text"])
+
+    return "\n".join(text_parts)
+
+
 async def run_manager_review(challenge_id: str) -> None:
     """Run a single manager review for a challenge."""
     challenge = challenges.get(challenge_id)
@@ -2046,34 +2105,9 @@ async def run_manager_review(challenge_id: str) -> None:
     else:
         return
 
-    model = settings.get("manager_model", "sonnet")
-    cmd = [
-        "claude",
-        "-p",
-        "--dangerously-skip-permissions",
-        "--output-format",
-        "text",
-        "--model",
-        model,
-        prompt,
-    ]
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(CHALLENGES_DIR / challenge_id),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "IS_SANDBOX": "1"},
-        )
-        stdout_data, stderr_data = await asyncio.wait_for(
-            proc.communicate(), timeout=120
-        )
-        response_text = stdout_data.decode("utf-8", errors="replace")
-    except asyncio.TimeoutError:
-        response_text = ""
-    except Exception:
-        response_text = ""
+    response_text = await _run_manager_llm(
+        settings, prompt, CHALLENGES_DIR / challenge_id
+    )
 
     if not response_text.strip():
         err_event = {
@@ -2845,6 +2879,10 @@ async def update_settings(request: Request) -> JSONResponse:
         val = int(body["manager_interval"])
         if 1 <= val <= 120:
             settings["manager_interval"] = val
+    if "manager_agent" in body:
+        agent = str(body["manager_agent"])
+        if agent in VALID_AGENTS:
+            settings["manager_agent"] = agent
     if "manager_model" in body:
         settings["manager_model"] = str(body["manager_model"])
     if "manager_min_solve_time" in body:

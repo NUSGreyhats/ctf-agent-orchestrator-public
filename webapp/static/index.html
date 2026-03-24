@@ -411,16 +411,22 @@
       <p class="manager-hint">The manager agent periodically reviews solving challenges and steers or shelves them if stuck. Manager behavior is controlled by challenge mode (managed modes enable the manager automatically).</p>
       <div class="form-row">
         <div class="form-group flex-1">
+          <label for="manager-agent">Agent</label>
+          <select id="manager-agent"></select>
+        </div>
+        <div class="form-group flex-1">
+          <label for="manager-model">Model</label>
+          <select id="manager-model"></select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group flex-1">
           <label for="manager-interval">Review interval (min)</label>
           <input type="number" id="manager-interval" min="1" max="120" value="10">
         </div>
         <div class="form-group flex-1">
           <label for="manager-min-time">Min solve time (min)</label>
           <input type="number" id="manager-min-time" min="1" max="60" value="5">
-        </div>
-        <div class="form-group flex-1">
-          <label for="manager-model">Model</label>
-          <select id="manager-model"></select>
         </div>
       </div>
       <div class="form-group">

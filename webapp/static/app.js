@@ -2323,6 +2323,16 @@ $("#btn-vpn-copy-config").addEventListener("click", () => {
 });
 
 // === Manager Settings Modal ===
+function updateManagerModelOptions(currentModel) {
+  const agentName = $("#manager-agent").value;
+  const meta = getAgentMeta(agentName);
+  const modelSel = $("#manager-model");
+  modelSel.innerHTML = (meta.models || []).map((m) =>
+    `<option value="${esc(m.value)}">${esc(m.label)}</option>`
+  ).join("");
+  if (currentModel) modelSel.value = currentModel;
+}
+
 $("#btn-manager-settings").addEventListener("click", async () => {
   const res = await api("/api/settings");
   if (!res) return;
@@ -2330,13 +2340,15 @@ $("#btn-manager-settings").addEventListener("click", async () => {
   $("#manager-interval").value = s.manager_interval || 10;
   $("#manager-min-time").value = s.manager_min_solve_time || 5;
 
-  // Populate model dropdown from Claude provider's model list
-  const claudeMeta = getAgentMeta("claude");
-  const modelSel = $("#manager-model");
-  modelSel.innerHTML = (claudeMeta.models || []).map((m) =>
-    `<option value="${esc(m.value)}">${esc(m.label)}</option>`
+  // Populate agent dropdown
+  const agentSel = $("#manager-agent");
+  agentSel.innerHTML = agentCatalog.map((agent) =>
+    `<option value="${esc(agent.name)}">${esc(agent.label)}</option>`
   ).join("");
-  modelSel.value = s.manager_model || "sonnet";
+  agentSel.value = s.manager_agent || primaryAgentName();
+  updateManagerModelOptions(s.manager_model || "sonnet");
+
+  agentSel.onchange = () => updateManagerModelOptions("");
 
   // Render agent pool checkboxes
   const poolContainer = $("#manager-agent-pool");
@@ -2361,9 +2373,10 @@ $("#btn-manager-save").addEventListener("click", async () => {
   const agentPool = Array.from($("#manager-agent-pool").querySelectorAll("input[type=checkbox]:checked"))
     .map((cb) => cb.value);
   const body = {
+    manager_agent: $("#manager-agent").value,
     manager_interval: parseInt($("#manager-interval").value) || 10,
     manager_min_solve_time: parseInt($("#manager-min-time").value) || 5,
-    manager_model: $("#manager-model").value.trim() || "sonnet",
+    manager_model: $("#manager-model").value.trim() || "",
     manager_agent_pool: agentPool,
   };
   const res = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
