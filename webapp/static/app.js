@@ -992,6 +992,7 @@ function updateStatusBadge(status) {
 }
 
 function updateButtons(status) {
+  $("#btn-start").classList.toggle("hidden", status !== "pending");
   $("#btn-retry").classList.toggle("hidden", status !== "failed" && status !== "completed");
   $("#btn-unsolve").classList.toggle("hidden", status !== "solved");
   $("#btn-unshelve").classList.toggle("hidden", status !== "shelved");
@@ -1008,6 +1009,14 @@ $("#btn-back").addEventListener("click", () => {
   disconnectAllWS(); stopTimer(); currentChallengeId = null;
   history.replaceState(null, "", "#");
   showView("dashboard"); loadChallenges();
+});
+
+$("#btn-start").addEventListener("click", async () => {
+  if (!currentChallengeId) return;
+  const res = await api(`/api/challenges/${currentChallengeId}/solve`, { method: "POST" });
+  if (res && res.ok) {
+    updateStatusBadge("solving"); updateButtons("solving"); startTimer();
+  }
 });
 
 $("#btn-retry").addEventListener("click", async () => {
@@ -1395,11 +1404,68 @@ function showFlagBanner(flag) {
   const span = document.createElement("span");
   span.className = "flag-text";
   span.textContent = flag;
-  const btn = document.createElement("button");
-  btn.className = "btn-copy-flag";
-  btn.textContent = "Copy";
-  btn.addEventListener("click", () => copyToClipboard(flag, btn));
-  item.append(span, btn);
+
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "btn-copy-flag";
+  copyBtn.textContent = "Copy";
+  copyBtn.addEventListener("click", () => copyToClipboard(flag, copyBtn));
+  item.append(span, copyBtn);
+
+  // Submit to platform button (if challenge was imported)
+  const submitBtn = document.createElement("button");
+  submitBtn.className = "btn-copy-flag btn-submit-flag";
+  submitBtn.textContent = "Submit";
+  submitBtn.addEventListener("click", async () => {
+    if (!currentChallengeId) return;
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Submitting...";
+    const res = await api("/api/plugins/submit-flag", {
+      method: "POST",
+      body: JSON.stringify({ challenge_id: currentChallengeId, flag }),
+    });
+    if (!res) { submitBtn.disabled = false; submitBtn.textContent = "Submit"; return; }
+    const data = await res.json();
+    if (data.error) {
+      // Not a plugin challenge or no saved connection — hide submit button
+      submitBtn.classList.add("hidden");
+      return;
+    }
+    if (data.correct) {
+      submitBtn.textContent = "Correct!";
+      submitBtn.classList.add("copied");
+      showToast("Flag correct!", "success");
+      updateStatusBadge("solved");
+      updateButtons("solved");
+      stopTimer();
+    } else {
+      submitBtn.textContent = data.message || "Wrong";
+      submitBtn.disabled = false;
+      setTimeout(() => { submitBtn.textContent = "Submit"; }, 2000);
+    }
+  });
+  item.appendChild(submitBtn);
+
+  // Mark Solved button (manual confirm without platform submission)
+  const markBtn = document.createElement("button");
+  markBtn.className = "btn-copy-flag";
+  markBtn.textContent = "Mark Solved";
+  markBtn.addEventListener("click", async () => {
+    if (!currentChallengeId) return;
+    const res = await api(`/api/challenges/${currentChallengeId}/mark-solved`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    if (res && res.ok) {
+      markBtn.textContent = "Solved!";
+      markBtn.classList.add("copied");
+      showToast("Challenge marked as solved", "success");
+      updateStatusBadge("solved");
+      updateButtons("solved");
+      stopTimer();
+    }
+  });
+  item.appendChild(markBtn);
+
   list.appendChild(item);
 }
 
@@ -1477,12 +1543,20 @@ function renderRunEvent(runId, event) {
   // --- New run added (manager handoff) ---
   if (event.type === "run_added" && event.run) {
     const r = event.run;
-    // Deduplicate — skip if we already have this run
     if (currentRuns.some((x) => x.id === r.id)) return;
     currentRuns.push(r);
     addRunTab(r);
     if (currentChallengeId) {
       connectRunWS(currentChallengeId, r.id, r.agent);
+    }
+    // Refresh selectors and header with new run
+    updateSteerRunSelect();
+    updateFilesRunSelect();
+    // Update model badge for new agent
+    const agentMeta = getAgentMeta(r.agent);
+    const modelBadge = $("#detail-model");
+    if (modelBadge) {
+      modelBadge.textContent = r.model || agentMeta.default_model;
     }
     switchRunTab(r.id);
     return;

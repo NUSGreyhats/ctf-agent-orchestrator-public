@@ -3483,6 +3483,8 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
     config = body.get("config", {})
     selected = body.get("challenges", [])
     mode = body.get("mode", "single")
+    if mode not in VALID_MODES:
+        mode = "single"
     agents = body.get("agents", "").strip()
     model = body.get("model", "")
     effort = body.get("effort", "")
@@ -3568,6 +3570,10 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
 
         # Determine which agents to create runs for
         agent_entries = parse_agents_field(agents)
+        # Filter to valid agents
+        agent_entries = [
+            e for e in agent_entries if e["agent"] in VALID_AGENTS
+        ]
         if not agent_entries:
             agent_entries = [{"agent": DEFAULT_AGENT, "model": ""}]
         if mode in ("single", "single_managed"):
@@ -3594,8 +3600,6 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         challenge_status = "pending" if paused else "solving"
         for entry in agent_entries:
             agent_name = entry["agent"]
-            if agent_name not in VALID_AGENTS:
-                continue
             run_id = uuid.uuid4().hex[:8]
             run_model = entry.get("model") or model or resolved_default_model(agent_name)
             run_effort = normalize_effort_for_agent(agent_name, effort)
@@ -3679,7 +3683,11 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
 
 
 async def plugin_submit_flag(request: Request) -> JSONResponse:
-    """Submit a flag to the remote platform."""
+    """Submit a flag to the remote platform.
+
+    Resolves connection config from the challenge's _connection_id,
+    falling back to _source_url lookup if needed.
+    """
     if err := require_auth(request):
         return err
     if err := require_csrf(request):
@@ -3701,7 +3709,6 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    config = body.get("config", {})
     plugin = get_plugin(plugin_name)
     if not plugin:
         return JSONResponse(
@@ -3709,8 +3716,41 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
             status_code=404,
         )
 
+    # Resolve config from saved connections
+    config = {}
+    conn_id = challenge.get("_connection_id", "")
+    source_url = challenge.get("_source_url", "")
+    for conn in load_connections():
+        if conn_id and conn.get("id") == conn_id:
+            config = conn["config"]
+            break
+        if (
+            conn.get("plugin") == plugin_name
+            and conn.get("config", {}).get("url") == source_url
+        ):
+            config = conn["config"]
+            break
+
+    if not config:
+        return JSONResponse(
+            {"error": "No saved connection found for this challenge. "
+             "Re-import or sync to save credentials."},
+            status_code=400,
+        )
+
     try:
         result = await plugin.submit_flag(config, remote_id, flag)
+
+        # If correct, mark the challenge as solved
+        if result.correct:
+            for run in challenge["runs"].values():
+                if run["status"] in ("solving", "completed"):
+                    run["status"] = "solved"
+                    run["error"] = None
+                    break
+            challenge["status"] = derive_challenge_status(challenge)
+            save_metadata(challenge)
+
         return JSONResponse({
             "correct": result.correct,
             "message": result.message,
