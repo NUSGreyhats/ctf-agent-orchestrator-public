@@ -1184,7 +1184,11 @@ function initRunTabs(runs) {
     btn.dataset.run = run.id;
     const dotClass = run.status === "solving" ? "dot-running"
       : run.status === "solved" ? "dot-solved"
-      : run.status === "failed" ? "dot-error" : "dot-running";
+      : run.status === "failed" ? "dot-error"
+      : run.status === "completed" ? "dot-done"
+      : run.status === "shelved" ? "dot-error"
+      : run.status === "pending" ? "dot-pending"
+      : "dot-running";
     btn.innerHTML = `<span class="run-tab-dot ${dotClass}"></span>${esc(label)}`;
     btn.addEventListener("click", () => switchRunTab(run.id));
     tabBar.appendChild(btn);
@@ -2629,7 +2633,22 @@ $("#btn-import-submit").addEventListener("click", async () => {
       return;
     }
     const data = await res.json();
-    showToast(`Imported ${data.created.length} challenge(s)`, "success");
+    const entries = data.created || [];
+    const successes = entries.filter((e) => e.status !== "error");
+    const errors = entries.filter((e) => e.status === "error");
+    const warnings = entries.filter((e) => e.warning);
+    if (successes.length) {
+      showToast(`Imported ${successes.length} challenge(s)`, "success");
+    }
+    if (warnings.length) {
+      showToast(`${warnings.length} challenge(s) imported with missing files`, "info");
+    }
+    if (errors.length) {
+      showToast(`${errors.length} challenge(s) failed: ${errors[0].error}`, "error");
+    }
+    if (!successes.length && !errors.length) {
+      showToast("No challenges imported", "info");
+    }
     $("#import-overlay").classList.add("hidden");
     loadChallenges();
   } finally {

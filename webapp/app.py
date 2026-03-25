@@ -469,6 +469,9 @@ def save_metadata(challenge: dict) -> None:
         "error": challenge.get("error"),
         "manager": manager_state_for_metadata(challenge),
         "runs": _serialize_runs(challenge),
+        "_plugin": challenge.get("_plugin", ""),
+        "_remote_id": challenge.get("_remote_id", ""),
+        "_source_url": challenge.get("_source_url", ""),
     }
     meta_path = ensure_state_dir(challenge["id"]) / METADATA_FILE
     meta_path.write_text(json.dumps(meta, indent=2))
@@ -655,6 +658,9 @@ def load_challenges_from_disk() -> None:
                 **meta.get("manager", {}),
             },
             "runs": runs,
+            "_plugin": meta.get("_plugin", ""),
+            "_remote_id": meta.get("_remote_id", ""),
+            "_source_url": meta.get("_source_url", ""),
         }
         challenge["status"] = derive_challenge_status(challenge)
         challenges[challenge_id] = challenge
@@ -1467,19 +1473,25 @@ async def unsolve_challenge(request: Request) -> JSONResponse:
     if not challenge:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    changed = False
-    for run in challenge["runs"].values():
+    changed_run_ids = []
+    for run_id, run in challenge["runs"].items():
         if run["status"] == "solved":
             run["status"] = "failed"
-            changed = True
+            changed_run_ids.append(run_id)
 
-    if not changed:
+    if not changed_run_ids:
         return JSONResponse(
             {"error": "no solved runs to unsolve"}, status_code=409
         )
 
     challenge["status"] = derive_challenge_status(challenge)
     save_metadata(challenge)
+    for rid in changed_run_ids:
+        await broadcast(challenge_id, rid, {
+            "type": "run_status",
+            "run_id": rid,
+            "status": "failed",
+        })
     await broadcast_challenge(challenge_id, {
         "type": "challenge_status",
         "status": challenge["status"],
@@ -1521,9 +1533,13 @@ async def mark_solved(request: Request) -> JSONResponse:
             status_code=409,
         )
 
-    for run in target_runs:
-        run["status"] = "solved"
-        run["error"] = None
+    # Collect run IDs for the solved run(s)
+    solved_run_ids = []
+    for run_id, run in challenge["runs"].items():
+        if run in target_runs:
+            run["status"] = "solved"
+            run["error"] = None
+            solved_run_ids.append(run_id)
 
     # Auto-stop other runs in parallel modes
     if challenge["mode"] in ("parallel", "parallel_managed"):
@@ -1550,9 +1566,20 @@ async def mark_solved(request: Request) -> JSONResponse:
                 await broadcast(
                     challenge_id, other_id, stop_event
                 )
+                await broadcast(challenge_id, other_id, {
+                    "type": "run_status",
+                    "run_id": other_id,
+                    "status": "failed",
+                })
 
     challenge["status"] = derive_challenge_status(challenge)
     save_metadata(challenge)
+    for rid in solved_run_ids:
+        await broadcast(challenge_id, rid, {
+            "type": "run_status",
+            "run_id": rid,
+            "status": "solved",
+        })
     await broadcast_challenge(challenge_id, {
         "type": "challenge_status",
         "status": challenge["status"],
@@ -3294,6 +3321,13 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             })
             continue
 
+        partial_warning = ""
+        if download_errors:
+            partial_warning = (
+                f"Warning: {len(download_errors)} file(s) failed to "
+                f"download: {'; '.join(download_errors)}"
+            )
+
         # Determine which agents to create runs for
         agent_entries = parse_agents_field(agents)
         if not agent_entries:
@@ -3363,11 +3397,14 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                     run_agent_task(challenge_id, run_id)
                 )
 
-        created.append({
+        entry = {
             "id": challenge_id,
             "name": ch_name,
             "status": challenge_status,
-        })
+        }
+        if partial_warning:
+            entry["warning"] = partial_warning
+        created.append(entry)
 
     # Save connection for future syncs
     if created:
