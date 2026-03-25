@@ -95,11 +95,15 @@ def save_connections(connections: list[dict]) -> None:
     CONNECTIONS_FILE.write_text(json.dumps(connections, indent=2))
 
 
-def _imported_remote_ids(plugin_name: str) -> set[str]:
-    """Return set of remote_ids already imported from a plugin."""
+def _imported_remote_ids(plugin_name: str, source_url: str = "") -> set[str]:
+    """Return set of remote_ids already imported from a plugin+source."""
     ids = set()
     for c in challenges.values():
-        if c.get("_plugin") == plugin_name and c.get("_remote_id"):
+        if c.get("_plugin") != plugin_name:
+            continue
+        if source_url and c.get("_source_url", "") != source_url:
+            continue
+        if c.get("_remote_id"):
             ids.add(c["_remote_id"])
     return ids
 
@@ -129,12 +133,10 @@ def derive_challenge_status(challenge: dict) -> str:
         return "solving"
     if "shelved" in statuses and not (statuses - {"shelved", "failed", "completed"}):
         return "shelved"
-    if statuses <= {"completed"}:
-        return "completed"
-    if statuses <= {"failed", "completed"}:
-        return "completed"
     if statuses <= {"failed"}:
         return "failed"
+    if "completed" in statuses and not (statuses - {"completed", "failed"}):
+        return "completed"
     if statuses <= {"pending"}:
         return "pending"
     return "failed"
@@ -1190,7 +1192,9 @@ async def bulk_upload(request: Request) -> JSONResponse:
             for fname in file_names:
                 src = folder_dir / fname
                 if src.exists():
-                    shutil.copy2(src, files_dest / fname)
+                    dest = files_dest / fname
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
 
             challenge_status = "pending" if paused else "solving"
 
@@ -1477,7 +1481,7 @@ async def unsolve_challenge(request: Request) -> JSONResponse:
     challenge["status"] = derive_challenge_status(challenge)
     save_metadata(challenge)
     await broadcast_challenge(challenge_id, {
-        "type": "status",
+        "type": "challenge_status",
         "status": challenge["status"],
     })
     return JSONResponse({"status": challenge["status"]})
@@ -1550,7 +1554,7 @@ async def mark_solved(request: Request) -> JSONResponse:
     challenge["status"] = derive_challenge_status(challenge)
     save_metadata(challenge)
     await broadcast_challenge(challenge_id, {
-        "type": "status",
+        "type": "challenge_status",
         "status": challenge["status"],
     })
     return JSONResponse({"status": challenge["status"]})
@@ -2488,7 +2492,7 @@ async def _handle_single_managed_verdict(
         append_output_event(challenge_id, active_run_id, shelve_event)
         await broadcast(challenge_id, active_run_id, shelve_event)
         await broadcast_challenge(challenge_id, {
-            "type": "status",
+            "type": "challenge_status",
             "status": "shelved",
         })
 
@@ -2606,7 +2610,7 @@ async def _handle_parallel_managed_verdict(
         challenge["status"] = derive_challenge_status(challenge)
         save_metadata(challenge)
         await broadcast_challenge(challenge_id, {
-            "type": "status",
+            "type": "challenge_status",
             "status": challenge["status"],
         })
 
@@ -3262,8 +3266,9 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         ch_flag_format = ch_cfg.get("flag_format", "") or flag_format
         remote_files = ch_cfg.get("files", [])
 
-        # Download files
+        # Download files (preserve paths, report failures)
         file_data: dict[str, bytes] = {}
+        download_errors: list[str] = []
         for rf in remote_files:
             try:
                 from plugins.base import RemoteFile
@@ -3271,10 +3276,23 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                     config,
                     RemoteFile(name=rf["name"], url=rf["url"]),
                 )
-                safe_name = rf["name"].replace("/", "_").replace("\\", "_")
+                safe_name = normalize_uploaded_path(rf["name"])
+                if not safe_name:
+                    safe_name = rf["name"].split("/")[-1].split("?")[0]
                 file_data[safe_name] = data
-            except Exception:
-                continue
+            except Exception as exc:
+                download_errors.append(
+                    f"{rf['name']}: {exc}"
+                )
+
+        if not file_data and download_errors:
+            created.append({
+                "id": "",
+                "name": ch_name,
+                "status": "error",
+                "error": f"All downloads failed: {'; '.join(download_errors)}",
+            })
+            continue
 
         # Determine which agents to create runs for
         agent_entries = parse_agents_field(agents)
@@ -3290,11 +3308,15 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             files_dir = challenge_dir / "_files"
             files_dir.mkdir(parents=True)
             for fname, fdata in file_data.items():
-                (files_dir / fname).write_bytes(fdata)
+                dest = files_dir / fname
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(fdata)
         else:
             challenge_dir.mkdir(parents=True)
             for fname, fdata in file_data.items():
-                (challenge_dir / fname).write_bytes(fdata)
+                dest = challenge_dir / fname
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(fdata)
 
         runs = {}
         challenge_status = "pending" if paused else "solving"
@@ -3330,6 +3352,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "runs": runs,
             "_plugin": plugin_name,
             "_remote_id": ch_remote_id,
+            "_source_url": config.get("url", ""),
         }
         challenges[challenge_id] = challenge
         save_metadata(challenge)
@@ -3469,7 +3492,9 @@ async def sync_connection(request: Request) -> JSONResponse:
         )
 
     # Filter out already-imported challenges
-    imported_ids = _imported_remote_ids(plugin_name)
+    imported_ids = _imported_remote_ids(
+        plugin_name, config.get("url", "")
+    )
     new_challenges = [
         c for c in remote_challenges
         if str(c.remote_id) not in imported_ids
