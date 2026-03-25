@@ -374,6 +374,10 @@ def _legacy_output_log_path(challenge_id: str) -> Path:
 
 def append_output_event(challenge_id: str, run_id: str, event: dict) -> None:
     """Append a single event to the run's output log on disk."""
+    if challenge_id not in challenges:
+        return
+    if challenges[challenge_id].get("_deleted"):
+        return
     out_path = _run_output_path(challenge_id, run_id)
     with out_path.open("a") as f:
         f.write(json.dumps(event) + "\n")
@@ -488,6 +492,8 @@ def _serialize_runs(challenge: dict) -> dict:
 
 def save_metadata(challenge: dict) -> None:
     """Persist challenge metadata to disk."""
+    if challenge.get("_deleted"):
+        return
     meta = {
         "id": challenge["id"],
         "name": challenge["name"],
@@ -1635,11 +1641,14 @@ async def delete_challenge(request: Request) -> JSONResponse:
     if not challenge:
         return JSONResponse({"error": "not found"}, status_code=404)
 
+    # Mark deleted so finalizers become no-ops
+    challenge["_deleted"] = True
+
     # Stop all runs
     for run in challenge["runs"].values():
         proc = run.get("process")
         if proc and proc.returncode is None:
-            run["_stop_reason"] = "user_stop"
+            run["_stop_reason"] = "deleted"
             proc.terminate()
 
     challenge_dir = CHALLENGES_DIR / challenge_id
@@ -3207,6 +3216,12 @@ async def challenge_ws(websocket: WebSocket):
         "status": run["status"],
     })
 
+    # Send current challenge-level status
+    await websocket.send_json({
+        "type": "challenge_status",
+        "status": challenge["status"],
+    })
+
     try:
         while True:
             await websocket.receive_text()
@@ -3516,6 +3531,19 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                 safe_name = normalize_uploaded_path(rf["name"])
                 if not safe_name:
                     safe_name = rf["name"].split("/")[-1].split("?")[0]
+                # Avoid collision: if path already used, suffix it
+                if safe_name in file_data:
+                    base, ext = (safe_name.rsplit(".", 1) + [""])[:2]
+                    counter = 1
+                    while True:
+                        candidate = f"{base}_{counter}.{ext}" if ext else f"{base}_{counter}"
+                        if candidate not in file_data:
+                            safe_name = candidate
+                            break
+                        counter += 1
+                    download_errors.append(
+                        f"{rf['name']}: renamed to {safe_name} (path collision)"
+                    )
                 file_data[safe_name] = data
             except Exception as exc:
                 download_errors.append(

@@ -1477,15 +1477,13 @@ function renderRunEvent(runId, event) {
   // --- New run added (manager handoff) ---
   if (event.type === "run_added" && event.run) {
     const r = event.run;
-    // Add to currentRuns
+    // Deduplicate — skip if we already have this run
+    if (currentRuns.some((x) => x.id === r.id)) return;
     currentRuns.push(r);
-    // Create tab + feed
     addRunTab(r);
-    // Connect WebSocket for the new run
     if (currentChallengeId) {
       connectRunWS(currentChallengeId, r.id, r.agent);
     }
-    // Switch to the new run tab
     switchRunTab(r.id);
     return;
   }
