@@ -1211,6 +1211,34 @@ function switchRunTab(runId) {
   if (feed) { feed.classList.add("active"); autoScroll = true; scrollBottom(); }
 }
 
+function addRunTab(run) {
+  const tabBar = $("#run-tabs");
+  const feedsEl = $("#run-feeds");
+  const scrollBtn = feedsEl.querySelector("#btn-scroll-bottom");
+
+  const agentMeta = getAgentMeta(run.agent);
+  const label = agentMeta.label || run.agent;
+  const dotClass = run.status === "solving" ? "dot-running"
+    : run.status === "solved" ? "dot-solved"
+    : run.status === "failed" ? "dot-error"
+    : run.status === "completed" ? "dot-done"
+    : run.status === "pending" ? "dot-pending"
+    : "dot-running";
+
+  const btn = document.createElement("button");
+  btn.className = "run-tab";
+  btn.dataset.run = run.id;
+  btn.innerHTML = `<span class="run-tab-dot ${dotClass}"></span>${esc(label)}`;
+  btn.addEventListener("click", () => switchRunTab(run.id));
+  tabBar.appendChild(btn);
+
+  const feed = document.createElement("div");
+  feed.id = `feed-${run.id}`;
+  feed.className = "panel-body run-feed";
+  feedsEl.insertBefore(feed, scrollBtn);
+  setupFeedScroll(feed);
+}
+
 function updateRunTabDot(runId, status) {
   const btn = document.querySelector(`[data-run="${runId}"]`);
   if (!btn) return;
@@ -1443,6 +1471,22 @@ function renderRunEvent(runId, event) {
       $("#error-banner").textContent = event.error;
       $("#error-banner").classList.remove("hidden");
     }
+    return;
+  }
+
+  // --- New run added (manager handoff) ---
+  if (event.type === "run_added" && event.run) {
+    const r = event.run;
+    // Add to currentRuns
+    currentRuns.push(r);
+    // Create tab + feed
+    addRunTab(r);
+    // Connect WebSocket for the new run
+    if (currentChallengeId) {
+      connectRunWS(currentChallengeId, r.id, r.agent);
+    }
+    // Switch to the new run tab
+    switchRunTab(r.id);
     return;
   }
 

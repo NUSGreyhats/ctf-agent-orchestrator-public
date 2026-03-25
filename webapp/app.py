@@ -1363,6 +1363,7 @@ async def stop_challenge(request: Request) -> JSONResponse:
             continue
         proc = run.get("process")
         if proc and proc.returncode is None:
+            run["_stop_reason"] = "user_stop"
             proc.terminate()
             run["status"] = "failed"
             stop_event = {
@@ -1426,6 +1427,7 @@ async def steer_challenge(request: Request) -> JSONResponse:
     # Stop current process if running
     proc = run.get("process")
     if proc and proc.returncode is None:
+        run["_stop_reason"] = "steer"
         proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
@@ -1583,6 +1585,7 @@ async def mark_solved(request: Request) -> JSONResponse:
                 continue
             proc = other_run.get("process")
             if proc and proc.returncode is None:
+                other_run["_stop_reason"] = "sibling_solved"
                 proc.terminate()
                 other_run["status"] = "failed"
                 other_run["process"] = None
@@ -1636,6 +1639,7 @@ async def delete_challenge(request: Request) -> JSONResponse:
     for run in challenge["runs"].values():
         proc = run.get("process")
         if proc and proc.returncode is None:
+            run["_stop_reason"] = "user_stop"
             proc.terminate()
 
     challenge_dir = CHALLENGES_DIR / challenge_id
@@ -2422,6 +2426,7 @@ async def _handle_single_managed_verdict(
         # Stop current process
         proc = active_run.get("process")
         if proc and proc.returncode is None:
+            active_run["_stop_reason"] = "steer"
             proc.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
@@ -2457,6 +2462,7 @@ async def _handle_single_managed_verdict(
         # Stop current run
         proc = active_run.get("process")
         if proc and proc.returncode is None:
+            active_run["_stop_reason"] = "handoff"
             proc.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
@@ -2501,6 +2507,17 @@ async def _handle_single_managed_verdict(
         )
         challenge["runs"][new_run_id] = new_run
 
+        # Notify frontend about the new run
+        await broadcast_challenge(challenge_id, {
+            "type": "run_added",
+            "run": {
+                "id": new_run_id,
+                "agent": target_agent,
+                "model": new_run["model"],
+                "status": "solving",
+            },
+        })
+
         # For single mode, the new run works in the same dir
         # so FINDINGS.md is already there
 
@@ -2530,6 +2547,7 @@ async def _handle_single_managed_verdict(
         # Stop current process
         proc = active_run.get("process")
         if proc and proc.returncode is None:
+            active_run["_stop_reason"] = "shelve"
             proc.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
@@ -2609,6 +2627,7 @@ async def _handle_parallel_managed_verdict(
                 # Stop current process
                 proc = run.get("process")
                 if proc and proc.returncode is None:
+                    r["_stop_reason"] = "steer"
                     proc.terminate()
                     try:
                         await asyncio.wait_for(proc.wait(), timeout=5)
@@ -2648,6 +2667,7 @@ async def _handle_parallel_managed_verdict(
                 continue
             proc = run.get("process")
             if proc and proc.returncode is None:
+                r["_stop_reason"] = "shelve"
                 proc.terminate()
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5)
@@ -3057,10 +3077,29 @@ async def run_agent_task(
             run.get("_last_unknown_events", [])
         ).strip()
 
-        # Don't overwrite if auto-submit already marked this run solved
-        if run["status"] == "solved":
-            # Auto-stop siblings in parallel mode (auto-submit may not
-            # have been able to do this during the stream)
+        # Check if external code already set the final status
+        # (steer, shelve, mark_solved, sibling stop, auto-submit).
+        # If _stop_reason is set, the run was intentionally terminated
+        # and its status is already correct — skip normal finalization.
+        stop_reason = run.pop("_stop_reason", None)
+
+        if stop_reason:
+            # Status already set by the caller (steer, shelve, etc.)
+            # Auto-stop siblings if this run was solved
+            if run["status"] == "solved" and challenge["mode"] in (
+                "parallel", "parallel_managed"
+            ):
+                for other_id, other_run in challenge["runs"].items():
+                    if other_id == run_id:
+                        continue
+                    other_proc = other_run.get("process")
+                    if other_proc and other_proc.returncode is None:
+                        other_proc.terminate()
+                        other_run["_stop_reason"] = "sibling_solved"
+                        other_run["status"] = "failed"
+                        other_run["error"] = None
+        elif run["status"] == "solved":
+            # Auto-submit marked it solved during streaming
             if challenge["mode"] in ("parallel", "parallel_managed"):
                 for other_id, other_run in challenge["runs"].items():
                     if other_id == run_id:
@@ -3068,31 +3107,10 @@ async def run_agent_task(
                     other_proc = other_run.get("process")
                     if other_proc and other_proc.returncode is None:
                         other_proc.terminate()
+                        other_run["_stop_reason"] = "sibling_solved"
                         other_run["status"] = "failed"
-                        other_run["process"] = None
-                        stop_event = {
-                            "type": "system",
-                            "message": (
-                                f"Stopped: {run['agent']} solved "
-                                "the challenge."
-                            ),
-                        }
-                        other_run["output_lines"].append(stop_event)
-                        append_output_event(
-                            challenge_id, other_id, stop_event
-                        )
-                        await broadcast(
-                            challenge_id, other_id, stop_event
-                        )
-                        await broadcast(challenge_id, other_id, {
-                            "type": "run_status",
-                            "run_id": other_id,
-                            "status": "failed",
-                        })
+                        other_run["error"] = None
         elif proc.returncode == 0 and not stream_error and saw_provider_message:
-            # Clean exit does NOT mean solved — only flag detection
-            # or successful platform submission counts as solved.
-            # Mark as "completed" (agent finished without error).
             run["status"] = "completed"
             run["error"] = None
         else:
@@ -3129,12 +3147,14 @@ async def run_agent_task(
             await broadcast(challenge_id, run_id, err_event)
 
     except Exception as exc:
-        run["status"] = "failed"
-        run["error"] = str(exc)
-        err_event = {"type": "error", "message": str(exc)}
-        run["output_lines"].append(err_event)
-        append_output_event(challenge_id, run_id, err_event)
-        await broadcast(challenge_id, run_id, err_event)
+        stop_reason = run.pop("_stop_reason", None)
+        if not stop_reason:
+            run["status"] = "failed"
+            run["error"] = str(exc)
+            err_event = {"type": "error", "message": str(exc)}
+            run["output_lines"].append(err_event)
+            append_output_event(challenge_id, run_id, err_event)
+            await broadcast(challenge_id, run_id, err_event)
     finally:
         run["process"] = None
         if run.get("solve_start"):
@@ -4103,6 +4123,7 @@ async def on_shutdown():
         for run in challenge["runs"].values():
             proc = run.get("process")
             if proc and proc.returncode is None:
+                run["_stop_reason"] = "shutdown"
                 proc.terminate()
     for preview in _bulk_previews.values():
         shutil.rmtree(preview["base_dir"], ignore_errors=True)
