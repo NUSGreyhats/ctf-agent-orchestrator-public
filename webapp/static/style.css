@@ -580,6 +580,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .dot-done { background: var(--green); }
 .dot-solved { background: var(--green); }
 .dot-error { background: var(--red); }
+.dot-pending { background: var(--text-dim); }
 
 /* System/error messages */
 .system-msg {

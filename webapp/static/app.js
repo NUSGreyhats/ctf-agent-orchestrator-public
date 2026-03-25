@@ -1216,15 +1216,16 @@ function updateRunTabDot(runId, status) {
   if (!btn) return;
   const dot = btn.querySelector(".run-tab-dot");
   if (!dot) return;
-  if (status === "solved") {
-    dot.className = "run-tab-dot dot-solved";
-  } else if (status === "failed" || status === "error") {
-    dot.className = "run-tab-dot dot-error";
-  } else if (status === "solving") {
-    dot.className = "run-tab-dot dot-running";
-  } else {
-    dot.className = "run-tab-dot dot-done";
-  }
+  const dotMap = {
+    solved: "dot-solved",
+    failed: "dot-error",
+    error: "dot-error",
+    solving: "dot-running",
+    completed: "dot-done",
+    shelved: "dot-error",
+    pending: "dot-pending",
+  };
+  dot.className = `run-tab-dot ${dotMap[status] || "dot-done"}`;
 }
 
 // === Steer Run Select ===

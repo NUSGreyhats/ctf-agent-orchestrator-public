@@ -14,6 +14,7 @@ Supports 4 solving modes:
 import asyncio
 import base64
 import json
+import re
 import mimetypes
 import os
 import secrets
@@ -44,8 +45,10 @@ except ImportError:
     )
 try:
     from .plugins import get_plugins, get_plugin
+    from .plugins.base import RemoteFile
 except ImportError:
     from plugins import get_plugins, get_plugin  # type: ignore
+    from plugins.base import RemoteFile  # type: ignore
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -109,6 +112,32 @@ def _imported_remote_ids(plugin_name: str, source_url: str = "") -> set[str]:
 
 
 VALID_MODES = {"single", "single_managed", "parallel", "parallel_managed"}
+
+_FLAG_PATTERNS = [
+    re.compile(r"flag\{[^}]+\}", re.IGNORECASE),
+    re.compile(r"FLAG\{[^}]+\}"),
+    re.compile(r"CTF\{[^}]+\}"),
+    re.compile(r"HTB\{[^}]+\}"),
+    re.compile(r"picoCTF\{[^}]+\}"),
+]
+
+
+def detect_flag(text: str, flag_format: str = "") -> str | None:
+    """Return the first flag found in text, or None."""
+    patterns = list(_FLAG_PATTERNS)
+    if flag_format:
+        prefix = flag_format.split("{")[0] if "{" in flag_format else flag_format
+        if len(prefix) >= 2:
+            patterns.append(
+                re.compile(
+                    re.escape(prefix) + r"\{[^}]+\}",
+                )
+            )
+    for pat in patterns:
+        m = pat.search(text)
+        if m:
+            return m.group(0)
+    return None
 
 METADATA_FILE = "challenge.json"
 OUTPUT_FILE = "output.jsonl"
@@ -2745,6 +2774,103 @@ def build_prompt(challenge: dict, run: dict) -> str:
 # Run agent
 # ---------------------------------------------------------------------------
 
+def _try_auto_submit_flag(
+    challenge_id: str, run_id: str, event: dict, challenge: dict
+) -> None:
+    """Check event for flags and auto-submit if enabled."""
+    settings = load_settings()
+    if not settings.get("auto_submit_flags"):
+        return
+
+    plugin_name = challenge.get("_plugin")
+    remote_id = challenge.get("_remote_id")
+    if not plugin_name or not remote_id:
+        return
+
+    plugin = get_plugin(plugin_name)
+    if not plugin:
+        return
+
+    # Extract text from assistant message
+    msg = event.get("message", {})
+    text_parts = []
+    for block in msg.get("content", []):
+        if block.get("type") == "text" and block.get("text"):
+            text_parts.append(block["text"])
+    if not text_parts:
+        return
+
+    full_text = "\n".join(text_parts)
+    flag = detect_flag(full_text, challenge.get("flag_format", ""))
+    if not flag:
+        return
+
+    run = challenge["runs"].get(run_id)
+    if not run or run.get("_flag_submitted"):
+        return
+
+    # Fire-and-forget async submission
+    config = {}
+    source_url = challenge.get("_source_url", "")
+    if source_url:
+        # Try to find saved connection config
+        for conn in load_connections():
+            if conn.get("plugin") == plugin_name and conn.get("config", {}).get("url") == source_url:
+                config = conn["config"]
+                break
+
+    if not config:
+        return
+
+    async def _submit():
+        try:
+            result = await plugin.submit_flag(config, remote_id, flag)
+            run["_flag_submitted"] = True
+            submit_event = {
+                "type": "system",
+                "subtype": "flag_submit",
+                "message": (
+                    f"Auto-submitted flag: {flag}\n"
+                    f"Result: {'Correct!' if result.correct else result.message}"
+                ),
+            }
+            run["output_lines"].append(submit_event)
+            append_output_event(challenge_id, run_id, submit_event)
+            await broadcast(challenge_id, run_id, submit_event)
+
+            if result.correct:
+                run["status"] = "solved"
+                run["error"] = None
+                challenge["status"] = derive_challenge_status(challenge)
+                save_metadata(challenge)
+                await broadcast(challenge_id, run_id, {
+                    "type": "run_status",
+                    "run_id": run_id,
+                    "status": "solved",
+                })
+                await broadcast_challenge(challenge_id, {
+                    "type": "challenge_status",
+                    "status": challenge["status"],
+                })
+            else:
+                # Tell the agent the flag was wrong so it retries
+                wrong_event = {
+                    "type": "system",
+                    "message": (
+                        f"Flag '{flag}' was incorrect: {result.message}. "
+                        "Keep trying."
+                    ),
+                }
+                run["output_lines"].append(wrong_event)
+                append_output_event(challenge_id, run_id, wrong_event)
+                await broadcast(challenge_id, run_id, wrong_event)
+                run["_flag_submitted"] = False  # Allow retry
+        except Exception:
+            run["_flag_submitted"] = False
+
+    asyncio.create_task(_submit())
+
+
 async def run_agent_task(
     challenge_id: str,
     run_id: str,
@@ -2889,6 +3015,15 @@ async def run_agent_task(
                 run["output_lines"].append(event)
                 append_output_event(challenge_id, run_id, event)
                 await broadcast(challenge_id, run_id, event)
+
+                # Auto-submit flag detection
+                if (
+                    not run.get("_flag_submitted")
+                    and event.get("type") == "assistant"
+                ):
+                    _try_auto_submit_flag(
+                        challenge_id, run_id, event, challenge
+                    )
 
         await asyncio.gather(
             stream_events(proc.stdout, "stdout"),
@@ -3298,7 +3433,6 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         download_errors: list[str] = []
         for rf in remote_files:
             try:
-                from plugins.base import RemoteFile
                 data = await plugin.download_file(
                     config,
                     RemoteFile(name=rf["name"], url=rf["url"]),
