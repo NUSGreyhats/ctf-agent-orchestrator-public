@@ -1493,13 +1493,16 @@ function renderRunEvent(runId, event) {
 
   // --- User steer ---
   if (event.type === "user_steer") {
-    const div = document.createElement("div");
-    div.className = "user-steer-msg";
-    div.innerHTML = `<div class="user-steer-label">You</div>`;
-    const text = document.createElement("div");
-    text.textContent = event.message;
-    div.appendChild(text);
-    feed.appendChild(div);
+    const bubble = document.createElement("div");
+    bubble.className = "chat-bubble chat-user";
+    const label = document.createElement("div");
+    label.className = "chat-label";
+    label.textContent = "You";
+    const body = document.createElement("div");
+    body.className = "chat-body";
+    body.textContent = event.message;
+    bubble.append(label, body);
+    feed.appendChild(bubble);
     scrollBottomIfActive(runId); return;
   }
 
@@ -1551,23 +1554,56 @@ function renderRunEvent(runId, event) {
 }
 
 // === Assistant Message Rendering ===
+
+// Track consecutive tool calls for collapsing
+let _pendingToolEls = [];
+
+function _flushToolGroup(feed) {
+  if (!_pendingToolEls.length) return;
+  const group = document.createElement("div");
+  group.className = "chat-tool-group";
+
+  if (_pendingToolEls.length > 2) {
+    // Show first, collapse middle, show last
+    group.appendChild(_pendingToolEls[0]);
+    const collapsed = document.createElement("div");
+    collapsed.className = "chat-tool-collapsed";
+    const expandBtn = document.createElement("button");
+    expandBtn.className = "btn-ghost btn-xs chat-tool-expand";
+    expandBtn.textContent = `${_pendingToolEls.length - 2} more tool call${_pendingToolEls.length - 2 !== 1 ? "s" : ""}`;
+    expandBtn.addEventListener("click", () => {
+      collapsed.classList.add("chat-tool-expanded");
+      expandBtn.classList.add("hidden");
+    });
+    for (let i = 1; i < _pendingToolEls.length - 1; i++) {
+      collapsed.appendChild(_pendingToolEls[i]);
+    }
+    group.appendChild(expandBtn);
+    group.appendChild(collapsed);
+    group.appendChild(_pendingToolEls[_pendingToolEls.length - 1]);
+  } else {
+    for (const el of _pendingToolEls) group.appendChild(el);
+  }
+
+  feed.appendChild(group);
+  _pendingToolEls = [];
+}
+
 function renderAssistant(feed, msg, runId) {
   if (!msg.content || !msg.content.length) return;
 
-  // Track tokens
   if (msg.usage) {
     totalTokens += (msg.usage.input_tokens || 0) + (msg.usage.output_tokens || 0);
     updateCost();
   }
 
-  const step = document.createElement("div");
-  step.className = "step";
-  let hasContent = false;
-
   for (const block of msg.content) {
     if (block.type === "thinking" && block.thinking) {
-      // Collapse previous thinking block
+      _flushToolGroup(feed);
       if (lastThinkingEl) lastThinkingEl.removeAttribute("open");
+
+      const bubble = document.createElement("div");
+      bubble.className = "chat-bubble chat-assistant chat-thinking-bubble";
 
       const details = document.createElement("details");
       details.className = "step-thinking";
@@ -1579,59 +1615,63 @@ function renderAssistant(feed, msg, runId) {
       const preview = document.createElement("span");
       preview.className = "thinking-preview";
       preview.textContent = " " + truncate(block.thinking, 100);
-      summary.appendChild(label);
-      summary.appendChild(preview);
+      summary.append(label, preview);
       details.appendChild(summary);
       const body = document.createElement("div");
       body.className = "thinking-body";
       body.textContent = block.thinking;
       details.appendChild(body);
-      step.appendChild(details);
+      bubble.appendChild(details);
       lastThinkingEl = details;
-      hasContent = true;
+
+      feed.appendChild(bubble);
+      stepCount++;
+      updateCounters();
     }
     else if (block.type === "text" && block.text) {
+      _flushToolGroup(feed);
+
+      const bubble = document.createElement("div");
+      bubble.className = "chat-bubble chat-assistant";
+
+      if (timerStart) {
+        const elapsed = Math.floor((Date.now() - timerStart) / 1000);
+        const ts = document.createElement("span");
+        ts.className = "chat-timestamp";
+        const m = Math.floor(elapsed / 60);
+        const s = elapsed % 60;
+        ts.textContent = `${m}:${String(s).padStart(2, "0")}`;
+        bubble.appendChild(ts);
+      }
+
       const div = document.createElement("div");
-      div.className = "step-text";
+      div.className = "chat-body";
       div.innerHTML = renderMarkdown(block.text);
-      // Add copy buttons to code blocks
       div.querySelectorAll(".md-codeblock").forEach((pre) => {
         pre.style.position = "relative";
         pre.appendChild(makeCopyBtn(() => pre.textContent));
       });
-      step.appendChild(div);
+      bubble.appendChild(div);
+      feed.appendChild(bubble);
 
       const flag = checkForFlag(block.text);
       if (flag) showFlagBanner(flag);
 
-      hasContent = true;
+      stepCount++;
+      updateCounters();
     }
     else if (block.type === "tool_use") {
       const toolEl = buildToolUse(block);
-      step.appendChild(toolEl);
+      _pendingToolEls.push(toolEl);
       pendingTools.set(block.id, toolEl);
       addToolLogEntry(block);
       toolCount++;
       updateCounters();
-      hasContent = true;
     }
   }
 
-  if (hasContent) {
-    // Add timestamp
-    if (timerStart) {
-      const elapsed = Math.floor((Date.now() - timerStart) / 1000);
-      const ts = document.createElement("span");
-      ts.className = "step-timestamp";
-      const m = Math.floor(elapsed / 60);
-      const s = elapsed % 60;
-      ts.textContent = `${m}:${String(s).padStart(2, "0")}`;
-      step.prepend(ts);
-    }
-    feed.appendChild(step);
-    stepCount++;
-    updateCounters();
-  }
+  // Flush remaining tool calls (they may be followed by a tool_result later)
+  _flushToolGroup(feed);
 }
 
 // === Tool Use Rendering ===

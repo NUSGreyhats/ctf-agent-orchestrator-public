@@ -419,23 +419,41 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 /* === Activity Feed === */
 #activity-feed { padding: 0.5rem 0.75rem; }
 
-.step {
-  margin-bottom: 0.4rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-card);
-  overflow: hidden;
+/* Chat layout */
+.chat-bubble {
+  max-width: 80%; margin-bottom: 0.5rem; padding: 0.55rem 0.75rem;
+  border-radius: 12px; font-size: 0.82rem; line-height: 1.6;
+  word-break: break-word; position: relative;
 }
+.chat-assistant {
+  align-self: flex-start; margin-right: auto;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-bottom-left-radius: 4px;
+}
+.chat-user {
+  align-self: flex-end; margin-left: auto;
+  background: var(--accent-dim); border: 1px solid var(--accent);
+  border-bottom-right-radius: 4px; color: var(--accent);
+}
+.chat-label {
+  font-size: 0.6rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; margin-bottom: 0.2rem; opacity: 0.6;
+}
+.chat-body { white-space: pre-wrap; }
+.chat-timestamp {
+  position: absolute; top: 0.35rem; right: 0.5rem;
+  font-size: 0.55rem; color: var(--text-dim); font-family: var(--mono);
+}
+.chat-thinking-bubble { background: var(--purple-dim); border-color: rgba(199,146,234,0.25); }
 
 /* Thinking */
 .step-thinking {
   padding: 0; color: var(--purple); font-size: 0.75rem;
-  font-style: italic; border-bottom: 1px solid var(--border);
-  background: var(--purple-dim);
+  font-style: italic;
 }
 .step-thinking summary {
   cursor: pointer; outline: none; list-style: none;
-  padding: 0.4rem 0.65rem; display: flex; align-items: center; gap: 0.35rem;
+  padding: 0.4rem 0.5rem; display: flex; align-items: center; gap: 0.35rem;
 }
 .step-thinking summary::before {
   content: "\25B6"; font-size: 0.55rem; transition: transform 0.15s;
@@ -445,21 +463,39 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .thinking-label { font-weight: 600; font-style: normal; }
 .thinking-preview { opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thinking-body {
-  padding: 0.4rem 0.65rem; padding-top: 0;
+  padding: 0.4rem 0.5rem; padding-top: 0;
   white-space: pre-wrap; word-break: break-word;
   line-height: 1.5; max-height: 400px; overflow-y: auto;
-  border-top: 1px solid rgba(168,85,247,0.15);
+  border-top: 1px solid rgba(199,146,234,0.15);
 }
 
-/* Text */
-.step-text {
-  padding: 0.5rem 0.65rem; font-size: 0.82rem;
-  line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+/* Tool groups (centered) */
+.chat-tool-group {
+  align-self: center; width: 90%; margin: 0.35rem auto;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-card); overflow: hidden;
+}
+.chat-tool-collapsed { display: none; }
+.chat-tool-collapsed.chat-tool-expanded { display: block; }
+.chat-tool-expand {
+  display: block; width: 100%; text-align: center;
+  padding: 0.25rem; font-size: 0.7rem; color: var(--text-muted);
+  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  border-radius: 0;
 }
 
-/* Tool in main feed */
+/* Tool in feed */
 .step-tool { border-bottom: 1px solid var(--border); }
 .step-tool:last-child { border-bottom: none; }
+
+/* Legacy .step for backward compat with saved logs */
+.step {
+  margin-bottom: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  overflow: hidden;
+}
 
 .tool-bar {
   display: flex; align-items: center; gap: 0.4rem;
@@ -546,7 +582,13 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .dot-error { background: var(--red); }
 
 /* System/error messages */
-.system-msg { padding: 0.3rem 0.65rem; color: var(--yellow); font-style: italic; font-size: 0.75rem; }
+.system-msg {
+  align-self: center; text-align: center;
+  padding: 0.25rem 0.75rem; color: var(--yellow);
+  font-style: italic; font-size: 0.7rem;
+  background: var(--yellow-dim); border-radius: 12px;
+  margin: 0.25rem 0;
+}
 .error-msg {
   padding: 0.3rem 0.65rem; color: var(--red); font-size: 0.75rem;
   font-family: var(--mono); white-space: pre-wrap;
@@ -683,9 +725,10 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .agent-feeds { flex: 1; overflow: hidden; position: relative; min-height: 0; }
 .run-feed {
   display: none; overflow-y: auto;
-  position: absolute; inset: 0; padding: 0.5rem;
+  position: absolute; inset: 0; padding: 0.5rem 0.75rem;
+  flex-direction: column;
 }
-.run-feed.active { display: block; }
+.run-feed.active { display: flex; }
 
 /* === Steer Bar === */
 .steer-bar {
@@ -709,16 +752,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   outline: none; cursor: pointer; max-width: 120px;
 }
 
-.user-steer-msg {
-  padding: 0.35rem 0.65rem; margin: 0.25rem 0;
-  background: var(--accent-dim); border-left: 2px solid var(--accent);
-  border-radius: 0 6px 6px 0; font-size: 0.8rem;
-  color: var(--accent);
-}
-.user-steer-label {
-  font-size: 0.6rem; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.04em; margin-bottom: 0.1rem; opacity: 0.7;
-}
+/* user-steer-msg removed — now uses .chat-user bubble */
 
 /* === Step Counter === */
 .step-counter {
@@ -736,8 +770,8 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .header-stat:empty { display: none; }
 
 /* === Markdown Styles === */
-.step-text p { margin: 0; }
-.step-text p + p { margin-top: 0.4em; }
+.step-text p, .chat-body p { margin: 0; }
+.step-text p + p, .chat-body p + p { margin-top: 0.4em; }
 .step-text strong { color: var(--text); font-weight: 700; }
 .step-text em { font-style: italic; opacity: 0.9; }
 
