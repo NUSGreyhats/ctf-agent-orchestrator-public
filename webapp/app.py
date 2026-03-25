@@ -156,18 +156,21 @@ _METHODOLOGY_SKILL = f"{_SKILLS_ROOT}/methodology/SKILL.md"
 def derive_challenge_status(challenge: dict) -> str:
     """Derive challenge-level status from run statuses."""
     statuses = {r["status"] for r in challenge["runs"].values()}
+    if not statuses:
+        return "pending"
     if "solved" in statuses:
         return "solved"
     if "solving" in statuses:
         return "solving"
+    # Any pending run means work remains — treat as pending
+    if "pending" in statuses:
+        return "pending"
     if "shelved" in statuses and not (statuses - {"shelved", "failed", "completed"}):
         return "shelved"
     if statuses <= {"failed"}:
         return "failed"
     if "completed" in statuses and not (statuses - {"completed", "failed"}):
         return "completed"
-    if statuses <= {"pending"}:
-        return "pending"
     return "failed"
 
 
@@ -501,6 +504,7 @@ def save_metadata(challenge: dict) -> None:
         "_plugin": challenge.get("_plugin", ""),
         "_remote_id": challenge.get("_remote_id", ""),
         "_source_url": challenge.get("_source_url", ""),
+        "_connection_id": challenge.get("_connection_id", ""),
     }
     meta_path = ensure_state_dir(challenge["id"]) / METADATA_FILE
     meta_path.write_text(json.dumps(meta, indent=2))
@@ -690,6 +694,7 @@ def load_challenges_from_disk() -> None:
             "_plugin": meta.get("_plugin", ""),
             "_remote_id": meta.get("_remote_id", ""),
             "_source_url": meta.get("_source_url", ""),
+            "_connection_id": meta.get("_connection_id", ""),
         }
         challenge["status"] = derive_challenge_status(challenge)
         challenges[challenge_id] = challenge
@@ -2806,15 +2811,25 @@ def _try_auto_submit_flag(
         return
 
     run = challenge["runs"].get(run_id)
-    if not run or run.get("_flag_submitted"):
+    if not run:
         return
 
-    # Fire-and-forget async submission
+    # Guard: track which flags have been submitted or are in-flight
+    submitted = run.setdefault("_flags_submitted", set())
+    if flag in submitted:
+        return
+    # Mark immediately to prevent duplicate concurrent submissions
+    submitted.add(flag)
+
+    # Find saved connection config
     config = {}
     source_url = challenge.get("_source_url", "")
     if source_url:
-        # Try to find saved connection config
+        conn_id = challenge.get("_connection_id", "")
         for conn in load_connections():
+            if conn_id and conn.get("id") == conn_id:
+                config = conn["config"]
+                break
             if conn.get("plugin") == plugin_name and conn.get("config", {}).get("url") == source_url:
                 config = conn["config"]
                 break
@@ -2825,7 +2840,6 @@ def _try_auto_submit_flag(
     async def _submit():
         try:
             result = await plugin.submit_flag(config, remote_id, flag)
-            run["_flag_submitted"] = True
             submit_event = {
                 "type": "system",
                 "subtype": "flag_submit",
@@ -2853,7 +2867,8 @@ def _try_auto_submit_flag(
                     "status": challenge["status"],
                 })
             else:
-                # Tell the agent the flag was wrong so it retries
+                # Allow resubmission of different flags
+                submitted.discard(flag)
                 wrong_event = {
                     "type": "system",
                     "message": (
@@ -2864,9 +2879,8 @@ def _try_auto_submit_flag(
                 run["output_lines"].append(wrong_event)
                 append_output_event(challenge_id, run_id, wrong_event)
                 await broadcast(challenge_id, run_id, wrong_event)
-                run["_flag_submitted"] = False  # Allow retry
         except Exception:
-            run["_flag_submitted"] = False
+            submitted.discard(flag)
 
     asyncio.create_task(_submit())
 
@@ -3043,7 +3057,39 @@ async def run_agent_task(
             run.get("_last_unknown_events", [])
         ).strip()
 
-        if proc.returncode == 0 and not stream_error and saw_provider_message:
+        # Don't overwrite if auto-submit already marked this run solved
+        if run["status"] == "solved":
+            # Auto-stop siblings in parallel mode (auto-submit may not
+            # have been able to do this during the stream)
+            if challenge["mode"] in ("parallel", "parallel_managed"):
+                for other_id, other_run in challenge["runs"].items():
+                    if other_id == run_id:
+                        continue
+                    other_proc = other_run.get("process")
+                    if other_proc and other_proc.returncode is None:
+                        other_proc.terminate()
+                        other_run["status"] = "failed"
+                        other_run["process"] = None
+                        stop_event = {
+                            "type": "system",
+                            "message": (
+                                f"Stopped: {run['agent']} solved "
+                                "the challenge."
+                            ),
+                        }
+                        other_run["output_lines"].append(stop_event)
+                        append_output_event(
+                            challenge_id, other_id, stop_event
+                        )
+                        await broadcast(
+                            challenge_id, other_id, stop_event
+                        )
+                        await broadcast(challenge_id, other_id, {
+                            "type": "run_status",
+                            "run_id": other_id,
+                            "status": "failed",
+                        })
+        elif proc.returncode == 0 and not stream_error and saw_provider_message:
             # Clean exit does NOT mean solved — only flag detection
             # or successful platform submission counts as solved.
             # Mark as "completed" (agent finished without error).
@@ -3416,6 +3462,16 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             status_code=404,
         )
 
+    # Pre-compute connection ID for challenge linkage
+    _ident = config.get("username") or ""
+    if not _ident:
+        for _k in ("token", "team_token"):
+            _v = config.get(_k, "")
+            if _v:
+                _ident = _v[:8] + "..."
+                break
+    _conn_id = f"{plugin_name}:{config.get('url', '')}:{_ident}"
+
     created = []
     for ch_cfg in selected:
         if not ch_cfg.get("enabled", True):
@@ -3521,6 +3577,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "_plugin": plugin_name,
             "_remote_id": ch_remote_id,
             "_source_url": config.get("url", ""),
+            "_connection_id": _conn_id,
         }
         challenges[challenge_id] = challenge
         save_metadata(challenge)
@@ -3543,8 +3600,17 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
     # Save connection for future syncs
     if created:
         connections = load_connections()
-        # Update existing or add new
-        conn_id = f"{plugin_name}:{config.get('url', '')}"
+        # Build identity from URL + account info to distinguish
+        # multiple accounts on the same platform
+        identity = config.get("username") or ""
+        if not identity:
+            for key in ("token", "team_token"):
+                val = config.get(key, "")
+                if val:
+                    identity = val[:8] + "..."
+                    break
+        conn_id = f"{plugin_name}:{config.get('url', '')}:{identity}"
+        label_suffix = f" ({identity})" if identity and "..." not in identity else ""
         existing = next(
             (c for c in connections if c.get("id") == conn_id), None
         )
@@ -3555,7 +3621,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             connections.append({
                 "id": conn_id,
                 "plugin": plugin_name,
-                "label": f"{get_plugin(plugin_name).label} — {config.get('url', '')}",
+                "label": f"{get_plugin(plugin_name).label} — {config.get('url', '')}{label_suffix}",
                 "config": config,
                 "last_sync": datetime.now().isoformat(),
             })
