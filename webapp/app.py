@@ -2019,15 +2019,23 @@ def build_manager_prompt(challenge: dict, truncated_log: str) -> str:
         "of a high steer count — if each steer is making incremental "
         "progress, continue steering.",
         "",
-        "WAIT — The solver is making reasonable progress and doesn't "
-        "need intervention right now.",
+        "WAIT — The solver is making progress or hasn't had enough "
+        "time to explore yet. This should be your DEFAULT verdict. "
+        "Only intervene if the solver is clearly stuck in a loop or "
+        "has been repeating the same failing approach for multiple "
+        "attempts. Agents need time to work — do not steer just "
+        "because progress is slow.",
+        "",
+        "IMPORTANT: Prefer WAIT unless there is a clear reason to "
+        "intervene. Frequent steering disrupts the agent's workflow "
+        "and loses context. Only STEER when you can identify a specific "
+        "blind spot or technique the agent hasn't tried.",
         "",
         "Consider:",
-        "- What has the solver tried? What hasn't it tried?",
-        "- Is it repeating the same failed approaches?",
-        "- Are there unconventional techniques worth suggesting?",
+        "- Has the solver had enough time to explore? (if < 10 min, WAIT)",
+        "- Is it actually stuck in a loop, or just working methodically?",
+        "- Would your intervention add genuinely new information?",
         "- Is partial progress being made with each attempt?",
-        "- Would a different agent handle this better?",
         "",
         "Respond in EXACTLY this format:",
         "VERDICT: STEER | HANDOFF | SHELVE | WAIT",
@@ -2096,7 +2104,14 @@ def build_parallel_manager_prompt(
         "",
         "SHELVE — All agents have exhausted reasonable approaches.",
         "",
-        "WAIT — Agents are making reasonable progress.",
+        "WAIT — Agents are making progress or haven't had enough "
+        "time yet. This should be your DEFAULT verdict. Only SUMMARIZE "
+        "when agents have genuinely new findings to share, not just "
+        "because time has passed. Frequent interruptions lose context.",
+        "",
+        "IMPORTANT: Prefer WAIT unless agents have discovered findings "
+        "that would clearly help each other, or are clearly stuck in "
+        "loops repeating the same approaches.",
         "",
         "Respond in EXACTLY this format:",
         "VERDICT: SUMMARIZE | SHELVE | WAIT",
@@ -2951,11 +2966,16 @@ async def run_agent_task(
     provider = get_provider(run["agent"])
 
     if continue_msg:
+        # Build full prompt with steer instructions appended.
+        # Don't use --continue (terminated sessions may be corrupt).
+        base_prompt = build_prompt(challenge, run)
         prompt = (
+            f"{base_prompt}\n\n"
+            f"IMPORTANT GUIDANCE FROM PREVIOUS REVIEW:\n"
             f"{continue_msg}\n\n"
-            "Continue working on the CTF challenge. Do not stop after "
-            "addressing the above — keep going until you find the flag "
-            "or exhaust all approaches."
+            "Read FINDINGS.md first if it exists — it contains what was "
+            "already tried. Then follow the guidance above. Keep working "
+            "until you find the flag or exhaust all approaches."
         )
     else:
         prompt = build_prompt(challenge, run)
@@ -2992,7 +3012,9 @@ async def run_agent_task(
         "_codex_thread_id": run.get("_codex_thread_id"),
         "_opencode_session_id": run.get("_opencode_session_id"),
     }
-    cmd = provider.build_command(compat_dict, prompt, bool(continue_msg))
+    # Always start a fresh session — don't use --continue since terminated
+    # sessions may be corrupt and short prompts cause the agent to stop early
+    cmd = provider.build_command(compat_dict, prompt, False)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
