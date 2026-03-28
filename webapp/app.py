@@ -3371,7 +3371,43 @@ async def get_manager_state(request: Request) -> JSONResponse:
     challenge = challenges.get(challenge_id)
     if not challenge:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse(manager_state_for_metadata(challenge))
+
+    state = manager_state_for_metadata(challenge)
+    state["mode"] = challenge.get("mode", "single")
+
+    # Compute seconds until next manager review
+    is_managed = challenge.get("mode", "") in (
+        "single_managed", "parallel_managed"
+    )
+    state["is_managed"] = is_managed
+    state["next_review_seconds"] = None
+
+    if is_managed and challenge.get("status") == "solving":
+        settings = load_settings()
+        interval = settings.get("manager_interval", 10) * 60
+        manager_state = challenge.get("manager", {})
+        last_review = manager_state.get("last_review_at")
+        now = _time.monotonic()
+
+        if last_review:
+            elapsed = now - last_review
+            remaining = max(0, interval - elapsed)
+        else:
+            # First review: based on min_solve_time from any run's start
+            min_time = settings.get("manager_min_solve_time", 5) * 60
+            earliest_start = None
+            for run in challenge["runs"].values():
+                if run.get("solve_start"):
+                    if earliest_start is None or run["solve_start"] < earliest_start:
+                        earliest_start = run["solve_start"]
+            if earliest_start:
+                elapsed = now - earliest_start
+                remaining = max(0, min_time - elapsed)
+            else:
+                remaining = min_time
+        state["next_review_seconds"] = int(remaining)
+
+    return JSONResponse(state)
 
 
 # ---------------------------------------------------------------------------

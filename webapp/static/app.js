@@ -186,7 +186,6 @@ $("#login-form").addEventListener("submit", async (e) => {
     if (await loadAgentCatalog()) {
       await handleDeepLink();
       loadDefaultAgent();
-      checkAgentAuth();
     }
   } else {
     const data = await res.json().catch(() => ({}));
@@ -1006,7 +1005,7 @@ function updateCounters() {
 
 // === Detail Buttons ===
 $("#btn-back").addEventListener("click", () => {
-  disconnectAllWS(); stopTimer(); currentChallengeId = null;
+  disconnectAllWS(); stopTimer(); stopManagerTimer(); currentChallengeId = null;
   history.replaceState(null, "", "#");
   showView("dashboard"); loadChallenges();
 });
@@ -1608,6 +1607,10 @@ function renderRunEvent(runId, event) {
   // --- System messages ---
   if (event.type === "system") {
     if (event.subtype === "init") return;
+    // Refresh manager tab on manager events
+    if (event.subtype && event.subtype.startsWith("manager_")) {
+      loadManagerState();
+    }
     if (event.message) appendMsg(feed, event.message, "system-msg");
     scrollBottomIfActive(runId); return;
   }
@@ -2982,6 +2985,9 @@ $("#btn-settings-vpn-copy").addEventListener("click", () => {
 });
 
 // === Manager Sidebar Tab ===
+let _managerTimerInterval = null;
+let _managerNextReviewSeconds = null;
+
 async function loadManagerState() {
   if (!currentChallengeId) return;
   const res = await api(`/api/challenges/${currentChallengeId}/manager`);
@@ -2994,28 +3000,65 @@ function renderManagerTab(state) {
   const steerCount = state.steer_count || 0;
   const shelveReason = state.shelve_reason || "";
   const history = state.review_history || [];
+  const isManaged = state.is_managed;
+  const mode = state.mode || "single";
 
+  // Mode label
+  const modeLabels = {
+    single: "Single (no manager)",
+    single_managed: "Single (managed)",
+    parallel: "Parallel (no manager)",
+    parallel_managed: "Parallel (managed)",
+  };
+  const modeEl = $("#manager-mode-label");
+  modeEl.textContent = modeLabels[mode] || mode;
+  modeEl.className = isManaged ? "info-meta" : "info-meta text-muted";
+
+  // Next review countdown
+  stopManagerTimer();
+  const nextEl = $("#manager-next-review");
+  if (isManaged && state.next_review_seconds != null) {
+    _managerNextReviewSeconds = state.next_review_seconds;
+    updateManagerTimer();
+    _managerTimerInterval = setInterval(updateManagerTimer, 1000);
+    nextEl.classList.remove("hidden");
+  } else {
+    nextEl.textContent = "";
+    nextEl.classList.add("hidden");
+  }
+
+  // Steer count
   $("#manager-steer-count").textContent = steerCount
-    ? `Steered ${steerCount} time${steerCount !== 1 ? "s" : ""}`
-    : "No manager interventions yet";
+    ? `${steerCount} intervention${steerCount !== 1 ? "s" : ""}`
+    : isManaged ? "No interventions yet" : "";
+
+  // Shelve reason
   const shelveEl = $("#manager-shelve-reason");
   if (shelveReason) {
-    shelveEl.textContent = `Shelve reason: ${shelveReason}`;
+    shelveEl.textContent = `Shelved: ${shelveReason}`;
     shelveEl.classList.remove("hidden");
   } else {
     shelveEl.textContent = "";
     shelveEl.classList.add("hidden");
   }
 
+  // Review history
   const historyEl = $("#manager-history");
   if (!history.length) {
-    historyEl.innerHTML = '<div class="text-muted">No reviews yet</div>';
+    historyEl.innerHTML = isManaged
+      ? '<div class="text-muted">No reviews yet</div>'
+      : '<div class="text-muted">Manager not active for this mode</div>';
     return;
   }
   historyEl.innerHTML = history.slice().reverse().map((entry) => {
-    const verdictClass = entry.verdict === "STEER" ? "manager-verdict-steer"
-      : entry.verdict === "SHELVE" ? "manager-verdict-shelve"
-      : "manager-verdict-wait";
+    const verdictMap = {
+      STEER: "manager-verdict-steer",
+      SHELVE: "manager-verdict-shelve",
+      WAIT: "manager-verdict-wait",
+      HANDOFF: "manager-verdict-handoff",
+      SUMMARIZE: "manager-verdict-summarize",
+    };
+    const verdictClass = verdictMap[entry.verdict] || "manager-verdict-wait";
     const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : "";
     return `
     <div class="manager-review-entry">
@@ -3025,8 +3068,29 @@ function renderManagerTab(state) {
       </div>
       <div class="manager-review-reasoning">${esc(entry.reasoning || "")}</div>
       ${entry.instructions ? `<div class="manager-review-instructions"><strong>Instructions:</strong> ${esc(entry.instructions)}</div>` : ""}
+      ${entry.summary ? `<div class="manager-review-summary"><strong>Summary:</strong> ${esc(entry.summary)}</div>` : ""}
     </div>`;
   }).join("");
+}
+
+function updateManagerTimer() {
+  const el = $("#manager-next-review");
+  if (_managerNextReviewSeconds == null || _managerNextReviewSeconds <= 0) {
+    el.textContent = "Review imminent...";
+    return;
+  }
+  const m = Math.floor(_managerNextReviewSeconds / 60);
+  const s = _managerNextReviewSeconds % 60;
+  el.textContent = `Next review in ${m}:${String(s).padStart(2, "0")}`;
+  _managerNextReviewSeconds--;
+}
+
+function stopManagerTimer() {
+  if (_managerTimerInterval) {
+    clearInterval(_managerTimerInterval);
+    _managerTimerInterval = null;
+  }
+  _managerNextReviewSeconds = null;
 }
 
 // === Deep Linking ===
@@ -3076,8 +3140,7 @@ window.addEventListener("hashchange", () => {
   }
   if (!catalogOk) return;
 
-  // Show UI immediately, load settings and auth status in background
+  // Show UI immediately, load settings in background
   await handleDeepLink();
   loadDefaultAgent();   // non-blocking
-  checkAgentAuth();     // non-blocking
 })();

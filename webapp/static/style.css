@@ -1166,6 +1166,14 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 
 .manager-verdict-handoff { background: var(--accent-dim); color: var(--accent); }
 .manager-verdict-summarize { background: var(--purple-dim); color: var(--purple); }
+.manager-next-review {
+  font-family: var(--mono); font-size: 0.75rem; color: var(--accent);
+  padding: 0.3rem 0; font-weight: 600;
+}
+.manager-review-summary {
+  color: var(--text-muted); border-top: 1px solid var(--border);
+  padding-top: 0.3rem; margin-top: 0.3rem; font-size: 0.72rem;
+}
 .manager-pool-list { display: flex; flex-direction: column; gap: 0.4rem; }
 .manager-pool-row {
   display: flex; align-items: center; gap: 0.5rem;
