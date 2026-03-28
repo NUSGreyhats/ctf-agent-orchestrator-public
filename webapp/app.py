@@ -2362,6 +2362,19 @@ async def run_manager_review(challenge_id: str) -> None:
         settings, prompt, CHALLENGES_DIR / challenge_id
     )
 
+    # Broadcast the full manager response to all solving runs
+    if response_text.strip():
+        response_event = {
+            "type": "system",
+            "subtype": "manager_response",
+            "message": f"[Manager Response]\n{response_text.strip()[:2000]}",
+        }
+        for run_id, run in challenge["runs"].items():
+            if run["status"] == "solving":
+                run["output_lines"].append(response_event)
+                append_output_event(challenge_id, run_id, response_event)
+                await broadcast(challenge_id, run_id, response_event)
+
     if not response_text.strip():
         err_event = {
             "type": "system",
@@ -2938,7 +2951,12 @@ async def run_agent_task(
     provider = get_provider(run["agent"])
 
     if continue_msg:
-        prompt = continue_msg
+        prompt = (
+            f"{continue_msg}\n\n"
+            "Continue working on the CTF challenge. Do not stop after "
+            "addressing the above — keep going until you find the flag "
+            "or exhaust all approaches."
+        )
     else:
         prompt = build_prompt(challenge, run)
 
