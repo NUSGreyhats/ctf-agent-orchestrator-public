@@ -41,7 +41,7 @@ resource "digitalocean_firewall" "webapp" {
 
   inbound_rule {
     protocol         = "tcp"
-    port_range       = "8080"
+    port_range       = "443"
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
@@ -104,7 +104,7 @@ resource "null_resource" "provision" {
       echo ""
       echo "============================================"
       echo "  CTF Solver Web App"
-      echo "  URL:      https://$IP:8080"
+      echo "  URL:      https://$IP"
       echo "  Password: $(ssh $SSH_OPTS root@"$IP" cat /root/.ctf-solver-password)"
       echo "============================================"
       echo ""

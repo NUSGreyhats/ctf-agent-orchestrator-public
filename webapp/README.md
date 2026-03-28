@@ -41,7 +41,7 @@ sudo cp ctf-solver.service /etc/systemd/system/
 sudo systemctl enable --now ctf-solver
 ```
 
-The app starts on `https://0.0.0.0:8080` with a self-signed TLS certificate. The password is printed to stdout on first run and stored in `/root/.ctf-solver-password`.
+The app starts on `https://0.0.0.0:443` with a self-signed TLS certificate. The password is printed to stdout on first run and stored in `/root/.ctf-solver-password`.
 
 ## Features
 
