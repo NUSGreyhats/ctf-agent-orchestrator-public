@@ -354,10 +354,17 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 
 /* === Panel Layout === */
+#detail-view {
+  height: 100vh; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+#detail-view header { flex-shrink: 0; }
+#detail-view .error-banner { flex-shrink: 0; }
+
 .panels {
   display: grid;
   grid-template-columns: 1fr 340px;
-  height: calc(100vh - 48px);
+  flex: 1; min-height: 0;
   overflow: hidden;
 }
 
