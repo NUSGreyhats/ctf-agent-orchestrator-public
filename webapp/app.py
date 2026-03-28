@@ -2382,7 +2382,7 @@ async def run_manager_review(challenge_id: str) -> None:
         response_event = {
             "type": "system",
             "subtype": "manager_response",
-            "message": f"[Manager Response]\n{response_text.strip()[:2000]}",
+            "message": f"[Manager Response]\n{response_text.strip()}",
         }
         for run_id, run in challenge["runs"].items():
             if run["status"] == "solving":
@@ -2664,7 +2664,7 @@ async def _handle_parallel_managed_verdict(
                 # Stop current process
                 proc = run.get("process")
                 if proc and proc.returncode is None:
-                    r["_stop_reason"] = "steer"
+                    run["_stop_reason"] = "steer"
                     proc.terminate()
                     try:
                         await asyncio.wait_for(proc.wait(), timeout=5)
@@ -2704,7 +2704,7 @@ async def _handle_parallel_managed_verdict(
                 continue
             proc = run.get("process")
             if proc and proc.returncode is None:
-                r["_stop_reason"] = "shelve"
+                run["_stop_reason"] = "shelve"
                 proc.terminate()
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5)
