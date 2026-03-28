@@ -3241,12 +3241,40 @@ async def get_settings(request: Request) -> JSONResponse:
     return JSONResponse(load_settings())
 
 
+def _static_provider_metadata(provider) -> dict:
+    """Return provider metadata using static models only (no PTY discovery).
+
+    This avoids the 3-8 second PTY subprocess that _discover_models_from_cli
+    spawns for Claude and Copilot. The static models list is always available
+    and sufficient for the UI.
+    """
+    return {
+        "name": provider.name,
+        "label": provider.label,
+        "models": [
+            {"value": value, "label": label}
+            for value, label in provider.models
+        ] if provider.models else [
+            {"value": "", "label": "Provider default"}
+        ],
+        "default_model": provider.default_model,
+        "auth_connect_command": provider.auth_connect_command,
+        "autonomous_default": provider.autonomous_default,
+        "badge_mode": provider.badge_mode,
+        "effort_levels": [
+            {"value": value, "label": label}
+            for value, label in provider.effort_levels
+        ],
+        "default_effort": provider.default_effort,
+    }
+
+
 async def list_agents(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
     return JSONResponse({
         "agents": [
-            provider.metadata()
+            _static_provider_metadata(provider)
             for provider in PROVIDERS.values()
         ],
         "parallel_option": (

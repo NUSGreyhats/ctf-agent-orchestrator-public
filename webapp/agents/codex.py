@@ -354,7 +354,8 @@ def _normalize_live_event(event: dict, challenge: dict) -> dict | None:
     }:
         call_id = payload.get("call_id", "")
         if not call_id:
-            return None
+            # Generate a fallback ID so tool calls without call_id still render
+            call_id = f"codex-{id(payload)}"
 
         if event_type == "exec_command_begin":
             input_data = {
