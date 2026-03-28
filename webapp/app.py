@@ -2966,16 +2966,11 @@ async def run_agent_task(
     provider = get_provider(run["agent"])
 
     if continue_msg:
-        # Build full prompt with steer instructions appended.
-        # Don't use --continue (terminated sessions may be corrupt).
-        base_prompt = build_prompt(challenge, run)
         prompt = (
-            f"{base_prompt}\n\n"
-            f"IMPORTANT GUIDANCE FROM PREVIOUS REVIEW:\n"
             f"{continue_msg}\n\n"
-            "Read FINDINGS.md first if it exists — it contains what was "
-            "already tried. Then follow the guidance above. Keep working "
-            "until you find the flag or exhaust all approaches."
+            "Continue working on the CTF challenge. Do not stop after "
+            "addressing the above — keep going until you find the flag "
+            "or exhaust all approaches. Read FINDINGS.md if it exists."
         )
     else:
         prompt = build_prompt(challenge, run)
@@ -3012,9 +3007,7 @@ async def run_agent_task(
         "_codex_thread_id": run.get("_codex_thread_id"),
         "_opencode_session_id": run.get("_opencode_session_id"),
     }
-    # Always start a fresh session — don't use --continue since terminated
-    # sessions may be corrupt and short prompts cause the agent to stop early
-    cmd = provider.build_command(compat_dict, prompt, False)
+    cmd = provider.build_command(compat_dict, prompt, bool(continue_msg))
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
