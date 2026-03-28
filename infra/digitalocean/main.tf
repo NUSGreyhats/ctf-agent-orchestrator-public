@@ -58,7 +58,7 @@ resource "digitalocean_droplet" "ctf" {
 }
 
 resource "digitalocean_firewall" "webapp" {
-  name        = "allow-ctf-webapp"
+  name        = "ctf-webapp-${digitalocean_droplet.ctf.id}"
   droplet_ids = [digitalocean_droplet.ctf.id]
 
   inbound_rule {
