@@ -19,23 +19,42 @@ locals {
   ssh_public_key = file(pathexpand(var.ssh_public_key_path))
 }
 
-# Upload SSH key to DigitalOcean. If the key already exists on your
-# account, import it first:
-#   terraform import digitalocean_ssh_key.ctf <key_id>
-# You can find the key ID with:
-#   doctl compute ssh-key list
-resource "digitalocean_ssh_key" "ctf" {
-  name       = "ctf-workstation"
-  public_key = local.ssh_public_key
+# Compute the MD5 fingerprint of the SSH public key locally.
+# DigitalOcean accepts fingerprints for keys already on the account,
+# so this works regardless of whether the key was previously uploaded.
+resource "null_resource" "ssh_key_upload" {
+  triggers = {
+    public_key = md5(local.ssh_public_key)
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${var.do_token}" \
+        -d '{"name":"ctf-workstation","public_key":"${replace(local.ssh_public_key, "\n", "")}"}' \
+        "https://api.digitalocean.com/v2/account/keys" \
+        -o /dev/null -w "%%{http_code}" | grep -qE "^(201|422)$"
+    EOT
+  }
+}
+
+data "external" "ssh_fingerprint" {
+  program = ["bash", "-c", <<-EOT
+    FP=$(ssh-keygen -lf "${pathexpand(var.ssh_public_key_path)}" -E md5 2>/dev/null | awk '{print $2}' | sed 's/MD5://')
+    echo "{\"fingerprint\": \"$FP\"}"
+  EOT
+  ]
 }
 
 resource "digitalocean_droplet" "ctf" {
-  name      = "ctf-workstation"
-  region    = var.region
-  size      = var.droplet_size
-  image     = "ubuntu-24-04-x64"
-  ssh_keys  = [digitalocean_ssh_key.ctf.fingerprint]
-  user_data = file("${path.module}/startup.sh")
+  depends_on = [null_resource.ssh_key_upload]
+  name       = "ctf-workstation"
+  region     = var.region
+  size       = var.droplet_size
+  image      = "ubuntu-24-04-x64"
+  ssh_keys   = [data.external.ssh_fingerprint.result.fingerprint]
+  user_data  = file("${path.module}/startup.sh")
 }
 
 resource "digitalocean_firewall" "webapp" {
