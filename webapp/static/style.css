@@ -419,8 +419,9 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 /* === Activity Feed === */
 #activity-feed { padding: 0.5rem 0.75rem; }
 
-/* Chat layout */
+/* Chat layout — flex-shrink: 0 on all items prevents compression */
 .chat-bubble {
+  flex-shrink: 0;
   max-width: 80%; margin-bottom: 0.5rem; padding: 0.55rem 0.75rem;
   border-radius: 12px; font-size: 0.82rem; line-height: 1.6;
   word-break: break-word; position: relative;
@@ -471,6 +472,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 
 /* Tool groups (centered) */
 .chat-tool-group {
+  flex-shrink: 0;
   align-self: center; width: 90%; margin: 0.35rem auto;
   border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg-card); overflow: hidden;
@@ -490,6 +492,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 
 /* Legacy .step for backward compat with saved logs */
 .step {
+  flex-shrink: 0;
   margin-bottom: 0.4rem;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -584,6 +587,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 
 /* System/error messages */
 .system-msg {
+  flex-shrink: 0;
   align-self: center; text-align: center;
   padding: 0.25rem 0.75rem; color: var(--yellow);
   font-style: italic; font-size: 0.7rem;

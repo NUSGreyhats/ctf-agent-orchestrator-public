@@ -184,9 +184,9 @@ $("#login-form").addEventListener("submit", async (e) => {
     const data = await res.json();
     csrfToken = data.csrf_token;
     if (await loadAgentCatalog()) {
+      await handleDeepLink();
       loadDefaultAgent();
       checkAgentAuth();
-      await handleDeepLink();
     }
   } else {
     const data = await res.json().catch(() => ({}));
@@ -3058,19 +3058,26 @@ window.addEventListener("hashchange", () => {
 
 // === Init ===
 (async () => {
-  const res = await fetch("/api/challenges");
-  if (res.ok) {
-    const csrfRes = await fetch("/api/csrf-token");
-    if (csrfRes.ok) {
-      const data = await csrfRes.json();
-      csrfToken = data.csrf_token;
-    }
-    if (await loadAgentCatalog()) {
-      loadDefaultAgent();
-      checkAgentAuth();
-      await handleDeepLink();
-    }
-  } else {
+  // Single request to check auth — if it fails, show login
+  const authCheck = await fetch("/api/challenges");
+  if (!authCheck.ok) {
     showView("login");
+    return;
   }
+
+  // Auth valid — fetch CSRF token and agent catalog in parallel
+  const [csrfRes, catalogOk] = await Promise.all([
+    fetch("/api/csrf-token"),
+    loadAgentCatalog(),
+  ]);
+  if (csrfRes.ok) {
+    const data = await csrfRes.json();
+    csrfToken = data.csrf_token;
+  }
+  if (!catalogOk) return;
+
+  // Show UI immediately, load settings and auth status in background
+  await handleDeepLink();
+  loadDefaultAgent();   // non-blocking
+  checkAgentAuth();     // non-blocking
 })();
