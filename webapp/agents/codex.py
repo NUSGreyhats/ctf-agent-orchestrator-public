@@ -354,8 +354,12 @@ def _normalize_live_event(event: dict, challenge: dict) -> dict | None:
     }:
         call_id = payload.get("call_id", "")
         if not call_id:
-            # Generate a fallback ID so tool calls without call_id still render
-            call_id = f"codex-{id(payload)}"
+            # Generate and track a fallback ID
+            counter = challenge.setdefault("_codex_call_counter", 0)
+            challenge["_codex_call_counter"] = counter + 1
+            call_id = f"codex-tool-{counter}"
+            # Store as "last anonymous call" so _end/_delta can find it
+            challenge["_codex_anon_call_id"] = call_id
 
         if event_type == "exec_command_begin":
             input_data = {
@@ -388,7 +392,7 @@ def _normalize_live_event(event: dict, challenge: dict) -> dict | None:
         }
 
     if event_type == "exec_command_output_delta":
-        call_id = payload.get("call_id", "")
+        call_id = payload.get("call_id", "") or challenge.get("_codex_anon_call_id", "")
         if not call_id:
             return None
         chunk = _decode_exec_chunk(payload)
@@ -405,9 +409,11 @@ def _normalize_live_event(event: dict, challenge: dict) -> dict | None:
         "patch_apply_end",
         "web_search_end",
     }:
-        call_id = payload.get("call_id", "")
+        call_id = payload.get("call_id", "") or challenge.get("_codex_anon_call_id", "")
         if not call_id:
             return None
+        # Clear the anonymous call ID after the end event
+        challenge.pop("_codex_anon_call_id", None)
 
         buffered = tool_output.pop(call_id, {"stdout": "", "stderr": ""})
         if event_type == "exec_command_end":
@@ -496,7 +502,7 @@ def _normalize_live_event(event: dict, challenge: dict) -> dict | None:
         item = payload.get("item", {})
         item_type = item.get("type")
         if _is_tool_item(item):
-            call_id = _item_call_id(item)
+            call_id = _item_call_id(item) or challenge.pop("_codex_anon_item_id", "")
             if not call_id:
                 return None
             result, is_error = _item_tool_result(item)
@@ -557,7 +563,10 @@ def _normalize_live_event(event: dict, challenge: dict) -> dict | None:
             return None
         call_id = _item_call_id(item)
         if not call_id:
-            return None
+            counter = challenge.setdefault("_codex_call_counter", 0)
+            challenge["_codex_call_counter"] = counter + 1
+            call_id = f"codex-item-{counter}"
+            challenge["_codex_anon_item_id"] = call_id
         return {
             "type": "assistant",
             "message": {"content": [{
