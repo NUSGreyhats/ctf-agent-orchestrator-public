@@ -75,28 +75,32 @@ resource "null_resource" "provision" {
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command = <<-EOT
-      IP="${digitalocean_droplet.ctf.ipv4_address}"
-      SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5"
+      set -euo pipefail
 
-      # Wait for SSH to become available
-      echo "Waiting for SSH on $IP..."
+      IP="${digitalocean_droplet.ctf.ipv4_address}"
+      SSH_KEY_PATH="${pathexpand(var.ssh_private_key_path)}"
+      SSH_OPTS="-i $SSH_KEY_PATH -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5"
+      step() { echo "==> $1"; }
+
+      step "Waiting for SSH on $IP"
       until ssh $SSH_OPTS root@"$IP" true 2>/dev/null; do
         sleep 5
       done
 
-      # Copy all-things-ai to the VM
+      step "Copying repository to the VM"
       SRC_PATH="${var.all_things_ai_path}"
       SRC_PATH="$${SRC_PATH/#\~/$HOME}"
       scp -r $SSH_OPTS "$SRC_PATH" root@"$IP":/root/all-things-ai
 
-      # Run environment setup scripts
+      step "Running environment setup"
       ssh $SSH_OPTS root@"$IP" "bash /root/all-things-ai/environment/run.sh"
 
-      # Install and start the CTF solver web app
+      step "Installing and starting ctf-solver.service"
       ssh $SSH_OPTS root@"$IP" "cp /root/all-things-ai/webapp/ctf-solver.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now ctf-solver"
 
-      # Wait for password file to be generated, then print credentials
-      ssh $SSH_OPTS root@"$IP" "until [ -f /root/.ctf-solver-password ]; do sleep 1; done"
+      step "Waiting for generated web app password"
+      ssh $SSH_OPTS root@"$IP" "timeout 300 bash -c 'until [ -f /root/.ctf-solver-password ]; do sleep 1; done'"
+
       echo ""
       echo "============================================"
       echo "  CTF Solver Web App"
