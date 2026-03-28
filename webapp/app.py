@@ -14,7 +14,10 @@ Supports 4 solving modes:
 import asyncio
 import base64
 import json
+import logging
 import re
+
+log = logging.getLogger("ctf-solver")
 import mimetypes
 import os
 import secrets
@@ -2339,6 +2342,7 @@ async def run_manager_review(challenge_id: str) -> None:
     if not challenge or challenge["status"] != "solving":
         return
 
+    log.info("[%s] Manager review starting (mode=%s)", challenge_id[:8], challenge.get("mode"))
     settings = load_settings()
     manager_state = challenge.setdefault("manager", _default_manager_state())
     manager_state["last_review_at"] = _time.monotonic()
@@ -2417,6 +2421,11 @@ async def run_manager_review(challenge_id: str) -> None:
     parsed = parse_manager_response(response_text)
     verdict = parsed["verdict"]
 
+    log.info(
+        "[%s] Manager verdict: %s (mode=%s)",
+        challenge_id[:8], verdict, challenge.get("mode"),
+    )
+
     review_entry = {
         "timestamp": datetime.now().isoformat(),
         "verdict": verdict,
@@ -2460,6 +2469,7 @@ async def _handle_single_managed_verdict(
         return
 
     if verdict == "STEER" and parsed.get("instructions"):
+        log.info("[%s] Manager STEER run %s", challenge_id[:8], active_run_id[:8])
         manager_state["steer_count"] = (
             manager_state.get("steer_count", 0) + 1
         )
@@ -3088,6 +3098,13 @@ async def run_agent_task(
     }
     cmd = provider.build_command(compat_dict, prompt, bool(continue_msg))
 
+    log.info(
+        "[%s/%s] Starting %s: %s (continue=%s, cwd=%s)",
+        challenge_id[:8], run_id[:8], run["agent"],
+        " ".join(cmd[:6]) + ("..." if len(cmd) > 6 else ""),
+        bool(continue_msg), run_cwd,
+    )
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(run_cwd),
@@ -3198,6 +3215,13 @@ async def run_agent_task(
 
         await proc.wait()
 
+        log.info(
+            "[%s/%s] Process exited: code=%s, saw_msg=%s, stop_reason=%s",
+            challenge_id[:8], run_id[:8], proc.returncode,
+            run.get("_saw_provider_message", False),
+            run.get("_stop_reason", "none"),
+        )
+
         stream_error = run.get("_last_stream_error")
         saw_provider_message = run.get(
             "_saw_provider_message", False
@@ -3214,6 +3238,11 @@ async def run_agent_task(
         # If _stop_reason is set, the run was intentionally terminated
         # and its status is already correct — skip normal finalization.
         stop_reason = run.pop("_stop_reason", None)
+
+        log.info(
+            "[%s/%s] Finalizing: stop_reason=%s, current_status=%s",
+            challenge_id[:8], run_id[:8], stop_reason, run["status"],
+        )
 
         if stop_reason:
             # Status already set by the caller (steer, shelve, etc.)
