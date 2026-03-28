@@ -88,10 +88,10 @@ Paths are relative to `/root/all-things-ai/skills/`.
 
 | Skill | Category |
 |---|---|
-| `categories/forensics/disk/SKILL.md` | Disk forensics |
-| `categories/forensics/file/SKILL.md` | File forensics and steganography |
-| `categories/forensics/memory/SKILL.md` | Memory forensics |
-| `categories/forensics/network/SKILL.md` | Network forensics |
+| `forensics/disk/SKILL.md` | Disk forensics |
+| `forensics/file/SKILL.md` | File forensics and steganography |
+| `forensics/memory/SKILL.md` | Memory forensics |
+| `forensics/network/SKILL.md` | Network forensics |
 
 ### Tool skills (from this repo)
 

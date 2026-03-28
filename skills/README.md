@@ -17,10 +17,10 @@ Skills come from two sources:
 
 | Skill | Domain | Key Tools |
 |---|---|---|
-| [forensics/disk](categories/forensics/disk/SKILL.md) | Disk image analysis | TSK (mmls, fls, icat, fsstat), foremost, photorec, bulk_extractor |
-| [forensics/file](categories/forensics/file/SKILL.md) | File analysis & steganography | exiftool, binwalk, zsteg, steghide, stegseek, olevba, oledump |
-| [forensics/memory](categories/forensics/memory/SKILL.md) | Memory dump analysis | Volatility 3, mquire |
-| [forensics/network](categories/forensics/network/SKILL.md) | Packet capture analysis | tshark, tcpflow, scapy, ngrep, chaosreader |
+| [forensics/disk](forensics/disk/SKILL.md) | Disk image analysis | TSK (mmls, fls, icat, fsstat), foremost, photorec, bulk_extractor |
+| [forensics/file](forensics/file/SKILL.md) | File analysis & steganography | exiftool, binwalk, zsteg, steghide, stegseek, olevba, oledump |
+| [forensics/memory](forensics/memory/SKILL.md) | Memory dump analysis | Volatility 3, mquire |
+| [forensics/network](forensics/network/SKILL.md) | Packet capture analysis | tshark, tcpflow, scapy, ngrep, chaosreader |
 
 ### Tools
 
