@@ -3288,10 +3288,17 @@ async def run_agent_task(
             append_output_event(challenge_id, run_id, err_event)
             await broadcast(challenge_id, run_id, err_event)
     finally:
-        run["process"] = None
-        if run.get("solve_start"):
+        # Only clear process if it's still OUR process (not a replacement
+        # started by a steer/handoff while we were unwinding)
+        if run.get("process") is proc:
+            run["process"] = None
+        if run.get("solve_start") and run.get("process") is None:
             elapsed = _time.monotonic() - run["solve_start"]
             run["duration_ms"] = int(elapsed * 1000)
+        # Skip status updates if a new process has already taken over
+        # (steer/handoff started a replacement while we were unwinding)
+        if run.get("process") is not None and run.get("process") is not proc:
+            return
         challenge["status"] = derive_challenge_status(challenge)
         save_metadata(challenge)
         await broadcast(challenge_id, run_id, {
