@@ -1,3 +1,4 @@
-project_id          = "your-gcp-project-id"
-all_things_ai_path  = "~/all-things-ai"
-ssh_public_key_path = "~/.ssh/id_rsa.pub"
+project_id           = "your-gcp-project-id"
+all_things_ai_path   = "../.."
+ssh_public_key_path  = "~/.ssh/id_rsa.pub"
+ssh_private_key_path = "~/.ssh/id_rsa"

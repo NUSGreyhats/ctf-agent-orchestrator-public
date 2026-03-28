@@ -24,7 +24,7 @@ apt install -y \
     ca-certificates
 
 python3 -m pip install pwntools ipython pycryptodome sympy z3-solver gmpy2 angr unicorn uv zizmor \
-    starlette uvicorn python-multipart itsdangerous websockets
+    starlette uvicorn python-multipart itsdangerous websockets httpx
 
 uv tool install ruff
 uv tool install ty

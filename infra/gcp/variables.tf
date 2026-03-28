@@ -24,11 +24,17 @@ variable "boot_disk_size_gb" {
 variable "all_things_ai_path" {
   description = "Local path to all-things-ai directory"
   type        = string
-  default     = "~/all-things-ai"
+  default     = "../.."
 }
 
 variable "ssh_public_key_path" {
   description = "Path to SSH public key file for root access"
   type        = string
   default     = "~/.ssh/id_rsa.pub"
+}
+
+variable "ssh_private_key_path" {
+  description = "Path to SSH private key file"
+  type        = string
+  default     = "~/.ssh/id_rsa"
 }
