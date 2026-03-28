@@ -119,7 +119,7 @@ Tell the agent to spawn subagents to solve each challenge directory concurrently
 
 #### Option B: Web UI
 
-Open `https://<VM_IP>:8080` in your browser and log in with the password from the Terraform output (also stored in `/root/.ctf-solver-password`).
+Open `https://<VM_IP>` in your browser and log in with the password from the Terraform output (also stored in `/root/.ctf-solver-password`).
 
 1. Set your default agent using the toggle in the header
 2. Click **+ New Challenge**

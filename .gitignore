@@ -17,3 +17,4 @@ infra/.terraform.tfstate.lock.info
 infra/terraform.tfstate
 infra/terraform.tfstate.backup
 infra/terraform.tfvars
+.claude/

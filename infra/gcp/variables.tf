@@ -1,20 +1,24 @@
-variable "do_token" {
-  description = "DigitalOcean API token"
+variable "project_id" {
+  description = "GCP project ID"
   type        = string
-  sensitive   = true
 }
 
-variable "region" {
-  description = "DigitalOcean region"
+variable "zone" {
+  description = "GCP zone"
   type        = string
-  default     = "fra1"
+  default     = "asia-southeast1-c"
 }
 
-variable "droplet_size" {
-  description = "DigitalOcean droplet size slug (verify with: doctl compute size list)"
+variable "machine_type" {
+  description = "GCP machine type"
   type        = string
-  # Basic Shared CPU Premium AMD: 8 vCPU, 32 GB RAM, 400 GB NVMe SSD, 10 TB transfer
-  default = "s-8vcpu-32gb-amd"
+  default     = "e2-standard-4"
+}
+
+variable "boot_disk_size_gb" {
+  description = "Boot disk size in GB"
+  type        = number
+  default     = 100
 }
 
 variable "all_things_ai_path" {

@@ -68,7 +68,17 @@ resource "hcloud_firewall" "ctf" {
   rule {
     direction = "in"
     protocol  = "tcp"
-    port      = "8080"
+    port      = "443"
+    source_ips = [
+      "0.0.0.0/0",
+      "::/0",
+    ]
+  }
+
+  rule {
+    direction = "in"
+    protocol  = "udp"
+    port      = "51820"
     source_ips = [
       "0.0.0.0/0",
       "::/0",
@@ -191,7 +201,7 @@ resource "null_resource" "deploy_webapp" {
       echo ""
       echo "============================================"
       echo "  CTF Solver Web App"
-      echo "  URL:      https://$IP:8080"
+      echo "  URL:      https://$IP"
       echo "  Password: $(cat "$WEBAPP_PASSWORD_FILE")"
       echo ""
       echo "  Next Steps:"

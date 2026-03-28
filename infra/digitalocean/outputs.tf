@@ -7,5 +7,5 @@ output "external_ip" {
 }
 
 output "webapp_url" {
-  value = "https://${digitalocean_droplet.ctf.ipv4_address}:8080"
+  value = "https://${digitalocean_droplet.ctf.ipv4_address}"
 }

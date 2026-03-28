@@ -29,14 +29,18 @@
           <span class="toggle-label">Agent:</span>
           <div id="default-agent-buttons"></div>
         </div>
-        <div class="default-flag-wrapper">
-          <span class="toggle-label">Flag:</span>
-          <input type="text" id="default-flag-format" class="default-flag-input" placeholder="e.g. flag{...}">
+        <div class="header-dropdown">
+          <button id="btn-add-challenge" class="btn-primary">+ Add Challenge</button>
+          <div id="add-challenge-menu" class="dropdown-menu hidden">
+            <button id="btn-new-challenge" class="dropdown-item">Add Single Challenge</button>
+            <button id="btn-bulk-upload" class="dropdown-item">Bulk Upload</button>
+            <button id="btn-import" class="dropdown-item">Import from Platform</button>
+            <div id="sync-divider" class="dropdown-divider hidden"></div>
+            <div id="sync-connections"></div>
+          </div>
         </div>
-        <button id="btn-new-challenge" class="btn-primary">+ New Challenge</button>
-        <button id="btn-bulk-upload" class="btn-ghost">Bulk Upload</button>
         <button id="btn-usage" class="btn-ghost">Usage</button>
-        <button id="btn-theme-toggle" class="btn-ghost">Light</button>
+        <button id="btn-settings" class="btn-ghost">Settings</button>
         <button id="btn-logout" class="btn-ghost">Logout</button>
       </div>
     </header>
@@ -44,7 +48,7 @@
     <div id="empty-state" class="empty-state hidden">
       <div class="empty-icon">?</div>
       <p>No challenges yet</p>
-      <p class="text-muted">Click "New Challenge" to get started</p>
+      <p class="text-muted">Click "+ Add Challenge" to get started</p>
     </div>
   </div>
 
@@ -68,6 +72,111 @@
     </div>
   </div>
 
+  <!-- Settings View -->
+  <div id="settings-view" class="view hidden">
+    <header>
+      <button id="btn-settings-back" class="btn-ghost">&larr; Back</button>
+      <h1>Settings</h1>
+      <div class="header-actions">
+        <button id="btn-settings-save" class="btn-primary">Save</button>
+      </div>
+    </header>
+    <div class="settings-page">
+      <!-- General -->
+      <div class="settings-section">
+        <h2 class="settings-section-title">General</h2>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label for="settings-flag-format">Default Flag Format</label>
+            <input type="text" id="settings-flag-format" class="default-flag-input" placeholder="e.g. flag{...}">
+          </div>
+          <div class="form-group flex-1">
+            <label for="settings-theme">Theme</label>
+            <select id="settings-theme">
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Manager -->
+      <div class="settings-section">
+        <h2 class="settings-section-title">Manager Agent</h2>
+        <p class="settings-hint">The manager agent periodically reviews solving challenges in managed modes and steers, hands off, or shelves them if stuck.</p>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label for="settings-manager-agent">Agent</label>
+            <select id="settings-manager-agent"></select>
+          </div>
+          <div class="form-group flex-1">
+            <label for="settings-manager-model">Model</label>
+            <select id="settings-manager-model"></select>
+          </div>
+          <div class="form-group flex-1">
+            <label for="settings-manager-effort">Effort</label>
+            <select id="settings-manager-effort"></select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label for="settings-manager-interval">Review interval (min)</label>
+            <input type="number" id="settings-manager-interval" min="1" max="120" value="10">
+          </div>
+          <div class="form-group flex-1">
+            <label for="settings-manager-min-time">Min solve time before first review (min)</label>
+            <input type="number" id="settings-manager-min-time" min="1" max="60" value="5">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Agent Pool (for handoff &amp; parallel)</label>
+          <div id="settings-agent-pool" class="manager-pool-list"></div>
+        </div>
+      </div>
+
+      <!-- VPN -->
+      <div class="settings-section">
+        <h2 class="settings-section-title">VPN (WireGuard)</h2>
+        <div id="settings-vpn-not-installed" class="hidden">
+          <p class="text-muted">WireGuard is not installed. Run <code>012_install-wireguard.sh</code> to install it.</p>
+        </div>
+        <div id="settings-vpn-panel" class="hidden">
+          <div class="vpn-status-row">
+            <span>Status:</span>
+            <span id="settings-vpn-status" class="badge badge-pending">down</span>
+            <button id="btn-settings-vpn-toggle" class="btn-ghost btn-sm">Start</button>
+          </div>
+          <div id="settings-vpn-peer" class="vpn-peer-info hidden">
+            <div class="vpn-kv"><span class="vpn-k">Peer</span> <span id="settings-vpn-peer-key"></span></div>
+            <div class="vpn-kv"><span class="vpn-k">Endpoint</span> <span id="settings-vpn-peer-endpoint"></span></div>
+            <div class="vpn-kv"><span class="vpn-k">Transfer</span> <span id="settings-vpn-peer-transfer"></span></div>
+          </div>
+          <div class="form-group">
+            <label for="settings-vpn-key">Your WireGuard Public Key</label>
+            <input type="text" id="settings-vpn-key" placeholder="Paste your public key (wg pubkey output)">
+          </div>
+          <div class="form-group">
+            <label for="settings-vpn-networks">Internal Network CIDR(s)</label>
+            <input type="text" id="settings-vpn-networks" placeholder="e.g. 10.0.0.0/24, 192.168.1.0/24">
+            <span class="checkbox-hint">Networks the server should route through the VPN tunnel</span>
+          </div>
+          <div class="form-group form-group-inline">
+            <label class="checkbox-label">
+              <input type="checkbox" id="settings-vpn-dns" checked>
+              <span>DNS forwarding</span>
+            </label>
+          </div>
+          <button id="btn-settings-vpn-configure" class="btn-primary">Configure &amp; Start VPN</button>
+          <div id="settings-vpn-client-config" class="hidden">
+            <label>Client Config (copy to your WireGuard client)</label>
+            <pre id="settings-vpn-config-text" class="vpn-config-block"></pre>
+            <button id="btn-settings-vpn-copy" class="btn-ghost btn-sm">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- New Challenge Modal -->
   <div id="modal-overlay" class="modal-overlay hidden">
     <div class="modal">
@@ -82,6 +191,19 @@
             <input type="text" id="challenge-name" placeholder="e.g. Secret Image">
           </div>
           <div class="form-group flex-1">
+            <label for="challenge-mode">Mode</label>
+            <select id="challenge-mode">
+              <option value="single">Single</option>
+              <option value="single_managed">Single (Managed)</option>
+              <option value="parallel">Parallel</option>
+              <option value="parallel_managed">Parallel (Managed)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Single mode: agent + model + effort -->
+        <div id="single-agent-group" class="form-row">
+          <div class="form-group flex-1">
             <label for="challenge-agent">Agent</label>
             <select id="challenge-agent"></select>
           </div>
@@ -93,6 +215,12 @@
             <label for="challenge-effort">Effort</label>
             <select id="challenge-effort"></select>
           </div>
+        </div>
+
+        <!-- Parallel mode: agent checkboxes -->
+        <div id="parallel-agent-group" class="form-group hidden">
+          <label>Agents</label>
+          <div id="parallel-agent-checkboxes" class="agent-checkbox-group"></div>
         </div>
 
         <div class="form-group">
@@ -159,6 +287,18 @@
         <div class="bulk-global-bar">
           <div class="form-row">
             <div class="form-group flex-1">
+              <label for="bulk-mode">Mode</label>
+              <select id="bulk-mode">
+                <option value="single">Single</option>
+                <option value="single_managed">Single (Managed)</option>
+                <option value="parallel">Parallel</option>
+                <option value="parallel_managed">Parallel (Managed)</option>
+              </select>
+            </div>
+          </div>
+          <!-- Single mode options for bulk -->
+          <div id="bulk-single-group" class="form-row">
+            <div class="form-group flex-1">
               <label for="bulk-agent">Agent</label>
               <select id="bulk-agent"></select>
             </div>
@@ -170,6 +310,13 @@
               <label for="bulk-effort">Effort</label>
               <select id="bulk-effort"></select>
             </div>
+          </div>
+          <!-- Parallel mode options for bulk -->
+          <div id="bulk-parallel-group" class="form-group hidden">
+            <label>Agents</label>
+            <div id="bulk-parallel-checkboxes" class="agent-checkbox-group"></div>
+          </div>
+          <div class="form-row">
             <div class="form-group flex-1">
               <label for="bulk-flag">Default Flag Format</label>
               <input type="text" id="bulk-flag" placeholder="e.g. flag{...}">
@@ -201,12 +348,16 @@
       <div class="challenge-header-info">
         <h1 id="detail-name"></h1>
         <span id="detail-status" class="badge"></span>
+        <span id="detail-mode" class="badge badge-mode"></span>
         <span id="detail-model" class="badge badge-model"></span>
         <span id="detail-timer" class="header-stat"></span>
         <span id="detail-cost" class="header-stat"></span>
       </div>
       <div class="header-actions">
+        <button id="btn-start" class="btn-primary hidden">Start</button>
         <button id="btn-retry" class="btn-primary hidden">Retry</button>
+        <button id="btn-unsolve" class="btn-primary hidden">Un-solve</button>
+        <button id="btn-unshelve" class="btn-primary hidden">Un-shelve</button>
         <button id="btn-stop" class="btn-danger hidden">Stop</button>
         <button id="btn-sidebar-toggle" class="btn-ghost btn-sidebar-toggle">Panel</button>
         <button id="btn-delete" class="btn-ghost btn-ghost-danger">Delete</button>
@@ -226,26 +377,25 @@
             <button id="btn-export" class="btn-ghost btn-xs" title="Export as markdown">Export</button>
           </div>
         </div>
-        <div id="agent-tabs" class="agent-tabs">
-          <button class="agent-tab active" data-agent="main">Main</button>
-        </div>
-        <div id="agent-feeds" class="agent-feeds">
-          <div id="feed-main" class="panel-body agent-feed active"></div>
+        <div id="run-tabs" class="agent-tabs"></div>
+        <div id="run-feeds" class="agent-feeds">
           <button id="btn-scroll-bottom" class="btn-scroll-bottom hidden" title="Scroll to bottom">&#8595; Latest</button>
         </div>
         <div id="steer-bar" class="steer-bar">
+          <span id="steer-run-select" class="steer-agent-label hidden"></span>
           <input type="text" id="steer-input" placeholder="Send guidance to the agent..." autocomplete="off">
           <button id="btn-steer" class="btn-primary btn-sm">Send</button>
         </div>
       </div>
 
       <!-- Right sidebar -->
-      <div class="panel-sidebar">
+      <div class="panel panel-sidebar">
         <!-- Tabs -->
         <div class="sidebar-tabs">
           <button class="sidebar-tab active" data-tab="tab-info">Info</button>
           <button class="sidebar-tab" data-tab="tab-tools">Tools <span id="tool-counter" class="tab-badge">0</span></button>
           <button class="sidebar-tab" data-tab="tab-files">Files <span id="file-counter" class="tab-badge">0</span></button>
+          <button class="sidebar-tab" data-tab="tab-manager">Manager</button>
         </div>
 
         <!-- Info tab -->
@@ -270,9 +420,23 @@
         <div id="tab-files" class="sidebar-content">
           <div class="panel-body panel-body-scroll">
             <div id="files-toolbar">
+              <select id="files-run-select" class="hidden"></select>
               <button id="btn-refresh-files" class="btn-ghost btn-sm">Refresh</button>
             </div>
             <div id="files-tree"></div>
+          </div>
+        </div>
+
+        <!-- Manager tab -->
+        <div id="tab-manager" class="sidebar-content">
+          <div class="panel-body panel-body-scroll">
+            <div id="manager-info" class="manager-info">
+              <div id="manager-mode-label" class="info-meta"></div>
+              <div id="manager-next-review" class="manager-next-review"></div>
+              <div id="manager-steer-count" class="info-meta"></div>
+              <div id="manager-shelve-reason" class="info-meta"></div>
+            </div>
+            <div id="manager-history" class="manager-history"></div>
           </div>
         </div>
       </div>
@@ -291,6 +455,103 @@
       <div id="file-viewer-content" class="file-viewer-body"></div>
     </div>
   </div>
+
+  <!-- Import from Platform Modal -->
+  <div id="import-overlay" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h2>Import from Platform</h2>
+        <button id="import-close" class="btn-icon">&times;</button>
+      </div>
+
+      <!-- Phase 1: Select plugin and configure -->
+      <div id="import-phase-config">
+        <div class="form-group">
+          <label for="import-plugin">Platform</label>
+          <select id="import-plugin"></select>
+        </div>
+        <div id="import-config-fields"></div>
+        <div class="form-row">
+          <button id="btn-import-test" class="btn-ghost">Test Connection</button>
+          <button id="btn-import-fetch" class="btn-primary">Fetch Challenges</button>
+        </div>
+        <div id="import-status" class="hidden"></div>
+      </div>
+
+      <!-- Phase 2: Loading -->
+      <div id="import-phase-loading" class="hidden">
+        <div class="bulk-loading">
+          <div class="bulk-spinner"></div>
+          <p class="bulk-loading-text">Fetching challenges...</p>
+        </div>
+      </div>
+
+      <!-- Phase 3: Preview and select (mirrors bulk upload) -->
+      <div id="import-phase-preview" class="hidden">
+        <div class="bulk-global-bar">
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label for="import-mode">Mode</label>
+              <select id="import-mode">
+                <option value="single">Single</option>
+                <option value="single_managed">Single (Managed)</option>
+                <option value="parallel">Parallel</option>
+                <option value="parallel_managed">Parallel (Managed)</option>
+              </select>
+            </div>
+          </div>
+          <!-- Single mode options -->
+          <div id="import-single-group" class="form-row">
+            <div class="form-group flex-1">
+              <label for="import-agent">Agent</label>
+              <select id="import-agent"></select>
+            </div>
+            <div class="form-group flex-1" id="import-model-group">
+              <label for="import-model">Model</label>
+              <select id="import-model"></select>
+            </div>
+            <div class="form-group flex-1 hidden" id="import-effort-group">
+              <label for="import-effort">Effort</label>
+              <select id="import-effort"></select>
+            </div>
+          </div>
+          <!-- Parallel mode options -->
+          <div id="import-parallel-group" class="form-group hidden">
+            <label>Agents</label>
+            <div id="import-parallel-checkboxes" class="agent-checkbox-group"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label for="import-flag">Default Flag Format</label>
+              <input type="text" id="import-flag" placeholder="e.g. flag{...}">
+            </div>
+            <div class="form-group bulk-autonomous-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="import-autonomous">
+                <span>Autonomous</span>
+              </label>
+            </div>
+            <div class="form-group bulk-autonomous-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="import-paused">
+                <span>Pause (start manually)</span>
+              </label>
+            </div>
+            <div class="form-group bulk-autonomous-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="import-skip-solved">
+                <span>Skip already solved</span>
+              </label>
+            </div>
+          </div>
+        </div>
+        <div id="import-challenge-list" class="bulk-challenge-list"></div>
+        <button id="btn-import-submit" class="btn-primary btn-full">Import Selected</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- (Manager and VPN settings are now in the Settings view above) -->
 
   <!-- Auth Warning Modal -->
   <div id="auth-warning-overlay" class="modal-overlay hidden">
