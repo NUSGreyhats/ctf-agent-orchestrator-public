@@ -4179,12 +4179,14 @@ async def vpn_toggle(request: Request) -> JSONResponse:
 _manager_task: asyncio.Task | None = None
 
 
-async def on_startup():
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app):
     global _manager_task
     _manager_task = asyncio.create_task(manager_loop())
-
-
-async def on_shutdown():
+    yield
     if _manager_task and not _manager_task.done():
         _manager_task.cancel()
     for challenge in challenges.values():
@@ -4251,8 +4253,7 @@ routes = [
 
 app = Starlette(
     routes=routes,
-    on_startup=[on_startup],
-    on_shutdown=[on_shutdown],
+    lifespan=lifespan,
     middleware=[
         Middleware(
             SessionMiddleware,
