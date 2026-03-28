@@ -15,9 +15,18 @@ provider "digitalocean" {
   token = var.do_token
 }
 
+locals {
+  ssh_public_key = file(pathexpand(var.ssh_public_key_path))
+}
+
+# Upload SSH key to DigitalOcean. If the key already exists on your
+# account, import it first:
+#   terraform import digitalocean_ssh_key.ctf <key_id>
+# You can find the key ID with:
+#   doctl compute ssh-key list
 resource "digitalocean_ssh_key" "ctf" {
-  name       = "ctf-workstation-key"
-  public_key = file(var.ssh_public_key_path)
+  name       = "ctf-workstation"
+  public_key = local.ssh_public_key
 }
 
 resource "digitalocean_droplet" "ctf" {
