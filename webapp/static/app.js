@@ -1217,6 +1217,7 @@ function switchRunTab(runId) {
   if (btn) btn.classList.add("active");
   const feed = document.getElementById(`feed-${runId}`);
   if (feed) { feed.classList.add("active"); autoScroll = true; scrollBottom(); }
+  updateSteerRunSelect();
 }
 
 function addRunTab(run) {
@@ -1266,17 +1267,18 @@ function updateRunTabDot(runId, status) {
 
 // === Steer Run Select ===
 function updateSteerRunSelect() {
-  const sel = $("#steer-run-select");
+  const label = $("#steer-run-select");
   if (isParallelMode(currentChallengeMode) && currentRuns.length > 1) {
-    sel.classList.remove("hidden");
-    sel.innerHTML = '<option value="">All runs</option>' +
-      currentRuns.map((r) => {
-        const meta = getAgentMeta(r.agent);
-        return `<option value="${esc(r.id)}">${esc(meta.label || r.agent)}</option>`;
-      }).join("");
+    const activeRun = currentRuns.find((r) => r.id === activeRunId);
+    if (activeRun) {
+      const meta = getAgentMeta(activeRun.agent);
+      label.textContent = meta.label || activeRun.agent;
+      label.classList.remove("hidden");
+    } else {
+      label.classList.add("hidden");
+    }
   } else {
-    sel.classList.add("hidden");
-    sel.innerHTML = "";
+    label.classList.add("hidden");
   }
 }
 
@@ -2353,10 +2355,9 @@ async function sendSteer() {
   input.value = "";
 
   const body = { message: msg };
-  // In parallel mode, include run_id if user selected a specific run
-  const runSelect = $("#steer-run-select");
-  if (runSelect && runSelect.value) {
-    body.run_id = runSelect.value;
+  // Send to whichever run tab is currently active
+  if (activeRunId && activeRunId !== "__default__") {
+    body.run_id = activeRunId;
   }
 
   const res = await api(`/api/challenges/${currentChallengeId}/steer`, {

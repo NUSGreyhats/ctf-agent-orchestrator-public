@@ -753,12 +753,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .steer-bar input[type="text"]:focus { border-color: var(--accent); }
 .steer-bar input[type="text"]::placeholder { color: var(--text-dim); }
 
-#steer-run-select {
-  font-size: 0.65rem; padding: 0.3rem 0.5rem;
-  background: var(--bg-input); border: 1px solid var(--border);
-  border-radius: 6px; color: var(--text); font-family: var(--sans);
-  outline: none; cursor: pointer; max-width: 120px;
-}
+/* steer-run-select is now a label, styled via .steer-agent-label */
 
 /* user-steer-msg removed — now uses .chat-user bubble */
 
@@ -1096,8 +1091,14 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 /* Dot colors for run tab status */
 .dot-solved { background: var(--green); }
 
-/* Steer and file run selectors */
-#steer-run-select, #files-run-select {
+/* Steer agent label and file run selector */
+.steer-agent-label {
+  font-size: 0.65rem; font-weight: 700; color: var(--accent);
+  font-family: var(--mono); text-transform: uppercase;
+  padding: 0.15rem 0.4rem; background: var(--accent-dim);
+  border-radius: 4px; letter-spacing: 0.03em;
+}
+#files-run-select {
   background: var(--bg-input); color: var(--text);
   border: 1px solid var(--border); border-radius: 4px;
   font-size: 0.75rem; padding: 0.2rem 0.4rem;
