@@ -1,32 +1,28 @@
 # Skills
 
-Structured workflows that guide AI agents through CTF challenges. Skills are organized into three groups:
+Skills come from two sources:
 
-- **methodology/** — The entrypoint skill, read first for every challenge
-- **categories/** — CTF challenge categories (crypto, forensics, pwn, rev, web, misc)
-- **tools/** — Tool-specific skills referenced by category skills when needed
+1. **This repo** — methodology, forensics, and tool-specific skills
+2. **[ljagiello/ctf-skills](https://github.com/ljagiello/ctf-skills)** — category skills (pwn, web, crypto, rev, misc, osint, malware) installed during environment setup
 
-## Methodology
+## This Repo
+
+### Methodology
 
 | Skill | Description |
 |---|---|
 | [methodology](methodology/SKILL.md) | CTF workflow, triage, ctfgrep, flag-search techniques |
 
-## Categories
+### Forensics
 
 | Skill | Domain | Key Tools |
 |---|---|---|
-| [crypto](categories/crypto/SKILL.md) | Cryptography | RSA, AES, lattices, PRNGs, ECC, Z3, SageMath |
 | [forensics/disk](categories/forensics/disk/SKILL.md) | Disk image analysis | TSK (mmls, fls, icat, fsstat), foremost, photorec, bulk_extractor |
 | [forensics/file](categories/forensics/file/SKILL.md) | File analysis & steganography | exiftool, binwalk, zsteg, steghide, stegseek, olevba, oledump |
 | [forensics/memory](categories/forensics/memory/SKILL.md) | Memory dump analysis | Volatility 3, mquire |
 | [forensics/network](categories/forensics/network/SKILL.md) | Packet capture analysis | tshark, tcpflow, scapy, ngrep, chaosreader |
-| [misc](categories/misc/SKILL.md) | Mixed/ambiguous challenges | Encoding checks, OSINT, layered artifacts |
-| [pwn](categories/pwn/SKILL.md) | Binary exploitation | ROP, heap, shellcode, seccomp, format strings |
-| [rev](categories/rev/SKILL.md) | Reverse engineering | IDA, custom VMs, anti-debugging, bytecode |
-| [web](categories/web/SKILL.md) | Web exploitation | SQLi, SSTI, SSRF, path traversal, auth bypass |
 
-## Tools
+### Tools
 
 | Skill | Domain | Key Tools |
 |---|---|---|
@@ -34,3 +30,17 @@ Structured workflows that guide AI agents through CTF challenges. Skills are org
 | [ida](tools/ida/SKILL.md) | Static binary analysis | IDA Pro Domain API (idalib, headless mode) |
 | [kernel-gef](tools/kernel-gef/SKILL.md) | Kernel debugging | GDB + GEF via MCP |
 | [libdebug](tools/libdebug/SKILL.md) | Dynamic binary analysis | libdebug (ptrace-based scriptable debugging) |
+
+## External (ljagiello/ctf-skills)
+
+Installed to `~/.claude/skills/` by `environment/003_install-claude-code.sh`.
+
+| Skill | Category |
+|---|---|
+| ctf-crypto | Cryptography (RSA, AES, ECC, lattices, PRNGs, stream ciphers) |
+| ctf-pwn | Binary exploitation (stack, heap, ROP, kernel, format string) |
+| ctf-reverse | Reverse engineering (ELF, PE, custom VMs, WASM, anti-analysis) |
+| ctf-web | Web exploitation (SQLi, SSTI, JWT, OAuth, deserialization, Web3) |
+| ctf-misc | Mixed challenges (sandbox escapes, encodings, privilege escalation) |
+| ctf-osint | Open-source intelligence (geolocation, social media) |
+| ctf-malware | Malware analysis (obfuscated scripts, C2, dynamic analysis) |

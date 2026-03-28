@@ -65,23 +65,35 @@ flags that are trivially obfuscated — a very common CTF technique.
 After the quick search, identify the category and **read the matching skill
 file before doing any deeper analysis**. Do not continue with ad-hoc tooling.
 
-All skill paths are relative to `/root/all-things-ai/skills/`.
+Skills are installed in two locations. Use `/skills` for the slash-command
+shorthand when available, or read the SKILL.md file directly.
 
-### Category skills
+### Category skills (from ljagiello/ctf-skills)
+
+These are installed to `~/.claude/skills/` and available as slash commands.
 
 | Skill | Category |
 |---|---|
-| `categories/crypto/SKILL.md` | Cryptography |
+| `/ctf-crypto` | Cryptography (RSA, AES, ECC, lattices, PRNGs, stream ciphers) |
+| `/ctf-pwn` | Binary exploitation (stack, heap, ROP, kernel, format string, seccomp) |
+| `/ctf-reverse` | Reverse engineering (ELF, PE, custom VMs, WASM, anti-analysis) |
+| `/ctf-web` | Web exploitation (SQLi, SSTI, JWT, OAuth, deserialization, Web3) |
+| `/ctf-misc` | Mixed challenges (sandbox escapes, encodings, privilege escalation) |
+| `/ctf-osint` | Open-source intelligence (geolocation, social media) |
+| `/ctf-malware` | Malware analysis (obfuscated scripts, C2, dynamic analysis) |
+
+### Forensics skills (from this repo)
+
+Paths are relative to `/root/all-things-ai/skills/`.
+
+| Skill | Category |
+|---|---|
 | `categories/forensics/disk/SKILL.md` | Disk forensics |
 | `categories/forensics/file/SKILL.md` | File forensics and steganography |
 | `categories/forensics/memory/SKILL.md` | Memory forensics |
 | `categories/forensics/network/SKILL.md` | Network forensics |
-| `categories/misc/SKILL.md` | Mixed or unclear |
-| `categories/pwn/SKILL.md` | Binary exploitation |
-| `categories/rev/SKILL.md` | Reverse engineering |
-| `categories/web/SKILL.md` | Web exploitation |
 
-### Tool skills
+### Tool skills (from this repo)
 
 | Skill | Tool |
 |---|---|

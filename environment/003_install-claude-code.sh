@@ -20,7 +20,7 @@ git clone --depth 1 https://github.com/ljagiello/ctf-skills.git /tmp/ljagiello-c
 for d in /tmp/ljagiello-ctf-skills/*/; do
     name="$(basename "$d")"
     case "$name" in
-        solve-challenge|ctf-forensics) continue ;;
+        solve-challenge|ctf-forensics|ctf-writeup|scripts|tests|.github) continue ;;
     esac
     [ -d "$d" ] && cp -r "$d" ~/.claude/skills/
 done
