@@ -2098,28 +2098,37 @@ def build_parallel_manager_prompt(
     parts.extend([
         "Analyze ALL agents' progress and decide ONE of:",
         "",
+        "STEER — One specific agent is stuck but the others are fine. "
+        "Steer only that agent without interrupting the others. "
+        "Specify which agent and provide instructions.",
+        "",
         "SUMMARIZE — Cross-pollinate findings between agents. Provide "
         "a summary of what ALL agents have found, and provide tailored "
-        "steering instructions for each agent based on what others found.",
+        "steering instructions for each agent based on what others found. "
+        "This interrupts ALL agents.",
         "",
         "SHELVE — All agents have exhausted reasonable approaches.",
         "",
         "WAIT — Agents are making progress or haven't had enough "
-        "time yet. This should be your DEFAULT verdict. Only SUMMARIZE "
-        "when agents have genuinely new findings to share, not just "
-        "because time has passed. Frequent interruptions lose context.",
+        "time yet. This should be your DEFAULT verdict. Only intervene "
+        "when agents are clearly stuck or have findings to share. "
+        "Frequent interruptions lose context.",
         "",
-        "IMPORTANT: Prefer WAIT unless agents have discovered findings "
-        "that would clearly help each other, or are clearly stuck in "
-        "loops repeating the same approaches.",
+        "IMPORTANT: Prefer WAIT unless there is a clear reason to "
+        "intervene. Use STEER over SUMMARIZE when only one agent "
+        "needs help — don't interrupt all agents unnecessarily.",
         "",
         "Respond in EXACTLY this format:",
-        "VERDICT: SUMMARIZE | SHELVE | WAIT",
+        "VERDICT: STEER | SUMMARIZE | SHELVE | WAIT",
         "REASONING: <your analysis>",
-        "SUMMARY: <overall summary of findings across all agents>",
+        "STEER_AGENT: <agent name, only if VERDICT is STEER>",
+        "INSTRUCTIONS: <instructions for the steered agent, only if "
+        "VERDICT is STEER>",
+        "SUMMARY: <overall summary of findings across all agents, "
+        "if VERDICT is STEER or SUMMARIZE>",
     ])
 
-    # Add per-agent steer fields
+    # Add per-agent steer fields for SUMMARIZE
     for agent_name in run_logs:
         parts.append(
             f"STEER_{agent_name}: <tailored instructions for "
@@ -2138,6 +2147,7 @@ def parse_manager_response(text: str) -> dict:
         "summary": "",
         "handoff_agent": "",
         "handoff_context": "",
+        "steer_agent": "",
     }
     current_field = None
     current_lines: list[str] = []
@@ -2145,6 +2155,7 @@ def parse_manager_response(text: str) -> dict:
     field_prefixes = [
         ("VERDICT:", "verdict"),
         ("REASONING:", "reasoning"),
+        ("STEER_AGENT:", "steer_agent"),
         ("INSTRUCTIONS:", "instructions"),
         ("HANDOFF_AGENT:", "handoff_agent"),
         ("HANDOFF_CONTEXT:", "handoff_context"),
@@ -2637,7 +2648,75 @@ async def _handle_parallel_managed_verdict(
     """Handle manager verdict for parallel_managed mode."""
     verdict = parsed["verdict"]
 
-    if verdict == "SUMMARIZE":
+    if verdict == "STEER" and parsed.get("steer_agent"):
+        target_agent = parsed["steer_agent"].strip()
+        instructions = parsed.get("instructions", "")
+        if not instructions:
+            return
+
+        manager_state["steer_count"] = (
+            manager_state.get("steer_count", 0) + 1
+        )
+
+        # Find the run for this agent
+        target_run = None
+        target_run_id = None
+        for rid, run in challenge["runs"].items():
+            if run["agent"] == target_agent and run["status"] == "solving":
+                target_run = run
+                target_run_id = rid
+                break
+
+        if not target_run:
+            return
+
+        # Write summary if provided
+        summary = parsed.get("summary", "")
+        if summary:
+            run_cwd = get_run_cwd(challenge_id, target_run)
+            findings_path = run_cwd / "SUMMARY_FINDINGS.md"
+            findings_path.write_text(
+                f"# Cross-Agent Summary (from manager)\n\n"
+                f"{summary}\n"
+            )
+
+        # Stop only this agent
+        proc = target_run.get("process")
+        if proc and proc.returncode is None:
+            target_run["_stop_reason"] = "steer"
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+
+        steer_event = {
+            "type": "system",
+            "subtype": "manager_steer",
+            "message": (
+                f"[Manager Agent — Steer {target_agent}]\n"
+                f"Reasoning: {parsed['reasoning']}\n\n"
+                f"Instructions: {instructions}"
+            ),
+        }
+        target_run["output_lines"].append(steer_event)
+        append_output_event(challenge_id, target_run_id, steer_event)
+        await broadcast(challenge_id, target_run_id, steer_event)
+
+        target_run["status"] = "solving"
+        target_run["error"] = None
+        target_run["task"] = asyncio.create_task(
+            run_agent_task(
+                challenge_id,
+                target_run_id,
+                continue_msg=instructions,
+            )
+        )
+
+        save_metadata(challenge)
+        return
+
+    elif verdict == "SUMMARIZE":
         summary = parsed.get("summary", "")
         manager_state["steer_count"] = (
             manager_state.get("steer_count", 0) + 1
