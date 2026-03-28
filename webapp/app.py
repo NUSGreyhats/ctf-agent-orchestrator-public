@@ -2745,6 +2745,17 @@ def build_prompt(challenge: dict, run: dict) -> str:
         "solve. It contains the triage workflow and routes you to the "
         "correct category and tool skills.",
         "",
+        "Key tool rules:",
+        "- For ANY binary (ELF/PE): use IDA Pro for static analysis "
+        f"(read {_SKILLS_ROOT}/tools/ida/SKILL.md). Do NOT use objdump "
+        "or readelf as primary analysis — IDA is installed and licensed.",
+        "- For runtime debugging: use libdebug (read "
+        f"{_SKILLS_ROOT}/tools/libdebug/SKILL.md), not raw GDB.",
+        "- For kernel challenges: use GDB+GEF via MCP (read "
+        f"{_SKILLS_ROOT}/tools/kernel-gef/SKILL.md).",
+        "- Run ctfgrep first for a quick flag search across encodings.",
+        "- Maintain FINDINGS.md to track progress (survives context compaction).",
+        "",
         f"Challenge: {challenge['name']}",
     ]
     if challenge["description"]:
