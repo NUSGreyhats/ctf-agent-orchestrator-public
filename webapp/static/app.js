@@ -274,7 +274,6 @@ async function loadChallenges() {
     const runs = c.runs || [];
     const runCount = runs.length;
     const isPending = c.status === "pending";
-    const steerBadge = steerCount ? `<span class="card-steers">${steerCount} steer${steerCount !== 1 ? "s" : ""}</span>` : "";
 
     // Mode badge
     const modeLabel = mode.replace(/_/g, " ");
@@ -306,7 +305,6 @@ async function loadChallenges() {
       ${agentDisplay}
       <span class="card-files">${c.files.length} file${c.files.length !== 1 ? "s" : ""}</span>
       <span class="card-duration">${formatDuration(totalDuration)}</span>
-      ${steerBadge}
       ${isPending ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Start</button>` : ""}
       <button class="btn-card-delete" data-id="${c.id}" title="Delete">&times;</button>
     </div>`;

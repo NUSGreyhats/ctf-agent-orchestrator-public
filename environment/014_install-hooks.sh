@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOOKS_DIR="$SCRIPT_DIR/../hooks"
-HOOK_SCRIPT="/root/all-things-ai/hooks/check_breakthroughs.sh"
+HOOK_SCRIPT="$(realpath "$HOOKS_DIR/check_breakthroughs.sh")"
 
 echo "--- Installing breakthrough notification hooks ---"
 
@@ -21,7 +21,7 @@ hooks = settings.setdefault("hooks", {})
 post_hooks = hooks.setdefault("PostToolUse", [])
 
 # Check if already installed
-hook_cmd = f"{hook_script} $PWD"
+hook_cmd = hook_script
 already = any(
     isinstance(h, dict) and hook_cmd in h.get("command", "")
     for h in post_hooks
@@ -54,7 +54,7 @@ except (FileNotFoundError, json.JSONDecodeError):
     hooks = {}
 
 post_hooks = hooks.setdefault("PostToolUse", [])
-hook_cmd = f"{hook_script} $PWD"
+hook_cmd = hook_script
 already = any(
     isinstance(h, dict) and hook_cmd in h.get("command", "")
     for h in post_hooks

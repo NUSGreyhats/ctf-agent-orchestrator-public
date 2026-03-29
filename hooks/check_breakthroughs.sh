@@ -3,15 +3,25 @@
 # Outputs a notification if _shared/BREAKTHROUGHS.md has new content
 # since last check. Silent (no output) if nothing new.
 #
-# Usage: check_breakthroughs.sh <run_dir>
-# The run_dir should contain _shared/ symlink.
+# Walks up from $PWD to find _shared/BREAKTHROUGHS.md (agent may be
+# in a subdirectory).
 
-RUN_DIR="${1:-$(pwd)}"
-BREAKTHROUGHS="$RUN_DIR/_shared/BREAKTHROUGHS.md"
-SEEN_FILE="$RUN_DIR/.last_seen_breakthroughs"
+DIR="${PWD}"
+BREAKTHROUGHS=""
 
-[ ! -f "$BREAKTHROUGHS" ] && exit 0
+# Walk up to find _shared/BREAKTHROUGHS.md
+while [ "$DIR" != "/" ]; do
+    if [ -f "$DIR/_shared/BREAKTHROUGHS.md" ]; then
+        BREAKTHROUGHS="$DIR/_shared/BREAKTHROUGHS.md"
+        break
+    fi
+    DIR="$(dirname "$DIR")"
+done
 
+[ -z "$BREAKTHROUGHS" ] && exit 0
+
+# Anchor cache to the discovered root, not PWD (which may be a subdir)
+SEEN_FILE="${DIR}/.last_seen_breakthroughs"
 CURRENT_HASH=$(md5sum "$BREAKTHROUGHS" 2>/dev/null | cut -d' ' -f1)
 LAST_HASH=$(cat "$SEEN_FILE" 2>/dev/null)
 

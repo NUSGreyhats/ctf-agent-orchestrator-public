@@ -288,7 +288,10 @@ def _cleanup_old_previews() -> None:
         shutil.rmtree(base_dir, ignore_errors=True)
 
 
-def normalize_uploaded_path(raw_path: str) -> str | None:
+_PARALLEL_RESERVED = {"_shared", "_runs", "_files", ".last_seen_breakthroughs"}
+
+
+def normalize_uploaded_path(raw_path: str, parallel: bool = False) -> str | None:
     """Normalize an uploaded relative path and reject unsafe values."""
     if not raw_path:
         return None
@@ -306,6 +309,10 @@ def normalize_uploaded_path(raw_path: str) -> str | None:
         return None
     if parts[0] == STATE_ROOT_DIR.name:
         return None
+    # Block reserved names only in parallel mode
+    if parallel:
+        if parts[0] in _PARALLEL_RESERVED or parts[0].startswith("WORKING_NOTES_"):
+            return None
     return "/".join(parts)
 
 
@@ -919,13 +926,31 @@ async def create_challenge(request: Request) -> JSONResponse:
     # For single mode, only use first agent
     if mode == "single":
         agent_entries = agent_entries[:1]
+    else:
+        # Deduplicate agents in parallel mode (same agent twice would
+        # corrupt WORKING_NOTES symlinks)
+        seen_agents: set[str] = set()
+        deduped = []
+        for entry in agent_entries:
+            if entry["agent"] not in seen_agents:
+                seen_agents.add(entry["agent"])
+                deduped.append(entry)
+        agent_entries = deduped
 
     # Read uploaded files into memory
     file_data: dict[str, bytes] = {}
     for _, field in form.multi_items():
         if hasattr(field, "filename") and field.filename:
-            safe_path = normalize_uploaded_path(field.filename)
+            safe_path = normalize_uploaded_path(
+                field.filename, parallel=(mode == "parallel")
+            )
             if not safe_path:
+                if mode == "parallel":
+                    return JSONResponse(
+                        {"error": f"filename '{field.filename}' conflicts "
+                         "with reserved parallel workspace names"},
+                        status_code=400,
+                    )
                 continue
             if safe_path in file_data:
                 return JSONResponse(
@@ -1213,6 +1238,9 @@ async def bulk_upload(request: Request) -> JSONResponse:
 
         if mode == "single":
             agent_entries = agent_entries[:1]
+        else:
+            seen_a: set[str] = set()
+            agent_entries = [e for e in agent_entries if not (e["agent"] in seen_a or seen_a.add(e["agent"]))]
 
         model = body.get("model", "").strip()
         effort = body.get("effort", "").strip()
@@ -1248,6 +1276,19 @@ async def bulk_upload(request: Request) -> JSONResponse:
                 setup_parallel_shared_dir(challenge_id)
                 files_dest = challenge_dir / "_files"
                 files_dest.mkdir(parents=True, exist_ok=True)
+                # Filter reserved names that survived preview
+                filtered = [
+                    f for f in file_names
+                    if f.split("/")[0] not in _PARALLEL_RESERVED
+                    and not f.split("/")[0].startswith("WORKING_NOTES_")
+                ]
+                dropped = set(file_names) - set(filtered)
+                if dropped:
+                    log.warning(
+                        "Bulk upload: dropped reserved names for "
+                        "challenge %s: %s", ch_name, dropped
+                    )
+                file_names = filtered
             else:
                 files_dest = challenge_dir
 
@@ -2681,9 +2722,17 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                     config,
                     RemoteFile(name=rf["name"], url=rf["url"]),
                 )
-                safe_name = normalize_uploaded_path(rf["name"])
+                safe_name = normalize_uploaded_path(
+                    rf["name"], parallel=(mode == "parallel")
+                )
                 if not safe_name:
-                    safe_name = rf["name"].split("/")[-1].split("?")[0]
+                    fallback = rf["name"].split("/")[-1].split("?")[0]
+                    # Re-check reserved names on fallback
+                    _RESERVED = {"_shared", "_runs", "_files", ".last_seen_breakthroughs"}
+                    if fallback in _RESERVED or fallback.startswith("WORKING_NOTES_"):
+                        download_errors.append(f"{rf['name']}: reserved filename")
+                        continue
+                    safe_name = fallback
                 # Avoid collision: if path already used, suffix it
                 if safe_name in file_data:
                     base, ext = (safe_name.rsplit(".", 1) + [""])[:2]
@@ -2729,6 +2778,9 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             agent_entries = [{"agent": DEFAULT_AGENT, "model": ""}]
         if mode == "single":
             agent_entries = agent_entries[:1]
+        else:
+            seen_a2: set[str] = set()
+            agent_entries = [e for e in agent_entries if not (e["agent"] in seen_a2 or seen_a2.add(e["agent"]))]
 
         challenge_id = uuid.uuid4().hex[:12]
         challenge_dir = CHALLENGES_DIR / challenge_id
