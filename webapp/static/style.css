@@ -156,7 +156,6 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .badge-solving { background: var(--yellow-dim); color: var(--yellow); }
 .badge-solved { background: var(--green-dim); color: var(--green); }
 .badge-failed { background: var(--red-dim); color: var(--red); }
-.badge-shelved { background: var(--orange-dim); color: var(--orange); }
 .badge-completed { background: var(--blue-dim); color: var(--blue); }
 .badge-model { background: var(--purple-dim); color: var(--purple); font-family: var(--mono); }
 .badge-mode { background: var(--bg-input); color: var(--text-muted); font-family: var(--mono); font-size: 0.6rem; }
@@ -180,7 +179,6 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .challenge-card.status-solved { border-left: 3px solid var(--green); }
 .challenge-card.status-failed { border-left: 3px solid var(--red); }
 .challenge-card.status-pending { border-left: 3px solid var(--text-dim); }
-.challenge-card.status-shelved { border-left: 3px solid var(--orange); }
 .card-name { font-weight: 600; font-size: 0.85rem; }
 .card-desc { color: var(--text-muted); font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-agent { font-family: var(--mono); font-size: 0.65rem; color: var(--purple); }
@@ -879,7 +877,6 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .btn-copy:hover { background: var(--accent); color: #212121; border-color: var(--accent); }
 .btn-copy.copied { background: var(--green); color: #212121; border-color: var(--green); opacity: 1; }
 
-
 /* === WebSocket Indicator === */
 .ws-indicator {
   width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
@@ -1031,33 +1028,6 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 
 /* Manager */
-.manager-hint {
-  color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1rem; line-height: 1.4;
-}
-.manager-info { margin-bottom: 1rem; }
-.manager-history { display: flex; flex-direction: column; gap: 0.75rem; }
-.manager-review-entry {
-  background: var(--bg-input); border-radius: 6px; padding: 0.65rem 0.75rem;
-  font-size: 0.78rem; line-height: 1.45;
-}
-.manager-review-header {
-  display: flex; justify-content: space-between; align-items: center;
-  margin-bottom: 0.35rem;
-}
-.manager-verdict {
-  font-weight: 700; font-size: 0.7rem; text-transform: uppercase;
-  padding: 0.1rem 0.45rem; border-radius: 4px;
-}
-.manager-verdict-steer { background: var(--yellow-dim); color: var(--yellow); }
-.manager-verdict-shelve { background: var(--orange-dim); color: var(--orange); }
-.manager-verdict-wait { background: var(--green-dim); color: var(--green); }
-.manager-review-time { color: var(--text-dim); font-size: 0.7rem; font-family: var(--mono); }
-.manager-review-reasoning { color: var(--text); margin-bottom: 0.3rem; }
-.manager-review-instructions {
-  color: var(--text-muted); border-top: 1px solid var(--border);
-  padding-top: 0.3rem; margin-top: 0.3rem;
-}
-.status-shelved { border-left-color: var(--orange); }
 
 /* Mode badges */
 .badge-mode {
@@ -1167,28 +1137,6 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .import-status-ok { background: var(--green-dim); color: var(--green); }
 .import-status-error { background: var(--red-dim); color: var(--red); }
 .import-ch-solved { opacity: 0.6; }
-
-.manager-verdict-handoff { background: var(--accent-dim); color: var(--accent); }
-.manager-verdict-summarize { background: var(--purple-dim); color: var(--purple); }
-.manager-next-review {
-  font-family: var(--mono); font-size: 0.75rem; color: var(--accent);
-  padding: 0.3rem 0; font-weight: 600;
-}
-.manager-review-summary {
-  color: var(--text-muted); border-top: 1px solid var(--border);
-  padding-top: 0.3rem; margin-top: 0.3rem; font-size: 0.72rem;
-}
-.manager-pool-list { display: flex; flex-direction: column; gap: 0.4rem; }
-.manager-pool-row {
-  display: flex; align-items: center; gap: 0.5rem;
-}
-.manager-pool-row .agent-checkbox-item { min-width: 100px; }
-.manager-pool-row .pool-model-sel {
-  flex: 1; background: var(--bg-input); color: var(--text);
-  border: 1px solid var(--border); border-radius: 4px;
-  font-size: 0.75rem; padding: 0.2rem 0.4rem;
-  font-family: var(--mono);
-}
 
 /* VPN */
 .vpn-status-row {

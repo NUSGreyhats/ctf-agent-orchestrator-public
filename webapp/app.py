@@ -248,13 +248,15 @@ def setup_parallel_run_dir(challenge_id: str, run_id: str) -> Path:
     return run_dir
 
 
-def setup_parallel_cross_notes(challenge_id: str) -> None:
+def setup_parallel_cross_notes(challenge_id: str, runs: dict | None = None) -> None:
     """Symlink each agent's WORKING_NOTES into other agents' run dirs."""
-    challenge = challenges.get(challenge_id)
-    if not challenge or challenge["mode"] != "parallel":
-        return
+    if runs is None:
+        challenge = challenges.get(challenge_id)
+        if not challenge:
+            return
+        runs = challenge["runs"]
     runs_dir = CHALLENGES_DIR / challenge_id / "_runs"
-    run_items = list(challenge["runs"].items())
+    run_items = list(runs.items())
     for rid, run in run_items:
         run_dir = runs_dir / rid
         if not run_dir.exists():
@@ -976,10 +978,7 @@ async def create_challenge(request: Request) -> JSONResponse:
 
     # Set up cross-agent note visibility for parallel mode
     if is_parallel:
-        challenge_obj_tmp = {"runs": runs, "mode": mode}
-        challenges[challenge_id] = challenge_obj_tmp  # temp for cross_notes
-        setup_parallel_cross_notes(challenge_id)
-        del challenges[challenge_id]
+        setup_parallel_cross_notes(challenge_id, runs)
 
     challenge = {
         "id": challenge_id,
@@ -1278,12 +1277,8 @@ async def bulk_upload(request: Request) -> JSONResponse:
                 if is_parallel:
                     setup_parallel_run_dir(challenge_id, run_id)
 
-            # Cross-agent note visibility
             if is_parallel:
-                tmp = {"runs": runs, "mode": mode}
-                challenges[challenge_id] = tmp
-                setup_parallel_cross_notes(challenge_id)
-                del challenges[challenge_id]
+                setup_parallel_cross_notes(challenge_id, runs)
 
             challenge = {
                 "id": challenge_id,
@@ -2770,10 +2765,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                 setup_parallel_run_dir(challenge_id, run_id)
 
         if mode == "parallel":
-            tmp = {"runs": runs, "mode": mode}
-            challenges[challenge_id] = tmp
-            setup_parallel_cross_notes(challenge_id)
-            del challenges[challenge_id]
+            setup_parallel_cross_notes(challenge_id, runs)
 
         challenge = {
             "id": challenge_id,

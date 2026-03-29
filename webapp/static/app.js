@@ -1,6 +1,6 @@
 /* CTF Solver - Frontend
  *
- * Supports 4 challenge modes: single, single_managed, parallel, parallel_managed.
+ * Supports 2 challenge modes: single and parallel.
  * Each challenge has one or more "runs" — per-agent WebSocket streams.
  */
 
@@ -72,11 +72,7 @@ function getAgentMeta(name) {
 }
 
 function isParallelMode(mode) {
-  return mode === "parallel" || mode === "parallel_managed";
-}
-
-function isManagedMode(mode) {
-  return mode === "single_managed" || mode === "parallel_managed";
+  return mode === "parallel";
 }
 
 function getAgentAutonomousDefault(agentName) {
@@ -112,7 +108,7 @@ function renderAgentCheckboxes(container) {
     const modelOptions = (agent.models || []).map((m) =>
       `<option value="${esc(m.value)}">${esc(m.label)}</option>`
     ).join("");
-    return `<div class="manager-pool-row">
+    return `<div class="agent-model-row">
       <label class="checkbox-label agent-checkbox-item">
         <input type="checkbox" class="parallel-agent-cb" value="${esc(agent.name)}" checked>
         <span>${esc(agent.label)}</span>
