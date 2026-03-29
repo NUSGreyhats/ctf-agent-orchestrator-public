@@ -100,39 +100,6 @@
         </div>
       </div>
 
-      <!-- Manager -->
-      <div class="settings-section">
-        <h2 class="settings-section-title">Manager Agent</h2>
-        <p class="settings-hint">The manager agent periodically reviews solving challenges in managed modes and steers, hands off, or shelves them if stuck.</p>
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label for="settings-manager-agent">Agent</label>
-            <select id="settings-manager-agent"></select>
-          </div>
-          <div class="form-group flex-1">
-            <label for="settings-manager-model">Model</label>
-            <select id="settings-manager-model"></select>
-          </div>
-          <div class="form-group flex-1">
-            <label for="settings-manager-effort">Effort</label>
-            <select id="settings-manager-effort"></select>
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label for="settings-manager-interval">Review interval (min)</label>
-            <input type="number" id="settings-manager-interval" min="1" max="120" value="10">
-          </div>
-          <div class="form-group flex-1">
-            <label for="settings-manager-min-time">Min solve time before first review (min)</label>
-            <input type="number" id="settings-manager-min-time" min="1" max="60" value="5">
-          </div>
-        </div>
-        <div class="form-group">
-          <label>Agent Pool (for handoff &amp; parallel)</label>
-          <div id="settings-agent-pool" class="manager-pool-list"></div>
-        </div>
-      </div>
 
       <!-- VPN -->
       <div class="settings-section">
@@ -194,9 +161,7 @@
             <label for="challenge-mode">Mode</label>
             <select id="challenge-mode">
               <option value="single">Single</option>
-              <option value="single_managed">Single (Managed)</option>
               <option value="parallel">Parallel</option>
-              <option value="parallel_managed">Parallel (Managed)</option>
             </select>
           </div>
         </div>
@@ -290,9 +255,7 @@
               <label for="bulk-mode">Mode</label>
               <select id="bulk-mode">
                 <option value="single">Single</option>
-                <option value="single_managed">Single (Managed)</option>
                 <option value="parallel">Parallel</option>
-                <option value="parallel_managed">Parallel (Managed)</option>
               </select>
             </div>
           </div>
@@ -357,7 +320,6 @@
         <button id="btn-start" class="btn-primary hidden">Start</button>
         <button id="btn-retry" class="btn-primary hidden">Retry</button>
         <button id="btn-unsolve" class="btn-primary hidden">Un-solve</button>
-        <button id="btn-unshelve" class="btn-primary hidden">Un-shelve</button>
         <button id="btn-stop" class="btn-danger hidden">Stop</button>
         <button id="btn-sidebar-toggle" class="btn-ghost btn-sidebar-toggle">Panel</button>
         <button id="btn-delete" class="btn-ghost btn-ghost-danger">Delete</button>
@@ -395,7 +357,6 @@
           <button class="sidebar-tab active" data-tab="tab-info">Info</button>
           <button class="sidebar-tab" data-tab="tab-tools">Tools <span id="tool-counter" class="tab-badge">0</span></button>
           <button class="sidebar-tab" data-tab="tab-files">Files <span id="file-counter" class="tab-badge">0</span></button>
-          <button class="sidebar-tab" data-tab="tab-manager">Manager</button>
         </div>
 
         <!-- Info tab -->
@@ -427,18 +388,6 @@
           </div>
         </div>
 
-        <!-- Manager tab -->
-        <div id="tab-manager" class="sidebar-content">
-          <div class="panel-body panel-body-scroll">
-            <div id="manager-info" class="manager-info">
-              <div id="manager-mode-label" class="info-meta"></div>
-              <div id="manager-next-review" class="manager-next-review"></div>
-              <div id="manager-steer-count" class="info-meta"></div>
-              <div id="manager-shelve-reason" class="info-meta"></div>
-            </div>
-            <div id="manager-history" class="manager-history"></div>
-          </div>
-        </div>
       </div>
     </div>
   </div>
@@ -494,9 +443,7 @@
               <label for="import-mode">Mode</label>
               <select id="import-mode">
                 <option value="single">Single</option>
-                <option value="single_managed">Single (Managed)</option>
                 <option value="parallel">Parallel</option>
-                <option value="parallel_managed">Parallel (Managed)</option>
               </select>
             </div>
           </div>

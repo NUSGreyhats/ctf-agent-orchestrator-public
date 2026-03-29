@@ -278,8 +278,6 @@ async function loadChallenges() {
     const runs = c.runs || [];
     const runCount = runs.length;
     const isPending = c.status === "pending";
-    const isShelved = c.status === "shelved";
-    const steerCount = c.manager && c.manager.steer_count ? c.manager.steer_count : 0;
     const steerBadge = steerCount ? `<span class="card-steers">${steerCount} steer${steerCount !== 1 ? "s" : ""}</span>` : "";
 
     // Mode badge
@@ -314,7 +312,6 @@ async function loadChallenges() {
       <span class="card-duration">${formatDuration(totalDuration)}</span>
       ${steerBadge}
       ${isPending ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Start</button>` : ""}
-      ${isShelved ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Un-shelve</button>` : ""}
       <button class="btn-card-delete" data-id="${c.id}" title="Delete">&times;</button>
     </div>`;
   }).join("");
@@ -337,10 +334,7 @@ async function loadChallenges() {
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
       const cid = btn.dataset.id;
-      const ch = challenges.find((x) => x.id === cid);
-      const endpoint = ch && ch.status === "shelved"
-        ? `/api/challenges/${cid}/unshelve`
-        : `/api/challenges/${cid}/solve`;
+      const endpoint = `/api/challenges/${cid}/solve`;
       const res = await api(endpoint, { method: "POST" });
       if (res && res.ok) loadChallenges();
     })
@@ -979,7 +973,7 @@ async function openChallenge(id) {
   switchTab("tab-info");
   connectAllRuns(id, currentRuns);
   loadFiles();
-  loadManagerState();
+
   updateSteerRunSelect();
   updateFilesRunSelect();
 }
@@ -994,7 +988,7 @@ function updateButtons(status) {
   $("#btn-start").classList.toggle("hidden", status !== "pending");
   $("#btn-retry").classList.toggle("hidden", status !== "failed" && status !== "completed");
   $("#btn-unsolve").classList.toggle("hidden", status !== "solved");
-  $("#btn-unshelve").classList.toggle("hidden", status !== "shelved");
+
   $("#btn-stop").classList.toggle("hidden", status !== "solving");
 }
 
@@ -1005,7 +999,7 @@ function updateCounters() {
 
 // === Detail Buttons ===
 $("#btn-back").addEventListener("click", () => {
-  disconnectAllWS(); stopTimer(); stopManagerTimer(); currentChallengeId = null;
+  disconnectAllWS(); stopTimer(); currentChallengeId = null;
   history.replaceState(null, "", "#");
   showView("dashboard"); loadChallenges();
 });
@@ -1049,14 +1043,6 @@ $("#btn-stop").addEventListener("click", async () => {
   await api(`/api/challenges/${currentChallengeId}/stop`, { method: "POST" });
 });
 
-$("#btn-unshelve").addEventListener("click", async () => {
-  if (!currentChallengeId) return;
-  const res = await api(`/api/challenges/${currentChallengeId}/unshelve`, { method: "POST" });
-  if (res && res.ok) {
-    updateStatusBadge("solving"); updateButtons("solving"); startTimer();
-    $("#error-banner").classList.add("hidden");
-  }
-});
 
 $("#btn-delete").addEventListener("click", async () => {
   if (!currentChallengeId) return;
@@ -1194,7 +1180,7 @@ function initRunTabs(runs) {
       : run.status === "solved" ? "dot-solved"
       : run.status === "failed" ? "dot-error"
       : run.status === "completed" ? "dot-done"
-      : run.status === "shelved" ? "dot-error"
+
       : run.status === "pending" ? "dot-pending"
       : "dot-running";
     btn.innerHTML = `<span class="run-tab-dot ${dotClass}"></span>${esc(label)}`;
@@ -1259,7 +1245,7 @@ function updateRunTabDot(runId, status) {
     error: "dot-error",
     solving: "dot-running",
     completed: "dot-done",
-    shelved: "dot-error",
+
     pending: "dot-pending",
   };
   dot.className = `run-tab-dot ${dotMap[status] || "dot-done"}`;
@@ -1541,7 +1527,7 @@ function renderRunEvent(runId, event) {
     return;
   }
 
-  // --- New run added (manager handoff) ---
+  // --- New run added (new run added) ---
   if (event.type === "run_added" && event.run) {
     const r = event.run;
     if (currentRuns.some((x) => x.id === r.id)) return;
@@ -1568,12 +1554,12 @@ function renderRunEvent(runId, event) {
     updateStatusBadge(event.status);
     updateButtons(event.status);
     if (event.status === "solving") startTimer();
-    if (["solved", "failed", "shelved", "completed"].includes(event.status)) {
+    if (["solved", "failed", "completed"].includes(event.status)) {
       stopTimer();
-      if (event.status === "shelved") loadManagerState();
+
       if (views.detail.classList.contains("hidden")) {
-        const msgs = { solved: "Challenge solved!", failed: "Challenge failed", shelved: "Shelved by manager", completed: "Agent finished" };
-        const types = { solved: "success", failed: "error", shelved: "info", completed: "info" };
+        const msgs = { solved: "Challenge solved!", failed: "Challenge failed", completed: "Agent finished" };
+        const types = { solved: "success", failed: "error", completed: "info" };
         showToast(msgs[event.status] || event.status, types[event.status] || "info");
       }
     }
@@ -1609,10 +1595,6 @@ function renderRunEvent(runId, event) {
   // --- System messages ---
   if (event.type === "system") {
     if (event.subtype === "init") return;
-    // Refresh manager tab on manager events
-    if (event.subtype && event.subtype.startsWith("manager_")) {
-      loadManagerState();
-    }
     if (event.message) appendMsg(feed, event.message, "system-msg");
     scrollBottomIfActive(runId); return;
   }
@@ -2258,7 +2240,6 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "1") switchTab("tab-info");
   if (e.key === "2") switchTab("tab-tools");
   if (e.key === "3") switchTab("tab-files");
-  if (e.key === "4") switchTab("tab-manager");
 
   // Left/Right arrows to switch run tabs
   if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
@@ -2785,28 +2766,7 @@ function formatVpnBytes(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1) + " MB";
 }
 
-function updateSettingsManagerModels(currentModel, currentEffort) {
-  const agentName = $("#settings-manager-agent").value;
-  const meta = getAgentMeta(agentName);
-  const modelSel = $("#settings-manager-model");
-  modelSel.innerHTML = (meta.models || []).map((m) =>
-    `<option value="${esc(m.value)}">${esc(m.label)}</option>`
-  ).join("");
-  if (currentModel) modelSel.value = currentModel;
-
-  const effortSel = $("#settings-manager-effort");
-  const effortLevels = meta.effort_levels || [];
-  if (!effortLevels.length) {
-    effortSel.innerHTML = '<option value="">Provider default</option>';
-    effortSel.disabled = true;
-  } else {
-    effortSel.disabled = false;
-    effortSel.innerHTML = effortLevels.map((e) =>
-      `<option value="${esc(e.value)}">${esc(e.label)}</option>`
-    ).join("");
-    if (currentEffort) effortSel.value = currentEffort;
-  }
-}
+// (Manager settings removed — no manager in new collaborative model)
 
 function updateSettingsVpnStatus(data) {
   const badge = $("#settings-vpn-status");
@@ -2842,42 +2802,6 @@ $("#btn-settings").addEventListener("click", async () => {
   $("#settings-flag-format").value = s.default_flag_format || "";
   $("#settings-theme").value = s.theme || "dark";
 
-  // Manager agent/model/effort
-  const agentSel = $("#settings-manager-agent");
-  agentSel.innerHTML = agentCatalog.map((agent) =>
-    `<option value="${esc(agent.name)}">${esc(agent.label)}</option>`
-  ).join("");
-  agentSel.value = s.manager_agent || primaryAgentName();
-  updateSettingsManagerModels(s.manager_model || "sonnet", s.manager_effort || "");
-  agentSel.onchange = () => updateSettingsManagerModels("", "");
-
-  $("#settings-manager-interval").value = s.manager_interval || 10;
-  $("#settings-manager-min-time").value = s.manager_min_solve_time || 5;
-
-  // Agent pool
-  const poolContainer = $("#settings-agent-pool");
-  const currentPool = s.manager_agent_pool || [];
-  const poolMap = new Map();
-  for (const entry of currentPool) {
-    if (typeof entry === "string") poolMap.set(entry, "");
-    else if (entry && entry.agent) poolMap.set(entry.agent, entry.model || "");
-  }
-  poolContainer.innerHTML = agentCatalog.map((agent) => {
-    const inPool = currentPool.length === 0 || poolMap.has(agent.name);
-    const poolModel = poolMap.get(agent.name) || "";
-    const modelOptions = (agent.models || []).map((m) => {
-      const selected = m.value === poolModel ? "selected" : "";
-      return `<option value="${esc(m.value)}" ${selected}>${esc(m.label)}</option>`;
-    }).join("");
-    return `<div class="manager-pool-row">
-      <label class="checkbox-label agent-checkbox-item">
-        <input type="checkbox" class="pool-agent-cb" value="${esc(agent.name)}" ${inPool ? "checked" : ""}>
-        <span>${esc(agent.label)}</span>
-      </label>
-      <select class="pool-model-sel" data-agent="${esc(agent.name)}">${modelOptions}</select>
-    </div>`;
-  }).join("");
-
   // VPN
   const vpnRes = await api("/api/vpn");
   if (vpnRes) {
@@ -2901,21 +2825,9 @@ $("#btn-settings-back").addEventListener("click", () => {
 });
 
 $("#btn-settings-save").addEventListener("click", async () => {
-  const agentPool = Array.from($("#settings-agent-pool").querySelectorAll(".pool-agent-cb:checked"))
-    .map((cb) => {
-      const agentName = cb.value;
-      const modelSel = $("#settings-agent-pool").querySelector(`.pool-model-sel[data-agent="${agentName}"]`);
-      return { agent: agentName, model: modelSel ? modelSel.value : "" };
-    });
   const body = {
     default_flag_format: $("#settings-flag-format").value.trim(),
     theme: $("#settings-theme").value,
-    manager_agent: $("#settings-manager-agent").value,
-    manager_model: $("#settings-manager-model").value.trim() || "",
-    manager_effort: $("#settings-manager-effort").value || "",
-    manager_interval: parseInt($("#settings-manager-interval").value) || 10,
-    manager_min_solve_time: parseInt($("#settings-manager-min-time").value) || 5,
-    manager_agent_pool: agentPool,
   };
   const res = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
   if (res && res.ok) {
@@ -2985,114 +2897,7 @@ $("#btn-settings-vpn-copy").addEventListener("click", () => {
   });
 });
 
-// === Manager Sidebar Tab ===
-let _managerTimerInterval = null;
-let _managerNextReviewSeconds = null;
-
-async function loadManagerState() {
-  if (!currentChallengeId) return;
-  const res = await api(`/api/challenges/${currentChallengeId}/manager`);
-  if (!res) return;
-  const state = await res.json();
-  renderManagerTab(state);
-}
-
-function renderManagerTab(state) {
-  const steerCount = state.steer_count || 0;
-  const shelveReason = state.shelve_reason || "";
-  const history = state.review_history || [];
-  const isManaged = state.is_managed;
-  const mode = state.mode || "single";
-
-  // Mode label
-  const modeLabels = {
-    single: "Single (no manager)",
-    single_managed: "Single (managed)",
-    parallel: "Parallel (no manager)",
-    parallel_managed: "Parallel (managed)",
-  };
-  const modeEl = $("#manager-mode-label");
-  modeEl.textContent = modeLabels[mode] || mode;
-  modeEl.className = isManaged ? "info-meta" : "info-meta text-muted";
-
-  // Next review countdown
-  stopManagerTimer();
-  const nextEl = $("#manager-next-review");
-  if (isManaged && state.next_review_seconds != null) {
-    _managerNextReviewSeconds = state.next_review_seconds;
-    updateManagerTimer();
-    _managerTimerInterval = setInterval(updateManagerTimer, 1000);
-    nextEl.classList.remove("hidden");
-  } else {
-    nextEl.textContent = "";
-    nextEl.classList.add("hidden");
-  }
-
-  // Steer count
-  $("#manager-steer-count").textContent = steerCount
-    ? `${steerCount} intervention${steerCount !== 1 ? "s" : ""}`
-    : isManaged ? "No interventions yet" : "";
-
-  // Shelve reason
-  const shelveEl = $("#manager-shelve-reason");
-  if (shelveReason) {
-    shelveEl.textContent = `Shelved: ${shelveReason}`;
-    shelveEl.classList.remove("hidden");
-  } else {
-    shelveEl.textContent = "";
-    shelveEl.classList.add("hidden");
-  }
-
-  // Review history
-  const historyEl = $("#manager-history");
-  if (!history.length) {
-    historyEl.innerHTML = isManaged
-      ? '<div class="text-muted">No reviews yet</div>'
-      : '<div class="text-muted">Manager not active for this mode</div>';
-    return;
-  }
-  historyEl.innerHTML = history.slice().reverse().map((entry) => {
-    const verdictMap = {
-      STEER: "manager-verdict-steer",
-      SHELVE: "manager-verdict-shelve",
-      WAIT: "manager-verdict-wait",
-      HANDOFF: "manager-verdict-handoff",
-      SUMMARIZE: "manager-verdict-summarize",
-    };
-    const verdictClass = verdictMap[entry.verdict] || "manager-verdict-wait";
-    const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : "";
-    return `
-    <div class="manager-review-entry">
-      <div class="manager-review-header">
-        <span class="manager-verdict ${verdictClass}">${esc(entry.verdict)}</span>
-        <span class="manager-review-time">${esc(ts)}</span>
-      </div>
-      <div class="manager-review-reasoning">${esc(entry.reasoning || "")}</div>
-      ${entry.instructions ? `<div class="manager-review-instructions"><strong>Instructions:</strong> ${esc(entry.instructions)}</div>` : ""}
-      ${entry.summary ? `<div class="manager-review-summary"><strong>Summary:</strong> ${esc(entry.summary)}</div>` : ""}
-    </div>`;
-  }).join("");
-}
-
-function updateManagerTimer() {
-  const el = $("#manager-next-review");
-  if (_managerNextReviewSeconds == null || _managerNextReviewSeconds <= 0) {
-    el.textContent = "Review imminent...";
-    return;
-  }
-  const m = Math.floor(_managerNextReviewSeconds / 60);
-  const s = _managerNextReviewSeconds % 60;
-  el.textContent = `Next review in ${m}:${String(s).padStart(2, "0")}`;
-  _managerNextReviewSeconds--;
-}
-
-function stopManagerTimer() {
-  if (_managerTimerInterval) {
-    clearInterval(_managerTimerInterval);
-    _managerTimerInterval = null;
-  }
-  _managerNextReviewSeconds = null;
-}
+// (Manager sidebar tab removed — agents collaborate via WORKING_NOTES and BREAKTHROUGHS.md)
 
 // === Deep Linking ===
 function getDeepLinkChallengeId() {
