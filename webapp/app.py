@@ -2068,7 +2068,8 @@ async def run_agent_task(
             f"{continue_msg}\n\n"
             "Continue working on the CTF challenge. Do not stop after "
             "addressing the above — keep going until you find the flag "
-            "or exhaust all approaches. Read FINDINGS.md if it exists."
+            "or exhaust all approaches. Read your WORKING_NOTES if you "
+            "need to recall what was tried."
         )
     else:
         prompt = build_prompt(challenge, run)
