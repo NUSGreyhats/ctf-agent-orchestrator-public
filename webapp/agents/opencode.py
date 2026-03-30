@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
+import socket
 import subprocess
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from .base import AgentProvider
+
+log = logging.getLogger("ctf-solver.opencode")
 
 OPENCODE_AUTH_FILE = (
     Path.home() / ".local" / "share" / "opencode" / "auth.json"
@@ -358,6 +364,344 @@ def _get_usage_data() -> dict | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# SDK-based agent runner
+# ---------------------------------------------------------------------------
+
+_OPENCODE_SERVE_PORT = 4096
+_OPENCODE_SERVE_PROC: subprocess.Popen | None = None
+
+
+def _is_port_open(port: int, host: str = "127.0.0.1") -> bool:
+    """Check if a TCP port is accepting connections."""
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except (OSError, ConnectionRefusedError):
+        return False
+
+
+def _ensure_opencode_serve() -> None:
+    """Start ``opencode serve`` if not already running on the expected port."""
+    global _OPENCODE_SERVE_PROC
+
+    if _is_port_open(_OPENCODE_SERVE_PORT):
+        return
+
+    # Previous process may have died — clean up handle
+    if _OPENCODE_SERVE_PROC is not None:
+        _OPENCODE_SERVE_PROC.poll()
+        if _OPENCODE_SERVE_PROC.returncode is not None:
+            _OPENCODE_SERVE_PROC = None
+
+    if _OPENCODE_SERVE_PROC is not None:
+        return
+
+    log.info("Starting opencode serve on port %d", _OPENCODE_SERVE_PORT)
+    _OPENCODE_SERVE_PROC = subprocess.Popen(
+        ["opencode", "serve", "--port", str(_OPENCODE_SERVE_PORT)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Wait for the server to become ready (up to 15 seconds)
+    for _ in range(30):
+        if _is_port_open(_OPENCODE_SERVE_PORT):
+            log.info("opencode serve is ready")
+            return
+        import time
+        time.sleep(0.5)
+
+    log.warning("opencode serve did not become ready in time")
+
+
+def _parse_message_parts(response: dict) -> list[dict]:
+    """Extract normalized content blocks from a send_message response."""
+    content_blocks: list[dict] = []
+
+    # The response may contain the assistant message directly or nested
+    # under a key like "message", "content", or "parts".
+    parts = None
+    if isinstance(response, dict):
+        parts = (
+            response.get("parts")
+            or response.get("content")
+            or response.get("message", {}).get("parts")
+            or response.get("message", {}).get("content")
+        )
+
+    # If the response itself has a top-level text, treat the whole thing
+    # as a single text response.
+    if parts is None:
+        text = ""
+        if isinstance(response, dict):
+            for key in ("text", "output", "result", "response", "content"):
+                val = response.get(key)
+                if isinstance(val, str) and val.strip():
+                    text = val.strip()
+                    break
+        if text:
+            content_blocks.append({"type": "text", "text": text})
+        return content_blocks
+
+    if not isinstance(parts, list):
+        parts = [parts]
+
+    for part in parts:
+        if not isinstance(part, dict):
+            if isinstance(part, str) and part.strip():
+                content_blocks.append({"type": "text", "text": part})
+            continue
+
+        part_type = part.get("type", "")
+
+        if part_type == "text":
+            text = part.get("text", "")
+            if text:
+                content_blocks.append({"type": "text", "text": text})
+
+        elif part_type == "reasoning":
+            text = part.get("text", "")
+            if text:
+                content_blocks.append({
+                    "type": "thinking",
+                    "thinking": text,
+                })
+
+        elif part_type == "tool":
+            tool_name = part.get("tool", part.get("name", "tool"))
+            call_id = _part_call_id(part)
+            state = part.get("state", {})
+            status = state.get("status", "")
+
+            if status in {"completed", "error"}:
+                # Emit both the tool_use and tool_result
+                if call_id:
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": tool_name,
+                        "input": state.get("input", {}),
+                    })
+                raw = (
+                    state.get("output")
+                    if status == "completed"
+                    else state.get("error", "")
+                )
+                result_content = (
+                    raw if isinstance(raw, str) else json.dumps(raw)
+                )
+                content_blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": call_id,
+                    "content": result_content,
+                    "is_error": status == "error",
+                    "name": tool_name,
+                    "input": state.get("input", {}),
+                })
+            else:
+                # Pending / running
+                if call_id:
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": tool_name,
+                        "input": state.get("input", {}),
+                    })
+
+        elif part_type == "tool_use":
+            call_id = _part_call_id(part)
+            content_blocks.append({
+                "type": "tool_use",
+                "id": call_id or "",
+                "name": part.get("name", part.get("tool", "tool")),
+                "input": part.get("input", {}),
+            })
+
+        elif part_type == "tool_result":
+            call_id = (
+                part.get("tool_use_id")
+                or _part_call_id(part)
+            )
+            content_blocks.append({
+                "type": "tool_result",
+                "tool_use_id": call_id or "",
+                "content": part.get("content", ""),
+                "is_error": part.get("is_error", False),
+            })
+
+    return content_blocks
+
+
+async def _run_agent_sdk(
+    prompt: str,
+    model: str = "",
+    effort: str = "",
+    cwd: str | Path = ".",
+    continue_session: bool = False,
+    session_state: dict | None = None,
+    **kwargs,
+) -> AsyncIterator[dict]:
+    """Run OpenCode via the opencode_sdk, yielding normalized events.
+
+    Since the SDK is synchronous (REST-based), we run blocking calls in a
+    thread executor to avoid blocking the async event loop.
+    """
+    from opencode_sdk import OpencodeClient
+
+    loop = asyncio.get_running_loop()
+
+    # 1. Ensure the opencode serve process is running
+    try:
+        await loop.run_in_executor(None, _ensure_opencode_serve)
+    except Exception as exc:
+        log.error("Failed to start opencode serve: %s", exc)
+        yield {"type": "error", "message": f"Failed to start opencode serve: {exc}"}
+        return
+
+    # 2. Create SDK client
+    base_url = f"http://127.0.0.1:{_OPENCODE_SERVE_PORT}"
+    try:
+        client = OpencodeClient(base_url=base_url)
+    except Exception as exc:
+        log.error("Failed to create OpencodeClient: %s", exc)
+        yield {"type": "error", "message": f"Failed to create OpencodeClient: {exc}"}
+        return
+
+    # 3. Create or reuse session
+    session_id = None
+    if continue_session and session_state:
+        session_id = session_state.get("opencode_session_id")
+
+    try:
+        if session_id:
+            # Reuse existing session
+            log.info("Reusing OpenCode session %s", session_id)
+        else:
+            # Create a new session
+            session = await loop.run_in_executor(
+                None,
+                lambda: client.create_session(title="CTF Challenge"),
+            )
+            session_id = session.get("id") or session.get("session_id", "")
+            log.info("Created OpenCode session %s", session_id)
+    except Exception as exc:
+        log.error("Failed to create OpenCode session: %s", exc)
+        yield {
+            "type": "error",
+            "message": f"Failed to create OpenCode session: {exc}",
+        }
+        return
+
+    if not session_id:
+        yield {
+            "type": "error",
+            "message": "OpenCode session creation returned no session ID",
+        }
+        return
+
+    # Store session ID for future continuation
+    if session_state is not None:
+        session_state["opencode_session_id"] = session_id
+
+    # 4. Send message (blocking call in executor)
+    try:
+        response = await loop.run_in_executor(
+            None,
+            lambda: client.send_message(session_id, prompt),
+        )
+    except Exception as exc:
+        log.error("OpenCode send_message failed: %s", exc)
+        yield {
+            "type": "error",
+            "message": f"OpenCode send_message failed: {exc}",
+        }
+        return
+
+    if not isinstance(response, dict):
+        # Treat non-dict response as plain text
+        if response is not None:
+            yield {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": str(response)}],
+                },
+            }
+        return
+
+    # 5. Check for errors in response
+    error = response.get("error")
+    if error:
+        msg = (
+            _extract_error_message(error)
+            if isinstance(error, dict)
+            else str(error)
+        )
+        yield {"type": "error", "message": msg or "OpenCode error"}
+        return
+
+    # 6. Parse response into normalized events
+    content_blocks = _parse_message_parts(response)
+
+    # Separate tool_use/tool_result blocks from text/thinking blocks
+    # to emit them as properly typed events
+    assistant_content: list[dict] = []
+    tool_result_content: list[dict] = []
+
+    for block in content_blocks:
+        if block["type"] == "tool_result":
+            # First, flush any accumulated assistant content
+            if assistant_content:
+                yield {
+                    "type": "assistant",
+                    "message": {"content": assistant_content},
+                }
+                assistant_content = []
+            tool_result_content.append(block)
+        elif block["type"] == "tool_use":
+            # tool_use goes as assistant content
+            assistant_content.append(block)
+            # Flush tool_use immediately so it appears before its result
+            yield {
+                "type": "assistant",
+                "message": {"content": assistant_content},
+            }
+            assistant_content = []
+        else:
+            # text or thinking blocks
+            assistant_content.append(block)
+
+    # Flush remaining assistant content
+    if assistant_content:
+        yield {
+            "type": "assistant",
+            "message": {"content": assistant_content},
+        }
+
+    # Emit tool results as user messages (matching the convention)
+    for block in tool_result_content:
+        yield {
+            "type": "user",
+            "message": {"content": [block]},
+        }
+
+    # 7. Optionally fetch full message history for completeness
+    # (the send_message response should already contain everything we need,
+    # but we can poll messages if needed for richer data)
+    try:
+        messages = await loop.run_in_executor(
+            None,
+            lambda: client.list_messages(session_id),
+        )
+        if isinstance(messages, list) and messages:
+            log.debug(
+                "OpenCode session %s has %d messages", session_id, len(messages)
+            )
+    except Exception:
+        # Non-critical — we already yielded the response
+        pass
+
+
 provider = AgentProvider(
     name="opencode",
     label="OpenCode",
@@ -371,4 +715,5 @@ provider = AgentProvider(
     normalize_live_event=_normalize_live_event,
     get_usage_data=_get_usage_data,
     get_models=_discover_models,
+    run_agent=_run_agent_sdk,
 )

@@ -1,32 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import re
-import signal
 import subprocess
 import sys
-import time
-
-if sys.platform != "win32":
-    import pty
-    import select
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from .base import AgentProvider
 
+log = logging.getLogger("ctf-solver.copilot")
+
 COPILOT_CONFIG_FILE = Path.home() / ".copilot" / "config.json"
 COPILOT_SESSIONS_DIR = Path.home() / ".copilot" / "session-state"
-PTY_CACHE_TTL_SECONDS = 300
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-MODEL_TOKEN_RE = re.compile(
-    r"\b("
-    r"(?:claude|gpt|gemini|grok|raptor)"
-    r"(?:[- ][a-z0-9.+]+){1,6}"
-    r")\b",
-    re.IGNORECASE,
-)
-_pty_model_cache: tuple[float, tuple[tuple[str, str], ...]] | None = None
 
 COPILOT_MODEL_MAP = {
     "opus": "claude-opus-4.6",
@@ -164,136 +154,10 @@ def _discover_models_from_files() -> tuple[tuple[str, str], ...]:
     return tuple(models)
 
 
-def _strip_ansi(text: str) -> str:
-    return ANSI_RE.sub("", text).replace("\r", "\n")
-
-
-def _parse_models_from_pty_output(text: str) -> tuple[tuple[str, str], ...]:
-    models: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    text = _strip_ansi(text)
-
-    for match in MODEL_TOKEN_RE.finditer(text):
-        token = match.group(1).strip(" .,:;()[]{}")
-        if token.lower() in {"provider-default", "auto-model-selection"}:
-            continue
-        _add_model(models, seen, token)
-
-    return tuple(models)
-
-
-def _discover_models_via_pty() -> tuple[tuple[str, str], ...]:
-    global _pty_model_cache
-    now = time.monotonic()
-    if _pty_model_cache and _pty_model_cache[0] > now:
-        return _pty_model_cache[1]
-
-    master_fd: int | None = None
-    slave_fd: int | None = None
-    proc: subprocess.Popen[bytes] | None = None
-    chunks: list[str] = []
-    models: tuple[tuple[str, str], ...] = ()
-
-    try:
-        master_fd, slave_fd = pty.openpty()
-        proc = subprocess.Popen(
-            ["copilot"],
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            start_new_session=True,
-        )
-        os.close(slave_fd)
-        slave_fd = None
-
-        start = time.monotonic()
-        deadline = start + 8.0
-        actions = [
-            (start + 1.0, b"/model\r"),
-            (start + 4.0, b"/exit\r"),
-            (start + 6.0, b"\x03"),
-        ]
-
-        while time.monotonic() < deadline:
-            if proc.poll() is not None and not chunks:
-                break
-
-            now = time.monotonic()
-            while actions and now >= actions[0][0]:
-                if master_fd is not None:
-                    _, data = actions.pop(0)
-                    try:
-                        os.write(master_fd, data)
-                    except OSError:
-                        break
-
-            timeout = 0.2
-            if actions:
-                timeout = max(0.0, min(timeout, actions[0][0] - now))
-
-            if master_fd is None:
-                break
-
-            ready, _, _ = select.select([master_fd], [], [], timeout)
-            if ready:
-                try:
-                    data = os.read(master_fd, 4096)
-                except OSError:
-                    break
-                if not data:
-                    break
-                chunks.append(data.decode("utf-8", errors="replace"))
-
-            text = "".join(chunks)
-            if "/model" in text and ("gpt" in text.lower() or "claude" in text.lower()):
-                if actions and actions[0][1] == b"/exit\r":
-                    actions[0] = (time.monotonic() + 0.5, actions[0][1])
-
-            if proc.poll() is not None and not ready:
-                break
-    except (
-        FileNotFoundError,
-        OSError,
-        subprocess.SubprocessError,
-    ):
-        models = ()
-    finally:
-        if master_fd is not None:
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
-        if slave_fd is not None:
-            try:
-                os.close(slave_fd)
-            except OSError:
-                pass
-        if proc and proc.poll() is None:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except OSError:
-                pass
-            try:
-                proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-
-    if chunks:
-        models = _parse_models_from_pty_output("".join(chunks))
-
-    _pty_model_cache = (time.monotonic() + PTY_CACHE_TTL_SECONDS, models)
-    return models
-
-
 def _discover_models() -> tuple[tuple[str, str], ...]:
     models: list[tuple[str, str]] = [("", "Provider default")]
     seen = {""}
 
-    if sys.platform != "win32":
-        _merge_models(models, seen, _discover_models_via_pty())
     _merge_models(models, seen, _discover_models_from_files())
 
     return tuple(models)
@@ -478,6 +342,326 @@ def _build_command(
     return cmd
 
 
+# ---------------------------------------------------------------------------
+# SDK-based agent runner
+# ---------------------------------------------------------------------------
+
+_SENTINEL = object()
+
+
+async def _run_agent_sdk(
+    prompt: str,
+    model: str = "",
+    effort: str = "",
+    cwd: str | Path = ".",
+    continue_session: bool = False,
+    session_state: dict | None = None,
+    **kwargs,
+) -> AsyncIterator[dict]:
+    """Run Copilot via the copilot SDK, yielding normalized events."""
+    from copilot import (
+        CopilotClient,
+        CopilotSession,
+        SessionEvent,
+        PermissionRequestResult,
+    )
+
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def _on_event(event: SessionEvent) -> None:
+        """Sync callback from SDK — push event dict onto the async queue."""
+        try:
+            event_dict = event.to_dict() if hasattr(event, "to_dict") else {}
+            loop.call_soon_threadsafe(queue.put_nowait, event_dict)
+        except Exception:
+            pass
+
+    def _on_permission(req, ctx):
+        return PermissionRequestResult(allow=True)
+
+    resolved_model = COPILOT_MODEL_MAP.get(model, model) if model else ""
+
+    client: CopilotClient | None = None
+    session: CopilotSession | None = None
+
+    try:
+        client = CopilotClient()
+
+        session_kwargs: dict = {
+            "on_permission_request": _on_permission,
+            "on_event": _on_event,
+            "working_directory": str(Path(cwd).resolve()),
+        }
+        if resolved_model:
+            session_kwargs["model"] = resolved_model
+
+        # Restore previous session for continue_session
+        prev_session_id = None
+        if continue_session and session_state:
+            prev_session_id = session_state.get("copilot_session_id")
+            if prev_session_id:
+                session_kwargs["session_id"] = prev_session_id
+
+        session = client.create_session(**session_kwargs)
+
+        # Store session_id for future continuation
+        if session_state is not None and hasattr(session, "session_id"):
+            session_state["copilot_session_id"] = session.session_id
+
+        # Send prompt (non-blocking — events arrive via on_event callback)
+        session.send(prompt)
+
+        # Consume events from the queue until the session signals completion
+        done = False
+        while not done:
+            try:
+                event_dict = await asyncio.wait_for(
+                    queue.get(), timeout=600.0
+                )
+            except asyncio.TimeoutError:
+                yield {
+                    "type": "error",
+                    "message": "Copilot session timed out (600s).",
+                }
+                break
+
+            if event_dict is _SENTINEL:
+                break
+
+            normalized = _normalize_sdk_event(event_dict)
+            if normalized is not None:
+                yield normalized
+
+            # Check for terminal event types
+            ev_type = event_dict.get("type", "")
+            if ev_type in (
+                "result",
+                "done",
+                "session.end",
+                "session.complete",
+                "error",
+            ):
+                done = True
+
+    except Exception as exc:
+        log.error("Copilot SDK error: %s", exc)
+        yield {"type": "error", "message": str(exc)}
+    finally:
+        # Drain any remaining items so the queue doesn't back-pressure
+        while not queue.empty():
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # Clean up client
+        if client is not None:
+            try:
+                if hasattr(client, "close"):
+                    client.close()
+                elif hasattr(client, "stop"):
+                    client.stop()
+                elif hasattr(client, "__del__"):
+                    del client
+            except Exception:
+                pass
+
+
+def _normalize_sdk_event(event_dict: dict) -> dict | None:
+    """Convert a raw Copilot SessionEvent dict to our normalized format.
+
+    Normalized events follow the same schema as our Claude SDK output:
+      - type=assistant  with message.content blocks
+      - type=user       with message.content tool_result blocks
+      - type=system     for system messages / task notifications
+      - type=error      for errors
+      - type=result     for final result
+    """
+    ev_type = event_dict.get("type", "")
+
+    # --- Assistant message ---
+    if ev_type in ("assistant.message", "assistant", "message"):
+        content = []
+        data = event_dict.get("data", event_dict)
+
+        # Reasoning / thinking
+        reasoning = data.get("reasoningText") or data.get("thinking") or ""
+        if reasoning:
+            content.append({"type": "thinking", "thinking": reasoning})
+
+        # Text content
+        text = data.get("content") or data.get("text") or ""
+        if isinstance(text, str) and text.strip():
+            content.append({"type": "text", "text": text})
+        elif isinstance(text, list):
+            for block in text:
+                if isinstance(block, str):
+                    if block.strip():
+                        content.append({"type": "text", "text": block})
+                elif isinstance(block, dict):
+                    content.append(block)
+
+        # Content blocks array (if present directly)
+        for block in data.get("contentBlocks", []):
+            btype = block.get("type", "")
+            if btype == "text" and block.get("text", "").strip():
+                content.append({"type": "text", "text": block["text"]})
+            elif btype == "thinking" and block.get("thinking"):
+                content.append({
+                    "type": "thinking",
+                    "thinking": block["thinking"],
+                })
+            elif btype == "tool_use":
+                content.append({
+                    "type": "tool_use",
+                    "id": block.get("id", ""),
+                    "name": block.get("name", ""),
+                    "input": block.get("input", {}),
+                })
+
+        # Tool requests
+        for req in data.get("toolRequests", []):
+            content.append({
+                "type": "tool_use",
+                "id": req.get("toolCallId", req.get("id", "")),
+                "name": req.get("name", ""),
+                "input": req.get("arguments", req.get("input", {})),
+            })
+
+        if not content:
+            return None
+
+        result: dict = {
+            "type": "assistant",
+            "message": {"content": content},
+        }
+        output_tokens = data.get("outputTokens") or data.get(
+            "usage", {}
+        ).get("output_tokens")
+        if output_tokens:
+            result["message"]["usage"] = {
+                "output_tokens": output_tokens
+            }
+        parent_id = (
+            data.get("parentToolCallId")
+            or data.get("parent_tool_use_id")
+            or event_dict.get("parent_id")
+        )
+        if parent_id:
+            result["parent_tool_use_id"] = parent_id
+        return result
+
+    # --- Tool execution result ---
+    if ev_type in ("tool.execution_complete", "tool_result"):
+        data = event_dict.get("data", event_dict)
+        res = data.get("result", data)
+        tool_use_id = (
+            data.get("toolCallId")
+            or data.get("tool_use_id")
+            or ""
+        )
+        content_text = res.get("content", "")
+        is_error = not res.get("success", True)
+        if "is_error" in res:
+            is_error = res["is_error"]
+
+        result = {
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content_text,
+                    "is_error": is_error,
+                }],
+            },
+        }
+        parent_id = (
+            data.get("parentToolCallId")
+            or data.get("parent_tool_use_id")
+            or event_dict.get("parent_id")
+        )
+        if parent_id:
+            result["parent_tool_use_id"] = parent_id
+        return result
+
+    # --- Subagent / task events ---
+    if ev_type == "subagent.started":
+        data = event_dict.get("data", event_dict)
+        return {
+            "type": "system",
+            "subtype": "task_started",
+            "tool_use_id": data.get("toolCallId", ""),
+            "description": data.get(
+                "agentDisplayName", "Subagent"
+            ),
+        }
+
+    if ev_type in ("subagent.completed", "subagent.failed"):
+        data = event_dict.get("data", event_dict)
+        return {
+            "type": "system",
+            "subtype": "task_notification",
+            "tool_use_id": data.get("toolCallId", ""),
+            "status": (
+                "completed"
+                if ev_type == "subagent.completed"
+                else "failed"
+            ),
+        }
+
+    # --- Error events ---
+    if ev_type == "error":
+        data = event_dict.get("data", event_dict)
+        msg = data.get("message") or data.get("error") or str(data)
+        return {"type": "error", "message": msg}
+
+    # --- Result / done events ---
+    if ev_type in ("result", "done", "session.end", "session.complete"):
+        data = event_dict.get("data", event_dict)
+        result = {"type": "result"}
+        if data.get("result"):
+            result["result"] = data["result"]
+        if data.get("totalCostUsd") or data.get("total_cost_usd"):
+            result["total_cost_usd"] = (
+                data.get("totalCostUsd") or data.get("total_cost_usd")
+            )
+        return result
+
+    # --- System messages ---
+    if ev_type == "system":
+        data = event_dict.get("data", event_dict)
+        msg = data.get("message") or data.get("text") or ""
+        if msg:
+            return {"type": "system", "message": msg}
+        # Pass through subtype-based system events
+        if data.get("subtype"):
+            return event_dict
+        return None
+
+    # --- Skip noisy / intermediate events ---
+    if ev_type in (
+        "assistant.message_delta",
+        "assistant.reasoning_delta",
+        "assistant.reasoning",
+        "assistant.turn_start",
+        "assistant.turn_end",
+        "tool.execution_start",
+        "tool.execution_partial_result",
+        "user.message",
+        "ping",
+        "heartbeat",
+    ):
+        return None
+
+    # Pass through unknown events
+    return event_dict
+
+
+# ---------------------------------------------------------------------------
+# Auth / usage
+# ---------------------------------------------------------------------------
+
 def _get_auth() -> dict | None:
     if COPILOT_CONFIG_FILE.exists():
         try:
@@ -528,6 +712,10 @@ def _get_usage_data() -> dict | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# Provider definition
+# ---------------------------------------------------------------------------
+
 provider = AgentProvider(
     name="copilot",
     label="Copilot",
@@ -557,4 +745,5 @@ provider = AgentProvider(
     normalize_saved_events=_normalize_saved_events,
     normalize_live_event=_normalize_live_event,
     get_usage_data=_get_usage_data,
+    run_agent=_run_agent_sdk,
 )

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import logging
 import tomllib
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from .base import AgentProvider
+
+log = logging.getLogger("ctf-solver.codex")
 
 CODEX_AUTH_FILE = Path.home() / ".codex" / "auth.json"
 CODEX_CONFIG_FILE = Path.home() / ".codex" / "config.toml"
@@ -640,6 +645,675 @@ def _get_usage_data() -> dict | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# SDK-based agent runner via codex app-server JSON-RPC over stdio
+# ---------------------------------------------------------------------------
+
+# Server request methods that require approval responses
+_APPROVAL_METHODS = {
+    # v2 approval requests
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    # v1 legacy approval requests
+    "execCommandApproval",
+    "applyPatchApproval",
+}
+
+# Methods with v2-style decision responses
+_V2_DECISION_METHODS = {
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+}
+
+# Methods with v1-style decision responses
+_V1_DECISION_METHODS = {
+    "execCommandApproval",
+    "applyPatchApproval",
+}
+
+
+def _make_approval_result(method: str) -> dict:
+    """Build the JSON-RPC result payload to auto-approve a server request."""
+    if method in _V2_DECISION_METHODS:
+        return {"decision": "accept"}
+    if method in _V1_DECISION_METHODS:
+        return {"decision": "approved"}
+    if method == "item/permissions/requestApproval":
+        return {
+            "permissions": {"type": "dangerFullAccess"},
+            "scope": "session",
+        }
+    # Default: empty result (best-effort approve)
+    return {}
+
+
+def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
+    """Normalize a ThreadItem from item/started or item/completed."""
+    item_type = item.get("type", "")
+    item_id = item.get("id", "")
+
+    if item_type == "agentMessage":
+        text = item.get("text", "")
+        if not text:
+            return None
+        return {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": text}]},
+        }
+
+    if item_type == "reasoning":
+        parts = item.get("content", [])
+        summary = item.get("summary", [])
+        text = "\n".join(parts) if parts else "\n".join(summary)
+        if not text:
+            return None
+        return {
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "thinking",
+                "thinking": text,
+            }]},
+        }
+
+    if item_type == "commandExecution":
+        if item_event_type == "started":
+            return {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": item_id,
+                    "name": "exec",
+                    "input": {
+                        "command": item.get("command", ""),
+                        "cwd": item.get("cwd", ""),
+                    },
+                }]},
+            }
+        # completed
+        output = item.get("aggregatedOutput", "") or ""
+        exit_code = item.get("exitCode")
+        status = item.get("status", "")
+        is_error = status != "completed" or (
+            exit_code is not None and exit_code != 0
+        )
+        result = {
+            "status": status,
+            "exit_code": exit_code,
+            "output": output,
+        }
+        return {
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": item_id,
+                "content": json.dumps(result, indent=2, default=str),
+                "is_error": is_error,
+            }]},
+        }
+
+    if item_type == "fileChange":
+        if item_event_type == "started":
+            return {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": item_id,
+                    "name": "patch",
+                    "input": {
+                        "path": item.get("path", ""),
+                    },
+                }]},
+            }
+        # completed
+        result = {
+            "status": item.get("status", ""),
+            "path": item.get("path", ""),
+        }
+        is_error = item.get("status", "") not in {
+            "completed", "applied",
+        }
+        return {
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": item_id,
+                "content": json.dumps(result, indent=2, default=str),
+                "is_error": is_error,
+            }]},
+        }
+
+    if item_type == "mcpToolCall":
+        invocation = item.get("invocation", {})
+        if item_event_type == "started":
+            return {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": item_id,
+                    "name": invocation.get("tool", "mcp_tool"),
+                    "input": invocation.get("arguments", {}),
+                }]},
+            }
+        # completed
+        mcp_result = item.get("result", {})
+        is_error = False
+        if isinstance(mcp_result, dict):
+            if "Err" in mcp_result:
+                mcp_result = {"error": mcp_result["Err"]}
+                is_error = True
+            elif "Ok" in mcp_result:
+                mcp_result = mcp_result["Ok"]
+        return {
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": item_id,
+                "content": json.dumps(
+                    mcp_result, indent=2, default=str
+                ),
+                "is_error": is_error,
+            }]},
+        }
+
+    if item_type == "webSearch":
+        if item_event_type == "started":
+            return {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": item_id,
+                    "name": "web_search",
+                    "input": {},
+                }]},
+            }
+        return {
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": item_id,
+                "content": json.dumps(item, indent=2, default=str),
+                "is_error": False,
+            }]},
+        }
+
+    if item_type == "plan":
+        text = item.get("text", "")
+        if not text:
+            return None
+        return {
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "thinking",
+                "thinking": text,
+            }]},
+        }
+
+    # Unrecognized item types — skip silently
+    return None
+
+
+async def _run_agent_sdk(
+    prompt: str,
+    model: str = "",
+    effort: str = "",
+    cwd: str | Path = ".",
+    continue_session: bool = False,
+    session_state: dict | None = None,
+    **kwargs,
+) -> AsyncIterator[dict]:
+    """Run Codex via the app-server JSON-RPC protocol over stdio."""
+    if session_state is None:
+        session_state = {}
+
+    cwd_str = str(Path(cwd).resolve())
+
+    # Build the command to spawn
+    cmd = ["codex", "app-server", "--listen", "stdio://"]
+
+    log.info("Spawning codex app-server: %s (cwd=%s)", cmd, cwd_str)
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd_str,
+    )
+
+    request_id = 0
+
+    def _next_id() -> int:
+        nonlocal request_id
+        request_id += 1
+        return request_id
+
+    async def _send(msg: dict) -> None:
+        """Send a JSON-RPC message (newline-delimited)."""
+        assert proc.stdin is not None
+        line = json.dumps(msg, separators=(",", ":")) + "\n"
+        proc.stdin.write(line.encode())
+        await proc.stdin.drain()
+
+    async def _send_request(method: str, params: dict) -> int:
+        """Send a JSON-RPC request, return its id."""
+        rid = _next_id()
+        await _send({
+            "jsonrpc": "2.0",
+            "id": rid,
+            "method": method,
+            "params": params,
+        })
+        return rid
+
+    async def _read_response(expected_id: int) -> dict:
+        """Read lines from stdout until we get the response for expected_id.
+
+        Notifications and server requests received while waiting are
+        queued in *deferred_msgs* for later processing.
+        """
+        assert proc.stdout is not None
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                return {}
+            line_s = raw.decode("utf-8", errors="replace").strip()
+            if not line_s:
+                continue
+            try:
+                m = json.loads(line_s)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(m, dict):
+                continue
+            # Check if this is the response we want
+            if m.get("id") == expected_id and (
+                "result" in m or "error" in m
+            ):
+                if "error" in m:
+                    err = m["error"]
+                    if isinstance(err, dict):
+                        raise RuntimeError(
+                            f"JSON-RPC error for {expected_id}: "
+                            f"{err.get('message', err)}"
+                        )
+                    raise RuntimeError(
+                        f"JSON-RPC error for {expected_id}: {err}"
+                    )
+                return m.get("result", {})
+            # Otherwise queue it for the event loop
+            deferred_msgs.append(m)
+
+    async def _notify(method: str, params: dict | None = None) -> None:
+        """Send a JSON-RPC notification (no id)."""
+        m: dict = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            m["params"] = params
+        await _send(m)
+
+    async def _respond(rid, result: dict) -> None:
+        """Send a JSON-RPC response to a server request."""
+        await _send({
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": result,
+        })
+
+    # Messages received during handshake that need processing later
+    deferred_msgs: list[dict] = []
+
+    # Accumulator for agent message deltas
+    delta_texts: dict[str, str] = {}
+    last_yielded_text = ""
+
+    try:
+        # --- Handshake (sequential request/response) ---
+        rid = await _send_request("initialize", {
+            "clientInfo": {
+                "name": "ctf-agent-wrapper",
+                "version": "1.0.0",
+            },
+        })
+        init_result = await _read_response(rid)
+        log.info("Codex app-server initialized: %s",
+                 json.dumps(init_result)[:200])
+
+        await _notify("initialized")
+
+        # --- Start or resume thread ---
+        thread_id = session_state.get("codex_thread_id") if continue_session else None
+
+        if thread_id:
+            # Resume existing thread — just send a new turn
+            log.info("Resuming existing thread: %s", thread_id)
+        else:
+            # Start a new thread
+            thread_params: dict = {
+                "cwd": cwd_str,
+                "ephemeral": True,
+                "approvalPolicy": "never",
+                "sandbox": "danger-full-access",
+            }
+            if model:
+                thread_params["model"] = model
+            if effort:
+                resolved = _resolve_effort(model, effort)
+                if resolved:
+                    thread_params["config"] = {
+                        "model_reasoning_effort": resolved,
+                    }
+
+            rid = await _send_request("thread/start", thread_params)
+            thread_result = await _read_response(rid)
+            thread_data = thread_result.get("thread", {})
+            thread_id = thread_data.get("id", "")
+            if not thread_id:
+                yield {
+                    "type": "error",
+                    "message": "Failed to get thread ID from thread/start",
+                }
+                return
+
+            session_state["codex_thread_id"] = thread_id
+            log.info("Started new Codex thread: %s", thread_id)
+
+        # --- Send turn ---
+        turn_params: dict = {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": prompt}],
+        }
+        if model:
+            turn_params["model"] = model
+        if effort:
+            resolved = _resolve_effort(model, effort)
+            if resolved:
+                turn_params["effort"] = resolved
+        # Full access sandbox for CTF work
+        turn_params["sandboxPolicy"] = {"type": "dangerFullAccess"}
+
+        rid = await _send_request("turn/start", turn_params)
+        turn_result = await _read_response(rid)
+        log.info("Turn started: %s", json.dumps(turn_result)[:200])
+
+        # --- Event loop: read JSON-RPC messages from stdout ---
+        assert proc.stdout is not None
+
+        # Move any deferred messages from handshake into a queue
+        msg_queue: list[dict] = list(deferred_msgs)
+        deferred_msgs.clear()
+
+        while True:
+            # Drain queued messages first
+            if msg_queue:
+                msg = msg_queue.pop(0)
+            else:
+                raw_line = await proc.stdout.readline()
+                if not raw_line:
+                    # Process exited or stdout closed
+                    log.info("Codex app-server stdout closed")
+                    break
+
+                line_str = raw_line.decode(
+                    "utf-8", errors="replace"
+                ).strip()
+                if not line_str:
+                    continue
+
+                try:
+                    msg = json.loads(line_str)
+                except json.JSONDecodeError:
+                    log.debug(
+                        "Non-JSON line from app-server: %s",
+                        line_str[:200],
+                    )
+                    continue
+
+                if not isinstance(msg, dict):
+                    continue
+
+            # --- JSON-RPC Response (unexpected at this point) ---
+            if "id" in msg and ("result" in msg or "error" in msg):
+                # Responses to our requests — during the event loop we
+                # don't send requests, so just log and skip.
+                log.debug("Unexpected response: id=%s", msg.get("id"))
+                continue
+
+            # --- Server Request (has id + method) ---
+            if "id" in msg and "method" in msg:
+                server_method = msg["method"]
+                server_id = msg["id"]
+
+                if server_method in _APPROVAL_METHODS:
+                    # Auto-approve
+                    log.debug("Auto-approving %s (id=%s)",
+                              server_method, server_id)
+                    await _respond(
+                        server_id,
+                        _make_approval_result(server_method),
+                    )
+                    # Yield a system note about the approval
+                    yield {
+                        "type": "system",
+                        "message": (
+                            f"Auto-approved: {server_method}"
+                        ),
+                    }
+                elif server_method == "item/tool/call":
+                    # Dynamic tool call — we don't register dynamic tools,
+                    # so this shouldn't happen. Respond with error.
+                    await _respond(server_id, {
+                        "error": "No dynamic tools registered",
+                    })
+                elif server_method == "item/tool/requestUserInput":
+                    # Tool requesting user input — auto-respond empty
+                    await _respond(server_id, {"input": ""})
+                elif server_method == "mcpServer/elicitation/request":
+                    # MCP elicitation — auto-confirm
+                    await _respond(server_id, {"action": "confirm"})
+                else:
+                    # Unknown server request — respond with empty result
+                    log.warning(
+                        "Unknown server request: %s", server_method
+                    )
+                    await _respond(server_id, {})
+                continue
+
+            # --- Server Notification (has method, no id) ---
+            method = msg.get("method", "")
+            params = msg.get("params", {})
+
+            if method == "turn/completed":
+                # Turn is done — yield any remaining info
+                turn = params.get("turn", {})
+                status = turn.get("status", "")
+                error_info = turn.get("codexErrorInfo")
+                if isinstance(error_info, str) and error_info not in {
+                    "", "other"
+                }:
+                    yield {
+                        "type": "error",
+                        "message": f"Codex turn error: {error_info}",
+                    }
+                elif isinstance(error_info, dict):
+                    yield {
+                        "type": "error",
+                        "message": f"Codex turn error: "
+                                   f"{json.dumps(error_info)}",
+                    }
+                log.info(
+                    "Turn completed (status=%s)", status
+                )
+                break
+
+            if method == "item/started":
+                item = params.get("item", {})
+                event = _normalize_thread_item(item, "started")
+                if event:
+                    yield event
+                continue
+
+            if method == "item/completed":
+                item = params.get("item", {})
+                event = _normalize_thread_item(item, "completed")
+                if event:
+                    # Track last assistant text for dedup
+                    if event.get("type") == "assistant":
+                        content = event.get("message", {}).get(
+                            "content", []
+                        )
+                        for block in content:
+                            if block.get("type") == "text":
+                                last_yielded_text = block.get(
+                                    "text", ""
+                                )
+                    yield event
+                continue
+
+            if method == "item/agentMessage/delta":
+                # Streaming text delta — accumulate
+                delta = params.get("delta", "")
+                item_id = params.get("itemId", "")
+                if delta and item_id:
+                    delta_texts[item_id] = (
+                        delta_texts.get(item_id, "") + delta
+                    )
+                continue
+
+            if method == "item/reasoning/textDelta":
+                delta = params.get("delta", "")
+                if delta:
+                    yield {
+                        "type": "assistant",
+                        "message": {"content": [{
+                            "type": "thinking",
+                            "thinking": delta,
+                        }]},
+                    }
+                continue
+
+            if method == "item/reasoning/summaryTextDelta":
+                delta = params.get("delta", "")
+                if delta:
+                    yield {
+                        "type": "assistant",
+                        "message": {"content": [{
+                            "type": "thinking",
+                            "thinking": delta,
+                        }]},
+                    }
+                continue
+
+            if method == "item/commandExecution/outputDelta":
+                # Streaming command output — accumulate but don't yield
+                # (will come in item/completed)
+                continue
+
+            if method == "item/fileChange/outputDelta":
+                # Streaming file change output
+                continue
+
+            if method == "command/exec/outputDelta":
+                # Legacy command output delta
+                continue
+
+            if method == "error":
+                err_msg = params.get("message", "")
+                code = params.get("code", "")
+                yield {
+                    "type": "error",
+                    "message": err_msg or f"Codex error: {code}",
+                }
+                continue
+
+            if method == "thread/started":
+                # Thread started notification — extract thread_id
+                thread_data = params.get("thread", {})
+                tid = thread_data.get("id", "")
+                if tid:
+                    session_state["codex_thread_id"] = tid
+                continue
+
+            if method == "turn/started":
+                continue
+
+            if method == "thread/status/changed":
+                continue
+
+            if method == "thread/tokenUsage/updated":
+                continue
+
+            if method == "thread/name/updated":
+                continue
+
+            if method == "thread/closed":
+                log.info("Thread closed notification received")
+                break
+
+            if method == "item/plan/delta":
+                delta = params.get("delta", "")
+                if delta:
+                    yield {
+                        "type": "assistant",
+                        "message": {"content": [{
+                            "type": "thinking",
+                            "thinking": delta,
+                        }]},
+                    }
+                continue
+
+            if method in {
+                "turn/diff/updated",
+                "turn/plan/updated",
+                "item/autoApprovalReview/started",
+                "item/autoApprovalReview/completed",
+                "item/mcpToolCall/progress",
+                "serverRequest/resolved",
+                "hook/started",
+                "hook/completed",
+                "skills/changed",
+                "fs/changed",
+                "thread/compacted",
+                "model/rerouted",
+                "deprecationNotice",
+                "configWarning",
+                "account/updated",
+                "account/rateLimits/updated",
+                "app/list/updated",
+                "mcpServer/startupStatus/updated",
+            }:
+                # Known but not interesting for our event stream
+                continue
+
+            # Unknown notification — log and skip
+            log.debug("Unhandled notification: %s", method)
+
+    except asyncio.CancelledError:
+        log.info("Codex SDK run cancelled")
+        raise
+    except Exception as exc:
+        log.error("Codex app-server error: %s", exc, exc_info=True)
+        yield {"type": "error", "message": str(exc)}
+    finally:
+        # Clean up the subprocess
+        try:
+            if proc.stdin and not proc.stdin.is_closing():
+                proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        log.info("Codex app-server subprocess cleaned up")
+
+
 provider = AgentProvider(
     name="codex",
     label="Codex",
@@ -655,4 +1329,5 @@ provider = AgentProvider(
     get_models=_discover_models,
     effort_levels=_discover_effort_levels(),
     default_effort="medium",
+    run_agent=_run_agent_sdk,
 )
