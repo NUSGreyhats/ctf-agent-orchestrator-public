@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
 
 
 NormalizeLiveEvent = Callable[[dict, dict], dict | None]
@@ -9,6 +11,9 @@ NormalizeSavedEvents = Callable[[list[dict]], list[dict]]
 BuildCommand = Callable[[dict, str, bool], list[str]]
 GetUsageData = Callable[[], dict | None]
 GetModels = Callable[[], tuple[tuple[str, str], ...]]
+
+# Type for SDK-based run_agent: yields normalized events
+RunAgent = Callable[..., AsyncIterator[dict]]
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,14 @@ class AgentProvider:
     get_models: GetModels | None = None
     effort_levels: tuple[tuple[str, str], ...] = ()
     default_effort: str = ""
+    # SDK-based agent runner. If set, run_agent_task uses this instead
+    # of build_command + subprocess. Signature:
+    #   async def run_agent(prompt, model, effort, cwd, continue_session, session_state, **kw) -> AsyncIterator[dict]
+    run_agent: RunAgent | None = None
+
+    @property
+    def supports_sdk(self) -> bool:
+        return self.run_agent is not None
 
     def resolved_models(self) -> tuple[tuple[str, str], ...]:
         return self.get_models() if self.get_models else self.models

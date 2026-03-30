@@ -1,31 +1,210 @@
+"""Claude provider — uses claude-agent-sdk for agent execution."""
+
 from __future__ import annotations
 
 import json
-import os
-import re
-import signal
-import shutil
+import logging
 import subprocess
-import sys
-import time
-
-if sys.platform != "win32":
-    import pty
-    import select
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from .base import AgentProvider
 
+log = logging.getLogger("ctf-solver.claude")
+
 CLAUDE_STATS_FILE = Path.home() / ".claude" / "stats-cache.json"
 CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
-CLAUDE_CLI_CACHE_TTL_SECONDS = 300
-CLAUDE_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-CLAUDE_MODEL_TOKEN_RE = re.compile(
-    r"\b(claude-[a-z0-9.-]+|opus|sonnet|haiku)\b",
-    re.IGNORECASE,
-)
-_cli_model_cache: tuple[float, tuple[tuple[str, str], ...]] | None = None
 
+
+# ---------------------------------------------------------------------------
+# SDK-based agent runner
+# ---------------------------------------------------------------------------
+
+async def _run_agent_sdk(
+    prompt: str,
+    model: str = "",
+    effort: str = "",
+    cwd: str | Path = ".",
+    continue_session: bool = False,
+    session_state: dict | None = None,
+    **kwargs,
+) -> AsyncIterator[dict]:
+    """Run Claude via the agent SDK, yielding normalized events."""
+    from claude_agent_sdk import (
+        ClaudeSDKClient,
+        ClaudeAgentOptions,
+        AssistantMessage,
+        UserMessage,
+        SystemMessage,
+        ResultMessage,
+        StreamEvent,
+        RateLimitEvent,
+        TextBlock,
+        ThinkingBlock,
+        ToolUseBlock,
+        ToolResultBlock,
+    )
+
+    session_id = None
+    if session_state:
+        session_id = session_state.get("claude_session_id")
+
+    options = ClaudeAgentOptions(
+        permission_mode="bypassPermissions",
+        cwd=str(cwd),
+        model=model or None,
+        effort=effort or None,
+        continue_conversation=continue_session and session_id is not None,
+        session_id=session_id,
+    )
+
+    client = ClaudeSDKClient(options)
+
+    try:
+        await client.connect(prompt)
+
+        async for msg in client.receive_messages():
+            if isinstance(msg, AssistantMessage):
+                content = []
+                for block in msg.content:
+                    if isinstance(block, ThinkingBlock):
+                        content.append({
+                            "type": "thinking",
+                            "thinking": block.thinking,
+                        })
+                    elif isinstance(block, TextBlock):
+                        content.append({
+                            "type": "text",
+                            "text": block.text,
+                        })
+                    elif isinstance(block, ToolUseBlock):
+                        content.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        })
+                    elif isinstance(block, ToolResultBlock):
+                        content.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.tool_use_id
+                            if hasattr(block, "tool_use_id")
+                            else block.id
+                            if hasattr(block, "id")
+                            else "",
+                            "content": str(block.content)
+                            if hasattr(block, "content")
+                            else "",
+                            "is_error": getattr(block, "is_error", False),
+                        })
+
+                if not content:
+                    continue
+
+                event = {
+                    "type": "assistant",
+                    "message": {"content": content},
+                }
+                if msg.usage:
+                    event["message"]["usage"] = msg.usage
+                if msg.parent_tool_use_id:
+                    event["parent_tool_use_id"] = msg.parent_tool_use_id
+                if msg.session_id and session_state is not None:
+                    session_state["claude_session_id"] = msg.session_id
+                yield event
+
+            elif isinstance(msg, UserMessage):
+                content = []
+                for block in msg.content:
+                    if isinstance(block, ToolResultBlock):
+                        content.append({
+                            "type": "tool_result",
+                            "tool_use_id": getattr(block, "tool_use_id", "")
+                            or getattr(block, "id", ""),
+                            "content": str(
+                                getattr(block, "content", "")
+                            ),
+                            "is_error": getattr(
+                                block, "is_error", False
+                            ),
+                        })
+                    elif isinstance(block, TextBlock):
+                        content.append({
+                            "type": "text",
+                            "text": block.text,
+                        })
+                if content:
+                    yield {
+                        "type": "user",
+                        "message": {"content": content},
+                    }
+
+            elif isinstance(msg, SystemMessage):
+                text = ""
+                if hasattr(msg, "content"):
+                    if isinstance(msg.content, str):
+                        text = msg.content
+                    elif isinstance(msg.content, list):
+                        text = " ".join(
+                            str(getattr(b, "text", b))
+                            for b in msg.content
+                        )
+                if text:
+                    yield {"type": "system", "message": text}
+
+            elif isinstance(msg, ResultMessage):
+                event = {"type": "result"}
+                if msg.result:
+                    event["result"] = msg.result
+                if msg.total_cost_usd:
+                    event["total_cost_usd"] = msg.total_cost_usd
+                if msg.session_id and session_state is not None:
+                    session_state["claude_session_id"] = msg.session_id
+                yield event
+
+            elif isinstance(msg, RateLimitEvent):
+                info = msg.rate_limit_info
+                yield {
+                    "type": "rate_limit_event",
+                    "rate_limit_info": {
+                        "status": getattr(info, "status", ""),
+                        "utilization": getattr(
+                            info, "utilization", 0
+                        ),
+                    }
+                    if info
+                    else {},
+                }
+
+            elif isinstance(msg, StreamEvent):
+                # Pass through raw stream events for init etc.
+                event_data = msg.event or {}
+                event_type = event_data.get("type", "")
+                if event_type == "system" and event_data.get(
+                    "subtype"
+                ) == "init":
+                    if session_state is not None and event_data.get(
+                        "session_id"
+                    ):
+                        session_state["claude_session_id"] = (
+                            event_data["session_id"]
+                        )
+                    continue
+                yield event_data
+
+    except Exception as exc:
+        log.error("Claude SDK error: %s", exc)
+        yield {"type": "error", "message": str(exc)}
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# CLI fallback (build_command for legacy/subprocess path)
+# ---------------------------------------------------------------------------
 
 def _build_command(
     challenge: dict, prompt: str, is_continue: bool
@@ -56,6 +235,10 @@ def _normalize_live_event(event: dict, challenge: dict) -> dict | None:
     return event
 
 
+# ---------------------------------------------------------------------------
+# Auth / usage
+# ---------------------------------------------------------------------------
+
 def _get_auth() -> dict | None:
     try:
         result = subprocess.run(
@@ -82,158 +265,6 @@ def _get_stats() -> dict | None:
         except (json.JSONDecodeError, OSError):
             pass
     return None
-
-
-def _discover_models() -> tuple[tuple[str, str], ...]:
-    models: list[tuple[str, str]] = [("", "Provider default")]
-    seen = {""}
-
-    if sys.platform != "win32":
-        for value, label in _discover_models_from_cli():
-            if value and value not in seen:
-                seen.add(value)
-                models.append((value, label))
-
-    if CLAUDE_SETTINGS_FILE.exists():
-        try:
-            settings = json.loads(CLAUDE_SETTINGS_FILE.read_text())
-            value = settings.get("model")
-            if isinstance(value, str) and value and value not in seen:
-                seen.add(value)
-                models.append((value, value))
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    stats = _get_stats()
-    if stats:
-        for value in sorted(stats.get("modelUsage", {})):
-            if value and value not in seen:
-                seen.add(value)
-                models.append((value, value))
-
-    return tuple(models)
-
-
-def _normalize_model_label(label: str) -> str:
-    value = CLAUDE_ANSI_RE.sub("", label).strip().lower()
-    value = re.sub(r"\s+", "", value)
-    return value
-
-
-def _parse_models_from_cli_output(text: str) -> tuple[tuple[str, str], ...]:
-    text = CLAUDE_ANSI_RE.sub("", text).replace("\r", "\n")
-    rows: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for match in CLAUDE_MODEL_TOKEN_RE.finditer(text):
-        token = _normalize_model_label(match.group(1))
-        if token in seen:
-            continue
-        seen.add(token)
-        rows.append((token, token))
-    return tuple(rows)
-
-
-def _discover_models_from_cli() -> tuple[tuple[str, str], ...]:
-    global _cli_model_cache
-    now = time.monotonic()
-    if _cli_model_cache and _cli_model_cache[0] > now:
-        return _cli_model_cache[1]
-
-    # Claude's interactive slash command is `/model` (not `/models`).
-    if not shutil.which("claude"):
-        _cli_model_cache = (now + CLAUDE_CLI_CACHE_TTL_SECONDS, ())
-        return ()
-
-    models: tuple[tuple[str, str], ...] = ()
-    master_fd: int | None = None
-    slave_fd: int | None = None
-    proc: subprocess.Popen[bytes] | None = None
-    chunks: list[str] = []
-
-    try:
-        master_fd, slave_fd = pty.openpty()
-        proc = subprocess.Popen(
-            ["claude"],
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            start_new_session=True,
-        )
-        os.close(slave_fd)
-        slave_fd = None
-
-        start = time.monotonic()
-        deadline = start + 8.0
-        actions = [
-            (start + 1.0, b"/model\r"),
-            (start + 4.0, b"/exit\r"),
-            (start + 6.0, b"\x03"),
-        ]
-
-        while time.monotonic() < deadline:
-            now = time.monotonic()
-            while actions and now >= actions[0][0]:
-                if master_fd is None:
-                    break
-                _, data = actions.pop(0)
-                try:
-                    os.write(master_fd, data)
-                except OSError:
-                    break
-
-            timeout = 0.2
-            if actions:
-                timeout = max(0.0, min(timeout, actions[0][0] - now))
-            if master_fd is None:
-                break
-
-            ready, _, _ = select.select([master_fd], [], [], timeout)
-            if ready:
-                try:
-                    data = os.read(master_fd, 4096)
-                except OSError:
-                    break
-                if not data:
-                    break
-                chunks.append(data.decode("utf-8", errors="replace"))
-
-            if proc.poll() is not None and not ready:
-                break
-
-        if chunks:
-            models = _parse_models_from_cli_output("".join(chunks))
-    except (
-        FileNotFoundError,
-        OSError,
-        subprocess.SubprocessError,
-    ):
-        models = ()
-    finally:
-        if master_fd is not None:
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
-        if slave_fd is not None:
-            try:
-                os.close(slave_fd)
-            except OSError:
-                pass
-        if proc and proc.poll() is None:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except OSError:
-                pass
-            try:
-                proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-
-    _cli_model_cache = (time.monotonic() + CLAUDE_CLI_CACHE_TTL_SECONDS, models)
-    return models
 
 
 def _get_usage_data() -> dict | None:
@@ -286,6 +317,10 @@ def _get_usage_data() -> dict | None:
     return data
 
 
+# ---------------------------------------------------------------------------
+# Provider definition
+# ---------------------------------------------------------------------------
+
 provider = AgentProvider(
     name="claude",
     label="Claude",
@@ -303,6 +338,7 @@ provider = AgentProvider(
     normalize_saved_events=_normalize_saved_events,
     normalize_live_event=_normalize_live_event,
     get_usage_data=_get_usage_data,
+    run_agent=_run_agent_sdk,
     effort_levels=(
         ("", "Provider default"),
         ("low", "Low"),

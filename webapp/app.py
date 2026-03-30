@@ -2092,6 +2092,123 @@ def _try_auto_submit_flag(
     asyncio.create_task(_submit())
 
 
+async def _run_agent_sdk_path(
+    challenge_id: str,
+    run_id: str,
+    challenge: dict,
+    run: dict,
+    provider,
+    prompt: str,
+    is_continue: bool,
+) -> None:
+    """Run an agent using the provider's SDK (no subprocess)."""
+    run_cwd = get_run_cwd(challenge_id, run)
+    session_state = run.setdefault("_session_state", {})
+
+    log.info(
+        "[%s/%s] Starting %s via SDK (continue=%s, cwd=%s)",
+        challenge_id[:8], run_id[:8], run["agent"],
+        is_continue, run_cwd,
+    )
+
+    saw_message = False
+    last_error = None
+
+    try:
+        async for event in provider.run_agent(
+            prompt=prompt,
+            model=run.get("model", ""),
+            effort=run.get("effort", ""),
+            cwd=str(run_cwd),
+            continue_session=is_continue,
+            session_state=session_state,
+        ):
+            # Check if we've been stopped externally
+            stop_reason = run.get("_stop_reason")
+            if stop_reason:
+                log.info(
+                    "[%s/%s] SDK run stopped: %s",
+                    challenge_id[:8], run_id[:8], stop_reason,
+                )
+                break
+
+            if not event or not isinstance(event, dict):
+                continue
+
+            etype = event.get("type", "")
+
+            if etype in ("assistant", "user", "result"):
+                saw_message = True
+            if etype == "error":
+                last_error = event.get("message", "")
+
+            run["output_lines"].append(event)
+            append_output_event(challenge_id, run_id, event)
+            await broadcast(challenge_id, run_id, event)
+
+            # Auto-submit flag detection
+            if etype == "assistant":
+                _try_auto_submit_flag(
+                    challenge_id, run_id, event, challenge
+                )
+
+    except Exception as exc:
+        log.error(
+            "[%s/%s] SDK exception: %s",
+            challenge_id[:8], run_id[:8], exc,
+        )
+        last_error = str(exc)
+        err_event = {"type": "error", "message": str(exc)}
+        run["output_lines"].append(err_event)
+        append_output_event(challenge_id, run_id, err_event)
+        await broadcast(challenge_id, run_id, err_event)
+
+    # --- Finalization ---
+    stop_reason = run.pop("_stop_reason", None)
+
+    log.info(
+        "[%s/%s] SDK finalization: stop_reason=%s, saw_msg=%s, status=%s",
+        challenge_id[:8], run_id[:8], stop_reason, saw_message,
+        run["status"],
+    )
+
+    if stop_reason:
+        # Externally stopped (steer, delete, sibling solved)
+        pass
+    elif run["status"] == "solved":
+        # Auto-submit already marked it solved
+        pass
+    elif saw_message and not last_error:
+        run["status"] = "completed"
+        run["error"] = None
+    else:
+        run["status"] = "failed"
+        run["error"] = last_error or "Agent produced no output"
+        if last_error:
+            err_event = {"type": "error", "message": last_error}
+            run["output_lines"].append(err_event)
+            append_output_event(challenge_id, run_id, err_event)
+            await broadcast(challenge_id, run_id, err_event)
+
+    if run.get("solve_start"):
+        elapsed = _time.monotonic() - run["solve_start"]
+        run["duration_ms"] = int(elapsed * 1000)
+
+    challenge["status"] = derive_challenge_status(challenge)
+    save_metadata(challenge)
+
+    await broadcast(challenge_id, run_id, {
+        "type": "run_status",
+        "run_id": run_id,
+        "status": run["status"],
+        "error": run.get("error"),
+    })
+    await broadcast_challenge(challenge_id, {
+        "type": "challenge_status",
+        "status": challenge["status"],
+    })
+
+
 async def run_agent_task(
     challenge_id: str,
     run_id: str,
@@ -2130,6 +2247,15 @@ async def run_agent_task(
     append_output_event(challenge_id, run_id, sys_event)
     await broadcast(challenge_id, run_id, sys_event)
 
+    # --- SDK path: use provider's run_agent if available ---
+    if provider.supports_sdk:
+        await _run_agent_sdk_path(
+            challenge_id, run_id, challenge, run, provider,
+            prompt, bool(continue_msg),
+        )
+        return
+
+    # --- CLI fallback path ---
     env = os.environ.copy()
     env["IS_SANDBOX"] = "1"
 
