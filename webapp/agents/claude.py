@@ -27,6 +27,8 @@ async def _run_agent_sdk(
     cwd: str | Path = ".",
     continue_session: bool = False,
     session_state: dict | None = None,
+    challenge_id: str = "",
+    run_id: str = "",
     **kwargs,
 ) -> AsyncIterator[dict]:
     """Run Claude via the agent SDK, yielding normalized events."""
@@ -43,11 +45,32 @@ async def _run_agent_sdk(
         ThinkingBlock,
         ToolUseBlock,
         ToolResultBlock,
+        create_sdk_mcp_server,
+        tool,
     )
+    from .broadcast import broadcast_to_teammates, get_pending_broadcast
 
     session_id = None
     if session_state:
         session_id = session_state.get("claude_session_id")
+
+    # Create notify_teammates MCP tool
+    mcp_servers = {}
+    if challenge_id and run_id:
+        @tool(
+            "notify_teammates",
+            "Broadcast a validated breakthrough to all teammates. "
+            "Only call this for confirmed, significant findings.",
+            {"type": "object", "properties": {"message": {"type": "string", "description": "The breakthrough finding"}}, "required": ["message"]},
+        )
+        async def notify_teammates(params):
+            msg = params.get("message", "")
+            count = await broadcast_to_teammates(challenge_id, run_id, msg)
+            return {"status": f"Broadcast sent to {count} teammate(s)"}
+
+        mcp_servers["ctf-collab"] = create_sdk_mcp_server(
+            "ctf-collab", tools=[notify_teammates]
+        )
 
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
@@ -56,6 +79,7 @@ async def _run_agent_sdk(
         effort=effort or None,
         continue_conversation=continue_session and session_id is not None,
         session_id=session_id,
+        mcp_servers=mcp_servers if mcp_servers else {},
     )
 
     client = ClaudeSDKClient(options)
@@ -63,134 +87,157 @@ async def _run_agent_sdk(
     try:
         await client.connect(prompt)
 
-        async for msg in client.receive_messages():
-            if isinstance(msg, AssistantMessage):
-                content = []
-                for block in msg.content:
-                    if isinstance(block, ThinkingBlock):
-                        content.append({
-                            "type": "thinking",
-                            "thinking": block.thinking,
-                        })
-                    elif isinstance(block, TextBlock):
-                        content.append({
-                            "type": "text",
-                            "text": block.text,
-                        })
-                    elif isinstance(block, ToolUseBlock):
-                        content.append({
-                            "type": "tool_use",
-                            "id": block.id,
-                            "name": block.name,
-                            "input": block.input,
-                        })
-                    elif isinstance(block, ToolResultBlock):
-                        content.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.tool_use_id
-                            if hasattr(block, "tool_use_id")
-                            else block.id
-                            if hasattr(block, "id")
-                            else "",
-                            "content": str(block.content)
-                            if hasattr(block, "content")
-                            else "",
-                            "is_error": getattr(block, "is_error", False),
-                        })
+        while True:
+            # Process one turn
+            turn_active = False
+            async for msg in client.receive_messages():
+                if isinstance(msg, AssistantMessage):
+                    content = []
+                    for block in msg.content:
+                        if isinstance(block, ThinkingBlock):
+                            content.append({
+                                "type": "thinking",
+                                "thinking": block.thinking,
+                            })
+                        elif isinstance(block, TextBlock):
+                            content.append({
+                                "type": "text",
+                                "text": block.text,
+                            })
+                        elif isinstance(block, ToolUseBlock):
+                            content.append({
+                                "type": "tool_use",
+                                "id": block.id,
+                                "name": block.name,
+                                "input": block.input,
+                            })
+                        elif isinstance(block, ToolResultBlock):
+                            content.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.tool_use_id
+                                if hasattr(block, "tool_use_id")
+                                else block.id
+                                if hasattr(block, "id")
+                                else "",
+                                "content": str(block.content)
+                                if hasattr(block, "content")
+                                else "",
+                                "is_error": getattr(block, "is_error", False),
+                            })
 
-                if not content:
-                    continue
+                    if not content:
+                        continue
 
-                event = {
-                    "type": "assistant",
-                    "message": {"content": content},
-                }
-                if msg.usage:
-                    event["message"]["usage"] = msg.usage
-                if msg.parent_tool_use_id:
-                    event["parent_tool_use_id"] = msg.parent_tool_use_id
-                if msg.session_id and session_state is not None:
-                    session_state["claude_session_id"] = msg.session_id
-                yield event
-
-            elif isinstance(msg, UserMessage):
-                content = []
-                for block in msg.content:
-                    if isinstance(block, ToolResultBlock):
-                        content.append({
-                            "type": "tool_result",
-                            "tool_use_id": getattr(block, "tool_use_id", "")
-                            or getattr(block, "id", ""),
-                            "content": str(
-                                getattr(block, "content", "")
-                            ),
-                            "is_error": getattr(
-                                block, "is_error", False
-                            ),
-                        })
-                    elif isinstance(block, TextBlock):
-                        content.append({
-                            "type": "text",
-                            "text": block.text,
-                        })
-                if content:
-                    yield {
-                        "type": "user",
+                    event = {
+                        "type": "assistant",
                         "message": {"content": content},
                     }
+                    if msg.usage:
+                        event["message"]["usage"] = msg.usage
+                    if msg.parent_tool_use_id:
+                        event["parent_tool_use_id"] = msg.parent_tool_use_id
+                    if msg.session_id and session_state is not None:
+                        session_state["claude_session_id"] = msg.session_id
+                    yield event
 
-            elif isinstance(msg, SystemMessage):
-                text = ""
-                if hasattr(msg, "content"):
-                    if isinstance(msg.content, str):
-                        text = msg.content
-                    elif isinstance(msg.content, list):
-                        text = " ".join(
-                            str(getattr(b, "text", b))
-                            for b in msg.content
-                        )
-                if text:
-                    yield {"type": "system", "message": text}
+                elif isinstance(msg, UserMessage):
+                    content = []
+                    for block in msg.content:
+                        if isinstance(block, ToolResultBlock):
+                            content.append({
+                                "type": "tool_result",
+                                "tool_use_id": getattr(block, "tool_use_id", "")
+                                or getattr(block, "id", ""),
+                                "content": str(
+                                    getattr(block, "content", "")
+                                ),
+                                "is_error": getattr(
+                                    block, "is_error", False
+                                ),
+                            })
+                        elif isinstance(block, TextBlock):
+                            content.append({
+                                "type": "text",
+                                "text": block.text,
+                            })
+                    if content:
+                        yield {
+                            "type": "user",
+                            "message": {"content": content},
+                        }
 
-            elif isinstance(msg, ResultMessage):
-                event = {"type": "result"}
-                if msg.result:
-                    event["result"] = msg.result
-                if msg.total_cost_usd:
-                    event["total_cost_usd"] = msg.total_cost_usd
-                if msg.session_id and session_state is not None:
-                    session_state["claude_session_id"] = msg.session_id
-                yield event
+                elif isinstance(msg, SystemMessage):
+                    text = ""
+                    if hasattr(msg, "content"):
+                        if isinstance(msg.content, str):
+                            text = msg.content
+                        elif isinstance(msg.content, list):
+                            text = " ".join(
+                                str(getattr(b, "text", b))
+                                for b in msg.content
+                            )
+                    if text:
+                        yield {"type": "system", "message": text}
 
-            elif isinstance(msg, RateLimitEvent):
-                info = msg.rate_limit_info
-                yield {
-                    "type": "rate_limit_event",
-                    "rate_limit_info": {
-                        "status": getattr(info, "status", ""),
-                        "utilization": getattr(
-                            info, "utilization", 0
-                        ),
+                elif isinstance(msg, ResultMessage):
+                    event = {"type": "result"}
+                    if msg.result:
+                        event["result"] = msg.result
+                    if msg.total_cost_usd:
+                        event["total_cost_usd"] = msg.total_cost_usd
+                    if msg.session_id and session_state is not None:
+                        session_state["claude_session_id"] = msg.session_id
+                    yield event
+
+                elif isinstance(msg, RateLimitEvent):
+                    info = msg.rate_limit_info
+                    yield {
+                        "type": "rate_limit_event",
+                        "rate_limit_info": {
+                            "status": getattr(info, "status", ""),
+                            "utilization": getattr(
+                                info, "utilization", 0
+                            ),
+                        }
+                        if info
+                        else {},
                     }
-                    if info
-                    else {},
-                }
 
-            elif isinstance(msg, StreamEvent):
-                # Pass through raw stream events for init etc.
-                event_data = msg.event or {}
-                event_type = event_data.get("type", "")
-                if event_type == "system" and event_data.get(
-                    "subtype"
-                ) == "init":
-                    if session_state is not None and event_data.get(
-                        "session_id"
-                    ):
-                        session_state["claude_session_id"] = (
-                            event_data["session_id"]
-                        )
-                    continue
-                yield event_data
+                elif isinstance(msg, StreamEvent):
+                    # Pass through raw stream events for init etc.
+                    event_data = msg.event or {}
+                    event_type = event_data.get("type", "")
+                    if event_type == "system" and event_data.get(
+                        "subtype"
+                    ) == "init":
+                        if session_state is not None and event_data.get(
+                            "session_id"
+                        ):
+                            session_state["claude_session_id"] = (
+                                event_data["session_id"]
+                            )
+                        continue
+                    yield event_data
+                    turn_active = True
+
+            # Turn finished — check for pending broadcasts from teammates
+            if not challenge_id or not run_id:
+                break
+            pending = await get_pending_broadcast(challenge_id, run_id)
+            if not pending:
+                break
+            # Inject teammate breakthrough as next turn
+            yield {
+                "type": "system",
+                "subtype": "teammate_broadcast",
+                "message": f"[Teammate breakthrough]: {pending}",
+            }
+            await client.query(
+                f"[Teammate breakthrough received]:\n{pending}\n\n"
+                "Incorporate this into your approach if relevant. "
+                "Continue working on the challenge."
+            )
+            # Loop back to process the new turn's messages
 
     except Exception as exc:
         log.error("Claude SDK error: %s", exc)

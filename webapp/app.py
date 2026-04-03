@@ -1937,13 +1937,17 @@ def build_prompt(challenge: dict, run: dict) -> str:
                 "own ideas or are completely stuck. Try your own approaches "
                 "first.",
                 "",
-                "A shared file `_shared/BREAKTHROUGHS.md` exists. Append "
-                "to it ONLY when you have made a significant, validated "
-                "breakthrough — something you are certain about and have "
-                "confirmed works (e.g., found the correct vulnerability, "
-                "extracted a key, decoded the flag format). Do NOT post "
-                "hypotheses, partial findings, or anything you haven't "
-                "verified. False breakthroughs waste your teammates' time.",
+                "You have a `notify_teammates` tool. Call it when you make "
+                "a significant, validated breakthrough — something you are "
+                "certain about and have confirmed works (e.g., found the "
+                "correct vulnerability, extracted a key, decoded the flag "
+                "format). Do NOT call it for hypotheses, partial findings, "
+                "or anything you haven't verified. Your teammates will "
+                "receive it at their next natural pause.",
+                "",
+                "You may receive '[Teammate breakthrough]' messages between "
+                "turns. Read them and incorporate useful findings into your "
+                "approach.",
             ])
 
     parts.extend([
@@ -2114,6 +2118,12 @@ async def _run_agent_sdk_path(
     saw_message = False
     last_error = None
 
+    # Register for broadcast messages (parallel mode)
+    is_parallel = challenge.get("mode") == "parallel"
+    if is_parallel:
+        from webapp.agents.broadcast import register_run, unregister_run
+        register_run(challenge_id, run_id)
+
     try:
         async for event in provider.run_agent(
             prompt=prompt,
@@ -2122,6 +2132,8 @@ async def _run_agent_sdk_path(
             cwd=str(run_cwd),
             continue_session=is_continue,
             session_state=session_state,
+            challenge_id=challenge_id if is_parallel else "",
+            run_id=run_id if is_parallel else "",
         ):
             # Check if we've been stopped externally
             stop_reason = run.get("_stop_reason")
@@ -2162,6 +2174,10 @@ async def _run_agent_sdk_path(
         run["output_lines"].append(err_event)
         append_output_event(challenge_id, run_id, err_event)
         await broadcast(challenge_id, run_id, err_event)
+
+    # Unregister from broadcast bus
+    if is_parallel:
+        unregister_run(challenge_id, run_id)
 
     # --- Finalization ---
     stop_reason = run.pop("_stop_reason", None)

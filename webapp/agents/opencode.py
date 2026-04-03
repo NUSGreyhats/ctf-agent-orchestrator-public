@@ -540,6 +540,8 @@ async def _run_agent_sdk(
     cwd: str | Path = ".",
     continue_session: bool = False,
     session_state: dict | None = None,
+    challenge_id: str = "",
+    run_id: str = "",
     **kwargs,
 ) -> AsyncIterator[dict]:
     """Run OpenCode via the opencode_sdk, yielding normalized events.
@@ -685,21 +687,45 @@ async def _run_agent_sdk(
             "message": {"content": [block]},
         }
 
-    # 7. Optionally fetch full message history for completeness
-    # (the send_message response should already contain everything we need,
-    # but we can poll messages if needed for richer data)
-    try:
-        messages = await loop.run_in_executor(
-            None,
-            lambda: client.list_messages(session_id),
-        )
-        if isinstance(messages, list) and messages:
-            log.debug(
-                "OpenCode session %s has %d messages", session_id, len(messages)
-            )
-    except Exception:
-        # Non-critical — we already yielded the response
-        pass
+    # 7. Process outgoing broadcasts from notify_teammates tool
+    if challenge_id and run_id:
+        from .broadcast import broadcast_to_teammates, get_pending_broadcast
+        queue_file = Path(cwd) / "_shared" / ".notify_queue"
+        if queue_file.exists():
+            try:
+                for line in queue_file.read_text().splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split("|", 1)
+                    msg = parts[1] if len(parts) > 1 else parts[0]
+                    await broadcast_to_teammates(
+                        challenge_id, run_id, msg
+                    )
+                queue_file.unlink()
+            except Exception as exc:
+                log.warning("Failed to process notify queue: %s", exc)
+
+        # 8. Check for incoming broadcasts from teammates
+        pending = await get_pending_broadcast(challenge_id, run_id)
+        if pending:
+            yield {
+                "type": "system",
+                "subtype": "teammate_broadcast",
+                "message": f"[Teammate breakthrough]: {pending}",
+            }
+            # Send as follow-up message
+            try:
+                await loop.run_in_executor(
+                    None,
+                    lambda: client.send_message(
+                        session_id,
+                        f"[Teammate breakthrough]:\n{pending}\n\n"
+                        "Incorporate this if relevant. Continue working.",
+                    ),
+                )
+            except Exception as exc:
+                log.warning("Failed to send broadcast to OpenCode: %s", exc)
 
 
 provider = AgentProvider(

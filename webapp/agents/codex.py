@@ -860,6 +860,8 @@ async def _run_agent_sdk(
     cwd: str | Path = ".",
     continue_session: bool = False,
     session_state: dict | None = None,
+    challenge_id: str = "",
+    run_id: str = "",
     **kwargs,
 ) -> AsyncIterator[dict]:
     """Run Codex via the app-server JSON-RPC protocol over stdio."""
@@ -994,6 +996,25 @@ async def _run_agent_sdk(
                 "approvalPolicy": "never",
                 "sandbox": "danger-full-access",
             }
+            # Add notify_teammates dynamic tool for parallel mode
+            if challenge_id and run_id:
+                thread_params["dynamicTools"] = [{
+                    "name": "notify_teammates",
+                    "description": (
+                        "Broadcast a validated breakthrough to all "
+                        "teammates. Only call for confirmed findings."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "message": {
+                                "type": "string",
+                                "description": "The breakthrough finding",
+                            },
+                        },
+                        "required": ["message"],
+                    },
+                }]
             if model:
                 thread_params["model"] = model
             if effort:
@@ -1099,11 +1120,28 @@ async def _run_agent_sdk(
                         ),
                     }
                 elif server_method == "item/tool/call":
-                    # Dynamic tool call — we don't register dynamic tools,
-                    # so this shouldn't happen. Respond with error.
-                    await _respond(server_id, {
-                        "error": "No dynamic tools registered",
-                    })
+                    # Dynamic tool call
+                    tc_params = msg.get("params", {})
+                    tc_tool = tc_params.get("tool", "")
+                    tc_args = tc_params.get("arguments", {})
+
+                    if tc_tool == "notify_teammates" and challenge_id and run_id:
+                        from .broadcast import broadcast_to_teammates
+                        tc_msg = tc_args.get("message", "")
+                        count = await broadcast_to_teammates(
+                            challenge_id, run_id, tc_msg
+                        )
+                        await _respond(server_id, {
+                            "contentItems": [{
+                                "type": "text",
+                                "text": f"Broadcast sent to {count} teammate(s)",
+                            }],
+                            "success": True,
+                        })
+                    else:
+                        await _respond(server_id, {
+                            "error": f"Unknown dynamic tool: {tc_tool}",
+                        })
                 elif server_method == "item/tool/requestUserInput":
                     # Tool requesting user input — auto-respond empty
                     await _respond(server_id, {"input": ""})
@@ -1143,6 +1181,38 @@ async def _run_agent_sdk(
                 log.info(
                     "Turn completed (status=%s)", status
                 )
+
+                # Check for pending broadcasts from teammates
+                if challenge_id and run_id:
+                    from .broadcast import get_pending_broadcast
+                    pending = await get_pending_broadcast(
+                        challenge_id, run_id
+                    )
+                    if pending:
+                        yield {
+                            "type": "system",
+                            "subtype": "teammate_broadcast",
+                            "message": (
+                                f"[Teammate breakthrough]: {pending}"
+                            ),
+                        }
+                        # Send as new turn
+                        turn_rid = await _send_request(
+                            "turn/start", {
+                                "threadId": thread_id,
+                                "input": [{
+                                    "role": "user",
+                                    "content": (
+                                        f"[Teammate breakthrough]:\n{pending}\n\n"
+                                        "Incorporate this into your approach "
+                                        "if relevant. Continue working."
+                                    ),
+                                }],
+                            },
+                        )
+                        await _read_response(turn_rid)
+                        continue  # Process the new turn's events
+
                 break
 
             if method == "item/started":

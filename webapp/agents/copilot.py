@@ -356,6 +356,8 @@ async def _run_agent_sdk(
     cwd: str | Path = ".",
     continue_session: bool = False,
     session_state: dict | None = None,
+    challenge_id: str = "",
+    run_id: str = "",
     **kwargs,
 ) -> AsyncIterator[dict]:
     """Run Copilot via the copilot SDK, yielding normalized events."""
@@ -388,11 +390,39 @@ async def _run_agent_sdk(
     try:
         client = CopilotClient()
 
+        # Define notify_teammates tool for parallel mode
+        custom_tools = []
+        _pending_broadcasts: list[tuple[str, str, str]] = []
+        if challenge_id and run_id:
+            from copilot import define_tool, ToolInvocation
+
+            @define_tool(
+                name="notify_teammates",
+                description=(
+                    "Broadcast a validated breakthrough to all teammates. "
+                    "Only call for confirmed, significant findings."
+                ),
+            )
+            def notify_tool(session_ctx, invocation: ToolInvocation):
+                msg = ""
+                if hasattr(invocation, "args") and invocation.args:
+                    msg = invocation.args.get("message", "")
+                elif hasattr(invocation, "input") and invocation.input:
+                    msg = invocation.input.get("message", "")
+                _pending_broadcasts.append(
+                    (challenge_id, run_id, msg)
+                )
+                return "Broadcast queued for teammates"
+
+            custom_tools.append(notify_tool)
+
         session_kwargs: dict = {
             "on_permission_request": _on_permission,
             "on_event": _on_event,
             "working_directory": str(Path(cwd).resolve()),
         }
+        if custom_tools:
+            session_kwargs["tools"] = custom_tools
         if resolved_model:
             session_kwargs["model"] = resolved_model
 
@@ -442,6 +472,37 @@ async def _run_agent_sdk(
                 "session.complete",
                 "error",
             ):
+                # Process outgoing broadcasts
+                if _pending_broadcasts:
+                    from .broadcast import broadcast_to_teammates
+                    for bc_cid, bc_rid, bc_msg in _pending_broadcasts:
+                        await broadcast_to_teammates(
+                            bc_cid, bc_rid, bc_msg
+                        )
+                    _pending_broadcasts.clear()
+
+                # Check for incoming broadcasts
+                if challenge_id and run_id:
+                    from .broadcast import get_pending_broadcast
+                    pending = await get_pending_broadcast(
+                        challenge_id, run_id
+                    )
+                    if pending:
+                        yield {
+                            "type": "system",
+                            "subtype": "teammate_broadcast",
+                            "message": (
+                                f"[Teammate breakthrough]: {pending}"
+                            ),
+                        }
+                        session.send(
+                            f"[Teammate breakthrough]:\n{pending}\n\n"
+                            "Incorporate this if relevant. "
+                            "Continue working.",
+                            mode="enqueue",
+                        )
+                        continue  # Process the new turn
+
                 done = True
 
     except Exception as exc:
