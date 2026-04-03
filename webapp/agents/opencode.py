@@ -690,10 +690,15 @@ async def _run_agent_sdk(
     # 7. Process outgoing broadcasts from notify_teammates tool
     if challenge_id and run_id:
         from .broadcast import broadcast_to_teammates, get_pending_broadcast
-        queue_file = Path(cwd) / "_shared" / ".notify_queue"
+        # Read the shared queue file (written by TS tool)
+        # Use atomic rename to claim the file and prevent race conditions
+        shared_dir = Path(cwd) / "_shared"
+        queue_file = shared_dir / ".notify_queue"
+        claimed_file = shared_dir / f".notify_queue.claimed.{run_id}"
         if queue_file.exists():
             try:
-                for line in queue_file.read_text().splitlines():
+                queue_file.rename(claimed_file)
+                for line in claimed_file.read_text().splitlines():
                     line = line.strip()
                     if not line:
                         continue
@@ -702,7 +707,9 @@ async def _run_agent_sdk(
                     await broadcast_to_teammates(
                         challenge_id, run_id, msg
                     )
-                queue_file.unlink()
+                claimed_file.unlink()
+            except FileNotFoundError:
+                pass  # Another run claimed it first
             except Exception as exc:
                 log.warning("Failed to process notify queue: %s", exc)
 
@@ -743,6 +750,24 @@ async def _run_agent_sdk(
                         yield {"type": "assistant", "message": {"content": fu_assistant}}
                     for b in fu_results:
                         yield {"type": "user", "message": {"content": [b]}}
+                # Re-process outgoing queue after follow-up
+                if queue_file.exists():
+                    try:
+                        queue_file.rename(claimed_file)
+                        for fline in claimed_file.read_text().splitlines():
+                            fline = fline.strip()
+                            if not fline:
+                                continue
+                            fparts = fline.split("|", 1)
+                            fmsg = fparts[1] if len(fparts) > 1 else fparts[0]
+                            await broadcast_to_teammates(
+                                challenge_id, run_id, fmsg
+                            )
+                        claimed_file.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except Exception:
+                        pass
             except Exception as exc:
                 log.warning("Failed to send broadcast to OpenCode: %s", exc)
                 break

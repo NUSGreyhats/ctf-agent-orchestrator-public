@@ -178,9 +178,10 @@ def derive_challenge_status(challenge: dict) -> str:
 
 async def stop_run(run: dict, reason: str = "user_stop") -> None:
     """Stop a run — handles both CLI (process) and SDK (task) execution."""
-    run["_stop_reason"] = reason
+    has_active = False
     proc = run.get("process")
     if proc and proc.returncode is None:
+        has_active = True
         proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
@@ -188,11 +189,15 @@ async def stop_run(run: dict, reason: str = "user_stop") -> None:
             proc.kill()
     task = run.get("task")
     if task and not task.done():
+        has_active = True
         task.cancel()
         try:
             await asyncio.wait_for(task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
+    # Only set stop_reason if we actually stopped something
+    if has_active:
+        run["_stop_reason"] = reason
 
 
 def make_run(
@@ -2217,8 +2222,14 @@ async def _run_agent_sdk_path(
         # Externally stopped (steer, delete, sibling solved)
         pass
     elif run["status"] == "solved":
-        # Auto-submit already marked it solved
-        pass
+        # Auto-submit marked it solved — stop siblings in parallel mode
+        if challenge.get("mode") == "parallel":
+            for other_id, other_run in challenge["runs"].items():
+                if other_id == run_id:
+                    continue
+                if other_run["status"] in ("solving", "pending"):
+                    await stop_run(other_run, "sibling_solved")
+                    other_run["status"] = "failed"
     elif saw_message and not last_error:
         run["status"] = "completed"
         run["error"] = None
