@@ -967,6 +967,8 @@ async def _run_agent_sdk(
     # Accumulator for agent message deltas
     delta_texts: dict[str, str] = {}
     last_yielded_text = ""
+    # Accumulator for reasoning deltas — flush as one block
+    reasoning_buffer: list[str] = []
 
     try:
         # --- Handshake (sequential request/response) ---
@@ -1160,6 +1162,22 @@ async def _run_agent_sdk(
             method = msg.get("method", "")
             params = msg.get("params", {})
 
+            # Flush accumulated reasoning before non-reasoning events
+            if reasoning_buffer and method not in (
+                "item/reasoning/textDelta",
+                "item/reasoning/summaryTextDelta",
+            ):
+                combined = "".join(reasoning_buffer)
+                reasoning_buffer.clear()
+                if combined.strip():
+                    yield {
+                        "type": "assistant",
+                        "message": {"content": [{
+                            "type": "thinking",
+                            "thinking": combined,
+                        }]},
+                    }
+
             if method == "turn/completed":
                 # Turn is done — yield any remaining info
                 turn = params.get("turn", {})
@@ -1249,28 +1267,13 @@ async def _run_agent_sdk(
                     )
                 continue
 
-            if method == "item/reasoning/textDelta":
+            if method in (
+                "item/reasoning/textDelta",
+                "item/reasoning/summaryTextDelta",
+            ):
                 delta = params.get("delta", "")
                 if delta:
-                    yield {
-                        "type": "assistant",
-                        "message": {"content": [{
-                            "type": "thinking",
-                            "thinking": delta,
-                        }]},
-                    }
-                continue
-
-            if method == "item/reasoning/summaryTextDelta":
-                delta = params.get("delta", "")
-                if delta:
-                    yield {
-                        "type": "assistant",
-                        "message": {"content": [{
-                            "type": "thinking",
-                            "thinking": delta,
-                        }]},
-                    }
+                    reasoning_buffer.append(delta)
                 continue
 
             if method == "item/commandExecution/outputDelta":
