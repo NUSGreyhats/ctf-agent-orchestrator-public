@@ -1072,7 +1072,18 @@ async def _run_agent_sdk(
             else:
                 raw_line = await proc.stdout.readline()
                 if not raw_line:
-                    # Process exited or stdout closed
+                    # Process exited or stdout closed — flush reasoning
+                    if reasoning_buffer:
+                        combined = "".join(reasoning_buffer)
+                        reasoning_buffer.clear()
+                        if combined.strip():
+                            yield {
+                                "type": "assistant",
+                                "message": {"content": [{
+                                    "type": "thinking",
+                                    "thinking": combined,
+                                }]},
+                            }
                     log.info("Codex app-server stdout closed")
                     break
 

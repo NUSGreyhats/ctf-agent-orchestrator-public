@@ -695,9 +695,14 @@ async def _run_agent_sdk(
         shared_dir = Path(cwd) / "_shared"
         queue_file = shared_dir / ".notify_queue"
         claimed_file = shared_dir / f".notify_queue.claimed.{run_id}"
-        if queue_file.exists():
+        # Also check for previously claimed but stranded files
+        for qf in [queue_file, claimed_file]:
+            if not qf.exists():
+                continue
+            target = claimed_file
             try:
-                queue_file.rename(claimed_file)
+                if qf != claimed_file:
+                    qf.rename(claimed_file)
                 for line in claimed_file.read_text().splitlines():
                     line = line.strip()
                     if not line:
@@ -709,9 +714,14 @@ async def _run_agent_sdk(
                     )
                 claimed_file.unlink()
             except FileNotFoundError:
-                pass  # Another run claimed it first
+                pass
             except Exception as exc:
                 log.warning("Failed to process notify queue: %s", exc)
+                # Don't leave stranded — try to clean up
+                try:
+                    claimed_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         # 8. Check for incoming broadcasts and process follow-up turns
         while True:
@@ -733,7 +743,12 @@ async def _run_agent_sdk(
                     lambda: client.send_message(session_id, followup_text),
                 )
                 # Parse and yield the follow-up response
-                if isinstance(followup_resp, dict):
+                if followup_resp is not None and not isinstance(followup_resp, dict):
+                    yield {
+                        "type": "assistant",
+                        "message": {"content": [{"type": "text", "text": str(followup_resp)}]},
+                    }
+                elif isinstance(followup_resp, dict):
                     fu_error = followup_resp.get("error")
                     if fu_error:
                         err_msg = (
