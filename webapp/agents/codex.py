@@ -1189,8 +1189,10 @@ async def _run_agent_sdk(
                         }]},
                     }
 
+            # Detect turn completion — v0.118+ uses thread/status/changed
+            # with status.type=="idle", older versions use turn/completed
+            turn_done = False
             if method == "turn/completed":
-                # Turn is done — yield any remaining info
                 turn = params.get("turn", {})
                 status = turn.get("status", "")
                 error_info = turn.get("codexErrorInfo")
@@ -1210,6 +1212,20 @@ async def _run_agent_sdk(
                 log.info(
                     "Turn completed (status=%s)", status
                 )
+                turn_done = True
+
+            elif method == "thread/status/changed":
+                status_obj = params.get("status", {})
+                status_type = (
+                    status_obj.get("type", "")
+                    if isinstance(status_obj, dict)
+                    else str(status_obj)
+                )
+                if status_type == "idle":
+                    log.info("Turn completed (thread idle)")
+                    turn_done = True
+
+            if turn_done:
 
                 # Check for pending broadcasts from teammates
                 if challenge_id and run_id:
