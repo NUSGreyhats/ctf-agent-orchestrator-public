@@ -10,16 +10,16 @@ One agent works on the challenge. Simple, no coordination.
 
 Multiple agents work on the same challenge simultaneously. Each agent
 works independently in its own isolated directory, maintains its own
-working notes, and shares validated breakthroughs with teammates.
+working notes, and shares validated breakthroughs with teammates via
+the `notify_teammates` tool.
 
 When any agent solves the challenge, all others are automatically
 stopped.
 
 ## Agent Collaboration Model
 
-In parallel mode, agents collaborate through shared files rather than
-a centralized manager. No agent is interrupted — they pull context
-when they need it.
+In parallel mode, agents collaborate through a `notify_teammates` tool
+registered via each provider's SDK, plus shared working notes files.
 
 ### WORKING_NOTES_{agent}.md
 
@@ -39,36 +39,36 @@ Each agent maintains a structured notes file:
 Agents update this file continuously. It serves as persistent memory
 that survives context compaction and as a reference for teammates.
 
-### BREAKTHROUGHS.md
+### notify_teammates Tool
 
-A shared file at `_shared/BREAKTHROUGHS.md`. Agents append to it ONLY
-when they have a significant, validated finding — something confirmed
-to work (e.g., found the vulnerability, extracted a key, decoded the
-flag format). Hypotheses and unverified findings do NOT go here.
+Each provider registers a `notify_teammates` tool via its native SDK:
+
+- **Claude**: In-process MCP tool via `create_sdk_mcp_server`
+- **Codex**: Dynamic tool via `thread/start` `dynamicTools`
+- **Copilot**: `define_tool` with Python handler
+- **OpenCode**: TypeScript tool file in `.opencode/tools/`
+
+When an agent calls `notify_teammates("found UAF in handler X")`:
+1. The tool handler puts the message into an in-memory broadcast queue
+2. After the current turn completes, other agents receive the message
+   as their next turn input via SDK session messaging
+3. No interruption — delivery at natural turn boundaries
 
 ### How agents discover teammates' findings
 
-1. **Prompt instruction**: Agents are told their teammates' notes exist
-   and where to find them, but are told to try their own approaches
-   first. They only read teammates' notes when stuck.
+1. **notify_teammates tool**: Agents call it for validated breakthroughs.
+   Teammates receive the message between turns automatically.
 
-2. **PostToolUse hooks** (Claude and Codex): A shell script runs after
-   every tool call, checks if `BREAKTHROUGHS.md` has new content since
-   last check, and injects a one-line notification if so. The agent
-   gets the message at a natural pause between tool calls — no
-   interruption.
-
-3. **Prompt fallback** (Copilot, OpenCode): The prompt tells agents to
-   check `_shared/BREAKTHROUGHS.md` periodically when between
-   approaches.
+2. **Working notes symlinks**: Each run directory has symlinks to other
+   agents' WORKING_NOTES files. The prompt tells agents to read these
+   when stuck.
 
 ### File system layout (parallel mode)
 
 ```
 challenges/{id}/
   _files/                        # Original challenge files
-  _shared/
-    BREAKTHROUGHS.md             # Shared breakthroughs
+  _shared/                       # Shared directory
   _runs/
     {run_id_1}/                  # Agent A's workspace
       challenge_file.bin -> ../../_files/challenge_file.bin
@@ -81,6 +81,17 @@ challenges/{id}/
       WORKING_NOTES_codex.md     # Agent B's notes
       WORKING_NOTES_claude.md -> ../{run_id_1}/WORKING_NOTES_claude.md
 ```
+
+## SDK Integration
+
+All 4 providers use their respective SDKs instead of CLI subprocesses:
+
+| Provider | SDK | Protocol |
+|----------|-----|----------|
+| Claude | `claude-agent-sdk` | Native Python, typed messages |
+| Codex | `codex app-server` | JSON-RPC 2.0 over stdio |
+| Copilot | `github-copilot-sdk` | Python SDK with event callbacks |
+| OpenCode | `opencode-sdk` | REST API to `opencode serve` |
 
 ## Settings
 

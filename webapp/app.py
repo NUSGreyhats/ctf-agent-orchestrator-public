@@ -242,10 +242,6 @@ def setup_parallel_shared_dir(challenge_id: str) -> Path:
     """Create the shared directory for parallel challenges."""
     shared_dir = CHALLENGES_DIR / challenge_id / "_shared"
     shared_dir.mkdir(parents=True, exist_ok=True)
-    # Create empty BREAKTHROUGHS.md
-    bt = shared_dir / "BREAKTHROUGHS.md"
-    if not bt.exists():
-        bt.write_text("# Breakthroughs\n\n")
     return shared_dir
 
 
@@ -1967,11 +1963,9 @@ def build_prompt(challenge: dict, run: dict) -> str:
                 "something you are certain about and have confirmed works "
                 "(e.g., found the correct vulnerability, extracted a key, "
                 "decoded the flag format) — call the `notify_teammates` "
-                "tool if available, or append a line to "
-                "`_shared/.notify_queue` in the format `timestamp|message` "
-                "as a fallback. Do NOT share hypotheses or unverified "
-                "findings. Your teammates will receive it at their next "
-                "natural pause.",
+                "tool. Do NOT share hypotheses or unverified findings. "
+                "Your teammates will receive it at their next natural "
+                "pause.",
                 "",
                 "You may receive '[Teammate breakthrough]' messages between "
                 "turns. Read them and incorporate useful findings into your "
