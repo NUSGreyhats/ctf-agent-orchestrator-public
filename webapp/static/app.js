@@ -1589,6 +1589,10 @@ function renderRunEvent(runId, event) {
   // --- System messages ---
   if (event.type === "system") {
     if (event.subtype === "init") return;
+    if (event.subtype === "teammate_broadcast" && event.message) {
+      appendMsg(feed, event.message, "teammate-broadcast-msg");
+      scrollBottomIfActive(runId); return;
+    }
     if (event.message) appendMsg(feed, event.message, "system-msg");
     scrollBottomIfActive(runId); return;
   }

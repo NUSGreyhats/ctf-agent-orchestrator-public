@@ -596,6 +596,14 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   background: var(--yellow-dim); border-radius: 12px;
   margin: 0.25rem auto; max-width: fit-content;
 }
+.teammate-broadcast-msg {
+  clear: both;
+  padding: 0.5rem 0.75rem; margin: 0.4rem 0;
+  background: var(--accent-dim); border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0; font-size: 0.78rem;
+  color: var(--accent); line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+}
 .error-msg {
   padding: 0.3rem 0.65rem; color: var(--red); font-size: 0.75rem;
   font-family: var(--mono); white-space: pre-wrap;
