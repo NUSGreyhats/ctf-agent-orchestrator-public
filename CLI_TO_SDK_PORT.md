@@ -399,10 +399,26 @@ session = client.create_session(
 ### Continue / send follow-up
 
 ```python
-# After the first turn completes, send another message
+# Within the same session — send another message
 session.send("follow-up instruction", mode="enqueue")
 # mode="enqueue" waits for current turn to finish
 # mode="immediate" interrupts (use with caution)
+```
+
+### Resume a previous session
+
+```python
+# Save session_id from first run
+session_id = session.session_id
+
+# Later — resume with full conversation history
+session = client.resume_session(
+    session_id,
+    on_permission_request=on_permission,
+    on_event=on_event,
+    tools=[my_tool_handler],  # re-register tools
+)
+session.send("continue from where you left off")
 ```
 
 ### Model name mapping
@@ -550,6 +566,6 @@ proc.terminate()
 | **Streaming** | `receive_messages()` iterator | Read stdout lines | `on_event` callback | Poll / single response |
 | **Custom tools** | `@tool` + MCP server | `dynamicTools` + RPC | `define_tool` decorator | TypeScript files |
 | **Tool handler** | In-process Python | JSON-RPC response | In-process Python | File-based bridge |
-| **Session resume** | `session_id` + `continue_conversation` | `thread_id` + `turn/start` | `session_id` | Same `session_id` |
+| **Session resume** | `session_id` + `continue_conversation` (disk-persisted) | `thread_id` + `turn/start` (in-memory, lost if process dies) | `resume_session(session_id)` (server-persisted) | Same `session_id` (server-persisted while `opencode serve` runs) |
 | **Permissions** | `permission_mode="bypassPermissions"` | `approvalPolicy: "never"` | `PermissionRequestResult(allow=True)` | N/A |
 | **Model config** | `ClaudeAgentOptions(model=)` | `thread/start` params | `create_session(model=)` | N/A (configured globally) |
