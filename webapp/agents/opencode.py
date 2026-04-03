@@ -695,15 +695,18 @@ async def _run_agent_sdk(
         shared_dir = Path(cwd) / "_shared"
         queue_file = shared_dir / ".notify_queue"
         claimed_file = shared_dir / f".notify_queue.claimed.{run_id}"
-        # Also check for previously claimed but stranded files
-        for qf in [queue_file, claimed_file]:
-            if not qf.exists():
-                continue
-            target = claimed_file
+        async def _process_queue_file(src: Path) -> None:
+            """Read broadcasts from a queue file and forward them."""
+            if not src.exists():
+                return
+            # Claim by renaming to a unique temp name
+            tmp = shared_dir / f".notify_processing.{run_id}"
             try:
-                if qf != claimed_file:
-                    qf.rename(claimed_file)
-                for line in claimed_file.read_text().splitlines():
+                src.rename(tmp)
+            except FileNotFoundError:
+                return  # Another run claimed it
+            try:
+                for line in tmp.read_text().splitlines():
                     line = line.strip()
                     if not line:
                         continue
@@ -712,16 +715,14 @@ async def _run_agent_sdk(
                     await broadcast_to_teammates(
                         challenge_id, run_id, msg
                     )
-                claimed_file.unlink()
-            except FileNotFoundError:
-                pass
+                tmp.unlink(missing_ok=True)
             except Exception as exc:
                 log.warning("Failed to process notify queue: %s", exc)
-                # Don't leave stranded — try to clean up
-                try:
-                    claimed_file.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                # Leave the file for next pass — don't delete unread data
+
+        # Process any stranded claimed file first, then the fresh queue
+        await _process_queue_file(claimed_file)
+        await _process_queue_file(queue_file)
 
         # 8. Check for incoming broadcasts and process follow-up turns
         while True:
@@ -766,23 +767,7 @@ async def _run_agent_sdk(
                     for b in fu_results:
                         yield {"type": "user", "message": {"content": [b]}}
                 # Re-process outgoing queue after follow-up
-                if queue_file.exists():
-                    try:
-                        queue_file.rename(claimed_file)
-                        for fline in claimed_file.read_text().splitlines():
-                            fline = fline.strip()
-                            if not fline:
-                                continue
-                            fparts = fline.split("|", 1)
-                            fmsg = fparts[1] if len(fparts) > 1 else fparts[0]
-                            await broadcast_to_teammates(
-                                challenge_id, run_id, fmsg
-                            )
-                        claimed_file.unlink()
-                    except FileNotFoundError:
-                        pass
-                    except Exception:
-                        pass
+                await _process_queue_file(queue_file)
             except Exception as exc:
                 log.warning("Failed to send broadcast to OpenCode: %s", exc)
                 break

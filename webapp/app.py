@@ -1061,6 +1061,7 @@ async def create_challenge(request: Request) -> JSONResponse:
 
     # Start all runs
     for run_id, run in runs.items():
+        run.pop("_stop_reason", None)
         run["task"] = asyncio.create_task(
             run_agent_task(challenge_id, run_id)
         )
@@ -1377,6 +1378,7 @@ async def bulk_upload(request: Request) -> JSONResponse:
 
             if challenge_status == "solving":
                 for run_id, run in runs.items():
+                    run.pop("_stop_reason", None)
                     run["task"] = asyncio.create_task(
                         run_agent_task(challenge_id, run_id)
                     )
@@ -1421,6 +1423,7 @@ async def solve_challenge(request: Request) -> JSONResponse:
         run["status"] = "solving"
         run["output_lines"] = []
         clear_output_log(challenge_id, target_run_id)
+        run.pop("_stop_reason", None)
         run["task"] = asyncio.create_task(
             run_agent_task(challenge_id, target_run_id)
         )
@@ -1430,6 +1433,7 @@ async def solve_challenge(request: Request) -> JSONResponse:
             run["status"] = "solving"
             run["output_lines"] = []
             clear_output_log(challenge_id, run_id)
+            run.pop("_stop_reason", None)
             run["task"] = asyncio.create_task(
                 run_agent_task(challenge_id, run_id)
             )
@@ -1536,6 +1540,7 @@ async def steer_challenge(request: Request) -> JSONResponse:
 
     run["status"] = "solving"
     run["error"] = None
+    run.pop("_stop_reason", None)
     run["task"] = asyncio.create_task(
         run_agent_task(
             challenge_id, target_run_id, continue_msg=message
@@ -2130,8 +2135,6 @@ async def _run_agent_sdk_path(
     is_continue: bool,
 ) -> None:
     """Run an agent using the provider's SDK (no subprocess)."""
-    # Clear stale stop_reason from previous runs
-    run.pop("_stop_reason", None)
     run_cwd = get_run_cwd(challenge_id, run)
     session_state = run.setdefault("_session_state", {})
 
@@ -2267,7 +2270,6 @@ async def run_agent_task(
     """Run an agent for a specific run of a challenge."""
     challenge = challenges[challenge_id]
     run = challenge["runs"][run_id]
-    run.pop("_stop_reason", None)  # Clear stale stop_reason
     run_cwd = get_run_cwd(challenge_id, run)
     run["solve_start"] = _time.monotonic()
     provider = get_provider(run["agent"])
@@ -3015,6 +3017,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
 
         if challenge_status == "solving":
             for run_id, run in runs.items():
+                run.pop("_stop_reason", None)
                 run["task"] = asyncio.create_task(
                     run_agent_task(challenge_id, run_id)
                 )
