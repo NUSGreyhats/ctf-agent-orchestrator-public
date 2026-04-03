@@ -1219,8 +1219,8 @@ async def _run_agent_sdk(
                             "turn/start", {
                                 "threadId": thread_id,
                                 "input": [{
-                                    "role": "user",
-                                    "content": (
+                                    "type": "text",
+                                    "text": (
                                         f"[Teammate breakthrough]:\n{pending}\n\n"
                                         "Incorporate this into your approach "
                                         "if relevant. Continue working."
@@ -1229,6 +1229,10 @@ async def _run_agent_sdk(
                             },
                         )
                         await _read_response(turn_rid)
+                        # Drain any notifications consumed during handshake
+                        if deferred_msgs:
+                            msg_queue.extend(deferred_msgs)
+                            deferred_msgs.clear()
                         continue  # Process the new turn's events
 
                 break

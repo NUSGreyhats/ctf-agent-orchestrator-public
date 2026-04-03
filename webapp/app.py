@@ -176,6 +176,25 @@ def derive_challenge_status(challenge: dict) -> str:
 # Run helpers
 # ---------------------------------------------------------------------------
 
+async def stop_run(run: dict, reason: str = "user_stop") -> None:
+    """Stop a run — handles both CLI (process) and SDK (task) execution."""
+    run["_stop_reason"] = reason
+    proc = run.get("process")
+    if proc and proc.returncode is None:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+    task = run.get("task")
+    if task and not task.done():
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+
+
 def make_run(
     run_id: str,
     agent: str,
@@ -510,6 +529,7 @@ def _serialize_runs(challenge: dict) -> dict:
             "duration_ms": run.get("duration_ms"),
             "solve_start": run.get("solve_start"),
             "provider_state": provider_state_for_metadata(run),
+            "_session_state": run.get("_session_state", {}),
         }
     return serialized
 
@@ -654,6 +674,14 @@ def load_challenges_from_disk() -> None:
                 run["_opencode_session_id"] = provider_state.get(
                     "opencode_session_id"
                 )
+                session_state = run_meta.get("_session_state", {})
+                # Backfill from legacy provider_state
+                if not session_state:
+                    if run.get("_codex_thread_id"):
+                        session_state["codex_thread_id"] = run["_codex_thread_id"]
+                    if run.get("_opencode_session_id"):
+                        session_state["opencode_session_id"] = run["_opencode_session_id"]
+                run["_session_state"] = session_state
                 run["output_lines"] = _normalize_output_lines(
                     load_output_log(challenge_id, run_id),
                     run_agent,
@@ -688,6 +716,13 @@ def load_challenges_from_disk() -> None:
             run["_opencode_session_id"] = provider_state.get(
                 "opencode_session_id"
             )
+            session_state_legacy = meta.get("_session_state", {})
+            if not session_state_legacy:
+                if run.get("_codex_thread_id"):
+                    session_state_legacy["codex_thread_id"] = run["_codex_thread_id"]
+                if run.get("_opencode_session_id"):
+                    session_state_legacy["opencode_session_id"] = run["_opencode_session_id"]
+            run["_session_state"] = session_state_legacy
             # Try legacy output log
             legacy_events = _load_legacy_output_log(challenge_id)
             run["output_lines"] = _normalize_output_lines(
@@ -1426,18 +1461,17 @@ async def stop_challenge(request: Request) -> JSONResponse:
     for run_id, run in runs_to_stop.items():
         if not run:
             continue
-        proc = run.get("process")
-        if proc and proc.returncode is None:
-            run["_stop_reason"] = "user_stop"
-            proc.terminate()
-            run["status"] = "failed"
-            stop_event = {
-                "type": "system",
-                "message": "Agent stopped by user.",
-            }
-            run["output_lines"].append(stop_event)
-            append_output_event(challenge_id, run_id, stop_event)
-            await broadcast(challenge_id, run_id, stop_event)
+        if run["status"] not in ("solving", "pending"):
+            continue
+        await stop_run(run, "user_stop")
+        run["status"] = "failed"
+        stop_event = {
+            "type": "system",
+            "message": "Agent stopped by user.",
+        }
+        run["output_lines"].append(stop_event)
+        append_output_event(challenge_id, run_id, stop_event)
+        await broadcast(challenge_id, run_id, stop_event)
 
     challenge["status"] = derive_challenge_status(challenge)
     save_metadata(challenge)
@@ -1489,15 +1523,8 @@ async def steer_challenge(request: Request) -> JSONResponse:
                 {"error": "no run to steer"}, status_code=404
             )
 
-    # Stop current process if running
-    proc = run.get("process")
-    if proc and proc.returncode is None:
-        run["_stop_reason"] = "steer"
-        proc.terminate()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            proc.kill()
+    # Stop current run (process or SDK task)
+    await stop_run(run, "steer")
 
     steer_event = {"type": "user_steer", "message": message}
     run["output_lines"].append(steer_event)
@@ -1603,12 +1630,9 @@ async def mark_solved(request: Request) -> JSONResponse:
         for other_id, other_run in challenge["runs"].items():
             if other_run is solved_run:
                 continue
-            proc = other_run.get("process")
-            if proc and proc.returncode is None:
-                other_run["_stop_reason"] = "sibling_solved"
-                proc.terminate()
+            await stop_run(other_run, "sibling_solved")
+            if other_run["status"] in ("solving", "pending"):
                 other_run["status"] = "failed"
-                other_run["process"] = None
                 stop_event = {
                     "type": "system",
                     "message": (
@@ -1660,10 +1684,7 @@ async def delete_challenge(request: Request) -> JSONResponse:
 
     # Stop all runs
     for run in challenge["runs"].values():
-        proc = run.get("process")
-        if proc and proc.returncode is None:
-            run["_stop_reason"] = "deleted"
-            proc.terminate()
+        await stop_run(run, "deleted")
 
     challenge_dir = CHALLENGES_DIR / challenge_id
     if challenge_dir.exists():
@@ -1937,13 +1958,15 @@ def build_prompt(challenge: dict, run: dict) -> str:
                 "own ideas or are completely stuck. Try your own approaches "
                 "first.",
                 "",
-                "You have a `notify_teammates` tool. Call it when you make "
-                "a significant, validated breakthrough — something you are "
-                "certain about and have confirmed works (e.g., found the "
-                "correct vulnerability, extracted a key, decoded the flag "
-                "format). Do NOT call it for hypotheses, partial findings, "
-                "or anything you haven't verified. Your teammates will "
-                "receive it at their next natural pause.",
+                "When you make a significant, validated breakthrough — "
+                "something you are certain about and have confirmed works "
+                "(e.g., found the correct vulnerability, extracted a key, "
+                "decoded the flag format) — call the `notify_teammates` "
+                "tool if available, or append a line to "
+                "`_shared/.notify_queue` in the format `timestamp|message` "
+                "as a fallback. Do NOT share hypotheses or unverified "
+                "findings. Your teammates will receive it at their next "
+                "natural pause.",
                 "",
                 "You may receive '[Teammate breakthrough]' messages between "
                 "turns. Read them and incorporate useful findings into your "
@@ -2164,6 +2187,8 @@ async def _run_agent_sdk_path(
                     challenge_id, run_id, event, challenge
                 )
 
+    except asyncio.CancelledError:
+        log.info("[%s/%s] SDK task cancelled", challenge_id[:8], run_id[:8])
     except Exception as exc:
         log.error(
             "[%s/%s] SDK exception: %s",
@@ -2174,10 +2199,10 @@ async def _run_agent_sdk_path(
         run["output_lines"].append(err_event)
         append_output_event(challenge_id, run_id, err_event)
         await broadcast(challenge_id, run_id, err_event)
-
-    # Unregister from broadcast bus
-    if is_parallel:
-        unregister_run(challenge_id, run_id)
+    finally:
+        # Unregister from broadcast bus
+        if is_parallel:
+            unregister_run(challenge_id, run_id)
 
     # --- Finalization ---
     stop_reason = run.pop("_stop_reason", None)
@@ -3532,10 +3557,7 @@ async def lifespan(app):
     yield
     for challenge in challenges.values():
         for run in challenge["runs"].values():
-            proc = run.get("process")
-            if proc and proc.returncode is None:
-                run["_stop_reason"] = "shutdown"
-                proc.terminate()
+            await stop_run(run, "shutdown")
     for preview in _bulk_previews.values():
         shutil.rmtree(preview["base_dir"], ignore_errors=True)
     _bulk_previews.clear()

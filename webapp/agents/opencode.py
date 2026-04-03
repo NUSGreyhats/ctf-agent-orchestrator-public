@@ -706,26 +706,46 @@ async def _run_agent_sdk(
             except Exception as exc:
                 log.warning("Failed to process notify queue: %s", exc)
 
-        # 8. Check for incoming broadcasts from teammates
-        pending = await get_pending_broadcast(challenge_id, run_id)
-        if pending:
+        # 8. Check for incoming broadcasts and process follow-up turns
+        while True:
+            pending = await get_pending_broadcast(challenge_id, run_id)
+            if not pending:
+                break
             yield {
                 "type": "system",
                 "subtype": "teammate_broadcast",
                 "message": f"[Teammate breakthrough]: {pending}",
             }
-            # Send as follow-up message
             try:
-                await loop.run_in_executor(
-                    None,
-                    lambda: client.send_message(
-                        session_id,
-                        f"[Teammate breakthrough]:\n{pending}\n\n"
-                        "Incorporate this if relevant. Continue working.",
-                    ),
+                followup_text = (
+                    f"[Teammate breakthrough]:\n{pending}\n\n"
+                    "Incorporate this if relevant. Continue working."
                 )
+                followup_resp = await loop.run_in_executor(
+                    None,
+                    lambda: client.send_message(session_id, followup_text),
+                )
+                # Parse and yield the follow-up response
+                if isinstance(followup_resp, dict):
+                    fu_error = followup_resp.get("error")
+                    if fu_error:
+                        err_msg = (
+                            _extract_error_message(fu_error)
+                            if isinstance(fu_error, dict)
+                            else str(fu_error)
+                        )
+                        yield {"type": "error", "message": err_msg or "OpenCode follow-up error"}
+                        break
+                    fu_blocks = _parse_message_parts(followup_resp)
+                    fu_assistant = [b for b in fu_blocks if b["type"] not in ("tool_result",)]
+                    fu_results = [b for b in fu_blocks if b["type"] == "tool_result"]
+                    if fu_assistant:
+                        yield {"type": "assistant", "message": {"content": fu_assistant}}
+                    for b in fu_results:
+                        yield {"type": "user", "message": {"content": [b]}}
             except Exception as exc:
                 log.warning("Failed to send broadcast to OpenCode: %s", exc)
+                break
 
 
 provider = AgentProvider(
