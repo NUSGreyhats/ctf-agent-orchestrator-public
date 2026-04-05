@@ -100,6 +100,11 @@ resource "digitalocean_firewall" "webapp" {
 resource "null_resource" "provision" {
   depends_on = [digitalocean_droplet.ctf]
 
+  # Run script even if droplet gets destroyed and recreated.
+  triggers = {
+    droplet_id = digitalocean_droplet.ctf.id
+  }
+
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command = <<-EOT
