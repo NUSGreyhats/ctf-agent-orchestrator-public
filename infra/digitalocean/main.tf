@@ -24,7 +24,7 @@ locals {
 # so this works regardless of whether the key was previously uploaded.
 resource "null_resource" "ssh_key_upload" {
   triggers = {
-    public_key = md5(local.ssh_public_key)
+    public_key = md5(trimspace(local.ssh_public_key))
   }
 
   provisioner "local-exec" {
@@ -32,7 +32,7 @@ resource "null_resource" "ssh_key_upload" {
       curl -s -X POST \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${var.do_token}" \
-        -d '{"name":"ctf-workstation","public_key":"${replace(local.ssh_public_key, "\n", "")}"}' \
+        -d '{"name":"ctf-workstation","public_key":"${trimspace(local.ssh_public_key)}"}' \
         "https://api.digitalocean.com/v2/account/keys" \
         -o /dev/null -w "%%{http_code}" | grep -qE "^(201|422)$"
     EOT
