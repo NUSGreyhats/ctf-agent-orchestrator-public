@@ -23,6 +23,9 @@ apt install -y \
     jq ripgrep shellcheck shfmt fd-find nodejs npm \
     ca-certificates
 
+apt remove -y \
+	python3-jsonshema python3-rich python3-typing-extensions
+
 python3 -m pip install pwntools ipython pycryptodome sympy z3-solver gmpy2 angr unicorn uv zizmor \
     starlette uvicorn python-multipart itsdangerous websockets httpx \
     claude-agent-sdk github-copilot-sdk opencode-sdk
