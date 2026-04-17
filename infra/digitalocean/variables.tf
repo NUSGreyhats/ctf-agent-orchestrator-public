@@ -17,8 +17,8 @@ variable "droplet_size" {
   default = "s-8vcpu-32gb-amd"
 }
 
-variable "all_things_ai_path" {
-  description = "Local path to all-things-ai directory"
+variable "repo_path" {
+  description = "Local path to the repository root"
   type        = string
   default     = "../.."
 }

@@ -21,8 +21,8 @@ variable "boot_disk_size_gb" {
   default     = 100
 }
 
-variable "all_things_ai_path" {
-  description = "Local path to all-things-ai directory"
+variable "repo_path" {
+  description = "Local path to the repository root"
   type        = string
   default     = "../.."
 }

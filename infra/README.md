@@ -30,7 +30,7 @@ terraform destroy
 ```
 
 You can also omit `hcloud_token` from `terraform.tfvars` and export `HCLOUD_TOKEN` instead. Set `ssh_public_key_path` and `ssh_private_key_path` to a matching keypair if you are not using `~/.ssh/id_rsa(.pub)`.
-Set `all_things_ai_path` to the repository root that contains `environment/` and `webapp/`. In this repo, `../..` is the correct value from `infra/hetzner/`.
+Set `repo_path` to the repository root that contains `environment/` and `webapp/`. The default `../..` is correct when running from `infra/hetzner/`.
 
 ## DigitalOcean (`infra/digitalocean/`)
 

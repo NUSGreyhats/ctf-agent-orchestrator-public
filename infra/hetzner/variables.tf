@@ -29,10 +29,10 @@ variable "image" {
   default     = "ubuntu-24.04"
 }
 
-variable "all_things_ai_path" {
+variable "repo_path" {
   description = "Local path to the repository root copied to the VM"
   type        = string
-  default     = "~/all-things-ai"
+  default     = "../.."
 }
 
 variable "ssh_public_key_path" {

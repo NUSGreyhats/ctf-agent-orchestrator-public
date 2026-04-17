@@ -116,7 +116,7 @@ resource "null_resource" "sync_repo" {
       step() { echo "==> $1"; }
 
       step "Validating local source path"
-      SRC_PATH="${var.all_things_ai_path}"
+      SRC_PATH="${var.repo_path}"
       SRC_PATH="$${SRC_PATH/#\~/$HOME}"
       SRC_PATH="$(cd "$SRC_PATH" && pwd)"
       if [ ! -d "$SRC_PATH" ]; then

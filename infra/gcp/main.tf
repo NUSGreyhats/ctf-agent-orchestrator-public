@@ -89,7 +89,7 @@ resource "null_resource" "provision" {
       done
 
       step "Copying repository to the VM"
-      SRC_PATH="${var.all_things_ai_path}"
+      SRC_PATH="${var.repo_path}"
       SRC_PATH="$${SRC_PATH/#\~/$HOME}"
       scp -r $SSH_OPTS "$SRC_PATH" root@"$IP":/root/ctf-agent-wrapper
 

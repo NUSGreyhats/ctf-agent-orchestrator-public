@@ -1,4 +1,4 @@
-# all-things-ai
+# ctf-agent-wrapper
 
 An AI-powered CTF solving workstation. Spins up a Hetzner Cloud VM pre-loaded with forensics, reverse engineering, and analysis tools, then lets you throw CTF challenges at Claude Code, Codex, GitHub Copilot CLI, or OpenCode agents via a web UI or the terminal.
 
