@@ -10,9 +10,9 @@ This project streamlines that setup. It provisions an isolated cloud VM with all
 
 Out of the box, agents are already effective. But we can do better by providing **skills** — structured workflows that suggest or enforce how the agent should approach different challenge types (forensics, reversing, crypto, etc.). Skills act as a feedback loop: when you notice the agent going down a rabbithole or missing an obvious technique, you encode that knowledge into a skill so it doesn't repeat the mistake. Over time, the skill library compounds and the solve rate improves.
 
-Skills live in the `skills/` directory, and `/root/all-things-ai/skills/` on the VM is the source of truth for every provider. The web app prompt tells agents to read the relevant `SKILL.md` files directly from that repo path.
+Skills live in the `skills/` directory, and `/root/ctf-agent-wrapper/skills/` on the VM is the source of truth for every provider. The web app prompt tells agents to read the relevant `SKILL.md` files directly from that repo path.
 
-Kernel debugging via the local GDB MCP server (`/root/all-things-ai/mcps/gdb_mcp.py`) is provisioned during environment setup and registered for Claude Code, Codex, and OpenCode.
+Kernel debugging via the local GDB MCP server (`/root/ctf-agent-wrapper/mcps/gdb_mcp.py`) is provisioned during environment setup and registered for Claude Code, Codex, and OpenCode.
 
 ## Supported Agents
 

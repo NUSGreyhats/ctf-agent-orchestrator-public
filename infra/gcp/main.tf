@@ -91,13 +91,13 @@ resource "null_resource" "provision" {
       step "Copying repository to the VM"
       SRC_PATH="${var.all_things_ai_path}"
       SRC_PATH="$${SRC_PATH/#\~/$HOME}"
-      scp -r $SSH_OPTS "$SRC_PATH" root@"$IP":/root/all-things-ai
+      scp -r $SSH_OPTS "$SRC_PATH" root@"$IP":/root/ctf-agent-wrapper
 
       step "Running environment setup"
-      ssh $SSH_OPTS root@"$IP" "bash /root/all-things-ai/environment/run.sh"
+      ssh $SSH_OPTS root@"$IP" "bash /root/ctf-agent-wrapper/environment/run.sh"
 
       step "Installing and starting ctf-solver.service"
-      ssh $SSH_OPTS root@"$IP" "cp /root/all-things-ai/webapp/ctf-solver.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now ctf-solver"
+      ssh $SSH_OPTS root@"$IP" "cp /root/ctf-agent-wrapper/webapp/ctf-solver.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now ctf-solver"
 
       step "Waiting for generated web app password"
       ssh $SSH_OPTS root@"$IP" "timeout 300 bash -c 'until [ -f /root/.ctf-solver-password ]; do sleep 1; done'"

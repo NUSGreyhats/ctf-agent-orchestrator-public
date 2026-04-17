@@ -38,7 +38,7 @@ if not isinstance(mcp, dict):
 
 mcp["gdb"] = {
     "type": "local",
-    "command": ["python3", "/root/all-things-ai/mcps/gdb_mcp.py"],
+    "command": ["python3", "/root/ctf-agent-wrapper/mcps/gdb_mcp.py"],
     "enabled": True,
 }
 

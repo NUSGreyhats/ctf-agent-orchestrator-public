@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=exec
-WorkingDirectory=/root/all-things-ai/webapp
-ExecStart=/bin/bash /root/all-things-ai/webapp/start.sh
+WorkingDirectory=/root/ctf-agent-wrapper/webapp
+ExecStart=/bin/bash /root/ctf-agent-wrapper/webapp/start.sh
 Restart=on-failure
 RestartSec=5
 Environment=HOME=/root

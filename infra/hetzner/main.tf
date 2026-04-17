@@ -130,7 +130,7 @@ resource "null_resource" "sync_repo" {
       done
 
       step "Copying repository to the VM"
-      tar -C "$SRC_PATH" -cf - . | ssh $SSH_OPTS root@"$IP" "TMP_DIR=\$(mktemp -d /root/all-things-ai.sync.XXXXXX) && trap 'rm -rf \"\$TMP_DIR\"' EXIT && mkdir -p /root/all-things-ai /root/all-things-ai/challenges && tar -C \"\$TMP_DIR\" -xf - && rm -rf \"\$TMP_DIR/challenges\" && find /root/all-things-ai -mindepth 1 -maxdepth 1 -not -name challenges -exec rm -rf {} + && cp -a \"\$TMP_DIR\"/. /root/all-things-ai/"
+      tar -C "$SRC_PATH" -cf - . | ssh $SSH_OPTS root@"$IP" "TMP_DIR=\$(mktemp -d /root/ctf-agent-wrapper.sync.XXXXXX) && trap 'rm -rf \"\$TMP_DIR\"' EXIT && mkdir -p /root/ctf-agent-wrapper /root/ctf-agent-wrapper/challenges && tar -C \"\$TMP_DIR\" -xf - && rm -rf \"\$TMP_DIR/challenges\" && find /root/ctf-agent-wrapper -mindepth 1 -maxdepth 1 -not -name challenges -exec rm -rf {} + && cp -a \"\$TMP_DIR\"/. /root/ctf-agent-wrapper/"
     EOT
   }
 }
@@ -158,7 +158,7 @@ resource "null_resource" "setup_environment" {
       done
 
       step "Running environment setup"
-      ssh $SSH_OPTS root@"$IP" "bash /root/all-things-ai/environment/run.sh"
+      ssh $SSH_OPTS root@"$IP" "bash /root/ctf-agent-wrapper/environment/run.sh"
     EOT
   }
 }
@@ -190,7 +190,7 @@ resource "null_resource" "deploy_webapp" {
       done
 
       step "Installing and starting ctf-solver.service"
-      ssh $SSH_OPTS root@"$IP" "cp /root/all-things-ai/webapp/ctf-solver.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable ctf-solver && systemctl restart ctf-solver"
+      ssh $SSH_OPTS root@"$IP" "cp /root/ctf-agent-wrapper/webapp/ctf-solver.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable ctf-solver && systemctl restart ctf-solver"
 
       step "Waiting for generated web app password"
       ssh $SSH_OPTS root@"$IP" "timeout 300 bash -c 'until [ -f /root/.ctf-solver-password ]; do sleep 1; done'"

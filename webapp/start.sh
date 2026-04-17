@@ -15,7 +15,7 @@ APP_PASSWORD="$(cat "$CREDS_FILE")"
 export SESSION_SECRET
 SESSION_SECRET="$(python3 -c "import secrets; print(secrets.token_hex(32))")"
 
-mkdir -p /root/all-things-ai/challenges
+mkdir -p /root/ctf-agent-wrapper/challenges
 
 # Generate self-signed TLS certificate (only on first run)
 CERT_DIR="/root/.ctf-solver-tls"

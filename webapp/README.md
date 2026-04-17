@@ -17,7 +17,7 @@ webapp/
 
 The backend spawns provider-specific CLI processes in non-interactive mode, normalizes their JSON or JSONL event streams into a shared UI format, and persists challenge state to `/root/.ctf-solver-state` so solver metadata stays out of challenge working directories.
 
-Methodology and domain skills are read directly from `/root/all-things-ai/skills/<skill>/` on the VM (e.g. `SKILL.md`), as configured in the backend catalog. The app no longer relies on provider-specific skill copies.
+Methodology and domain skills are read directly from `/root/ctf-agent-wrapper/skills/<skill>/` on the VM (e.g. `SKILL.md`), as configured in the backend catalog. The app no longer relies on provider-specific skill copies.
 
 ## Setup
 
