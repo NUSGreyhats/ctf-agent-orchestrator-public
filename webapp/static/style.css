@@ -605,10 +605,11 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   white-space: pre-wrap; word-break: break-word;
 }
 .error-msg {
+  clear: both;
   padding: 0.3rem 0.65rem; color: var(--red); font-size: 0.75rem;
   font-family: var(--mono); white-space: pre-wrap;
 }
-.rate-limit-msg { padding: 0.25rem 0.65rem; color: var(--orange); font-size: 0.7rem; font-style: italic; }
+.rate-limit-msg { clear: both; padding: 0.25rem 0.65rem; color: var(--orange); font-size: 0.7rem; font-style: italic; }
 .raw-msg {
   padding: 0.2rem 0.65rem; font-family: var(--mono); font-size: 0.75rem;
   line-height: 1.5; white-space: pre-wrap; word-break: break-word;
@@ -617,6 +618,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 
 /* Result block */
 .result-block {
+  clear: both;
   margin: 0.5rem 0; border: 1px solid var(--green);
   border-radius: 8px; background: var(--green-dim); padding: 0.6rem 0.75rem;
 }
