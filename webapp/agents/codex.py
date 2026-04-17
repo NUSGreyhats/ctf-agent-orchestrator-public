@@ -881,6 +881,7 @@ async def _run_agent_sdk(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd_str,
+        limit=2 ** 24,  # 16 MB — default 64 KB is too small for large JSON-RPC messages
     )
 
     request_id = 0
@@ -972,12 +973,15 @@ async def _run_agent_sdk(
 
     try:
         # --- Handshake (sequential request/response) ---
-        rid = await _send_request("initialize", {
+        init_params: dict = {
             "clientInfo": {
                 "name": "ctf-agent-wrapper",
                 "version": "1.0.0",
             },
-        })
+        }
+        if challenge_id and run_id:
+            init_params["capabilities"] = {"experimentalApi": True}
+        rid = await _send_request("initialize", init_params)
         init_result = await _read_response(rid)
         log.info("Codex app-server initialized: %s",
                  json.dumps(init_result)[:200])

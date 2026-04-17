@@ -51,7 +51,7 @@ async def _run_agent_sdk(
     from .broadcast import broadcast_to_teammates, get_pending_broadcast
 
     session_id = None
-    if session_state:
+    if continue_session and session_state:
         session_id = session_state.get("claude_session_id")
 
     # Create notify_teammates MCP tool
@@ -72,6 +72,12 @@ async def _run_agent_sdk(
             "ctf-collab", tools=[notify_teammates]
         )
 
+    import shutil
+    system_claude = shutil.which("claude")
+
+    def _stderr_handler(line: str) -> None:
+        log.warning("Claude CLI stderr: %s", line.rstrip())
+
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(cwd),
@@ -80,6 +86,8 @@ async def _run_agent_sdk(
         continue_conversation=continue_session and session_id is not None,
         session_id=session_id,
         mcp_servers=mcp_servers if mcp_servers else {},
+        cli_path=system_claude,
+        stderr=_stderr_handler,
     )
 
     client = ClaudeSDKClient(options)

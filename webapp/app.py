@@ -15,6 +15,11 @@ import json
 import logging
 import re
 
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    force=True,
+)
 log = logging.getLogger("ctf-solver")
 import mimetypes
 import os
@@ -68,7 +73,7 @@ if len(SESSION_SECRET) < 32:
         "Generate one with: python3 -c \"import secrets; print(secrets.token_hex(32))\""
     )
 TLS_ENABLED = bool(os.environ.get("TLS_CERTFILE"))
-APP_ROOT_DIR = Path("/root/all-things-ai")
+APP_ROOT_DIR = Path("/root/ctf-agent-wrapper")
 CHALLENGES_DIR = APP_ROOT_DIR / "challenges"
 CHALLENGES_DIR.mkdir(parents=True, exist_ok=True)
 STATE_ROOT_DIR = Path("/root/.ctf-solver-state")
@@ -146,7 +151,7 @@ SETTINGS_FILE = CHALLENGES_DIR / "settings.json"
 _PREVIEW_TTL = 3600
 _bulk_previews: dict[str, dict] = {}
 
-_SKILLS_ROOT = "/root/all-things-ai/skills"
+_SKILLS_ROOT = "/root/ctf-agent-wrapper/skills"
 _METHODOLOGY_SKILL = f"{_SKILLS_ROOT}/methodology/SKILL.md"
 
 
@@ -1060,11 +1065,19 @@ async def create_challenge(request: Request) -> JSONResponse:
     save_metadata(challenge)
 
     # Start all runs
+    def _task_done_cb(t: asyncio.Task, rid: str = "") -> None:
+        exc = t.exception() if not t.cancelled() else None
+        if exc:
+            log.error("[%s/%s] TASK EXCEPTION: %s", challenge_id[:8], rid[:8], exc, exc_info=exc)
+
     for run_id, run in runs.items():
         run.pop("_stop_reason", None)
-        run["task"] = asyncio.create_task(
+        log.info("[%s/%s] Creating asyncio task for agent=%s", challenge_id[:8], run_id[:8], run["agent"])
+        task = asyncio.create_task(
             run_agent_task(challenge_id, run_id)
         )
+        task.add_done_callback(lambda t, rid=run_id: _task_done_cb(t, rid))
+        run["task"] = task
 
     return JSONResponse(
         {"id": challenge_id, "status": "solving"},
@@ -2150,9 +2163,17 @@ async def _run_agent_sdk_path(
     # Register for broadcast messages (parallel mode)
     is_parallel = challenge.get("mode") == "parallel"
     if is_parallel:
-        from webapp.agents.broadcast import register_run, unregister_run
+        try:
+            from webapp.agents.broadcast import register_run, unregister_run
+        except ImportError:
+            from agents.broadcast import register_run, unregister_run
         register_run(challenge_id, run_id)
 
+    log.info(
+        "[%s/%s] About to call provider.run_agent (agent=%s, model=%s, effort=%s, cwd=%s, continue=%s)",
+        challenge_id[:8], run_id[:8], run["agent"], run.get("model", ""),
+        run.get("effort", ""), run_cwd, is_continue,
+    )
     try:
         async for event in provider.run_agent(
             prompt=prompt,
@@ -2302,10 +2323,16 @@ async def run_agent_task(
 
     # --- SDK path: use provider's run_agent if available ---
     if provider.supports_sdk:
-        await _run_agent_sdk_path(
-            challenge_id, run_id, challenge, run, provider,
-            prompt, bool(continue_msg),
-        )
+        log.info("[%s/%s] Entering SDK path for %s", challenge_id[:8], run_id[:8], run["agent"])
+        try:
+            await _run_agent_sdk_path(
+                challenge_id, run_id, challenge, run, provider,
+                prompt, bool(continue_msg),
+            )
+        except Exception as exc:
+            log.error("[%s/%s] SDK path CRASHED: %s", challenge_id[:8], run_id[:8], exc, exc_info=True)
+            raise
+        log.info("[%s/%s] SDK path completed for %s", challenge_id[:8], run_id[:8], run["agent"])
         return
 
     # --- CLI fallback path ---
