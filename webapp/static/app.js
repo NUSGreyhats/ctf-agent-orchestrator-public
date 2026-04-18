@@ -936,6 +936,14 @@ async function openChallenge(id) {
   $("#detail-timer").textContent = "";
   $("#detail-cost").textContent = "";
   foundFlags.clear(); $("#flags-list").innerHTML = ""; $("#flags-section").classList.add("hidden");
+
+  // Restore persisted flags
+  const df = c.detected_flags || {};
+  for (const [f, status] of Object.entries(df)) {
+    showFlagBanner(f);
+    if (status === "correct" || status === "wrong") setFlagStatus(f, status);
+  }
+
   if (c.status === "solving") startTimer();
   else stopTimer();
 
@@ -1071,6 +1079,9 @@ function connectGlobalWS() {
         event.flag || "???",
         event.challenge_id
       );
+    }
+    if (event.type === "flag_result" && event.flag) {
+      setFlagStatus(event.flag, event.correct ? "correct" : "wrong");
     }
     if (event.type === "challenge_status" && event.challenge_id) {
       updateDashboardChallengeStatus(event.challenge_id, event.status);
@@ -1482,11 +1493,10 @@ function checkForFlag(text) {
   return null;
 }
 
-const foundFlags = new Set();
+const foundFlags = new Map();
 
 function showFlagBanner(flag) {
   if (foundFlags.has(flag)) return;
-  foundFlags.add(flag);
 
   const section = $("#flags-section");
   const list = $("#flags-list");
@@ -1494,19 +1504,19 @@ function showFlagBanner(flag) {
 
   const item = document.createElement("div");
   item.className = "flag-item";
+  item.dataset.flag = flag;
   const span = document.createElement("span");
   span.className = "flag-text";
   span.textContent = flag;
 
   const copyBtn = document.createElement("button");
-  copyBtn.className = "btn-copy-flag";
+  copyBtn.className = "btn-flag-action";
   copyBtn.textContent = "Copy";
   copyBtn.addEventListener("click", () => copyToClipboard(flag, copyBtn));
   item.append(span, copyBtn);
 
-  // Submit to platform button (if challenge was imported)
   const submitBtn = document.createElement("button");
-  submitBtn.className = "btn-copy-flag btn-submit-flag";
+  submitBtn.className = "btn-flag-action btn-flag-submit";
   submitBtn.textContent = "Submit";
   submitBtn.addEventListener("click", async () => {
     if (!currentChallengeId) return;
@@ -1519,18 +1529,17 @@ function showFlagBanner(flag) {
     if (!res) { submitBtn.disabled = false; submitBtn.textContent = "Submit"; return; }
     const data = await res.json();
     if (data.error) {
-      // Not a plugin challenge or no saved connection — hide submit button
       submitBtn.classList.add("hidden");
       return;
     }
     if (data.correct) {
-      submitBtn.textContent = "Correct!";
-      submitBtn.classList.add("copied");
+      setFlagStatus(flag, "correct");
       showToast("Flag correct!", "success");
       updateStatusBadge("solved");
       updateButtons("solved");
       stopTimer();
     } else {
+      setFlagStatus(flag, "wrong");
       submitBtn.textContent = data.message || "Wrong";
       submitBtn.disabled = false;
       setTimeout(() => { submitBtn.textContent = "Submit"; }, 2000);
@@ -1538,19 +1547,17 @@ function showFlagBanner(flag) {
   });
   item.appendChild(submitBtn);
 
-  // Mark Solved button (manual confirm without platform submission)
   const markBtn = document.createElement("button");
-  markBtn.className = "btn-copy-flag";
+  markBtn.className = "btn-flag-action";
   markBtn.textContent = "Mark Solved";
   markBtn.addEventListener("click", async () => {
     if (!currentChallengeId) return;
     const res = await api(`/api/challenges/${currentChallengeId}/mark-solved`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ flag }),
     });
     if (res && res.ok) {
-      markBtn.textContent = "Solved!";
-      markBtn.classList.add("copied");
+      setFlagStatus(flag, "correct");
       showToast("Challenge marked as solved", "success");
       updateStatusBadge("solved");
       updateButtons("solved");
@@ -1560,6 +1567,17 @@ function showFlagBanner(flag) {
   item.appendChild(markBtn);
 
   list.appendChild(item);
+  foundFlags.set(flag, "pending");
+}
+
+function setFlagStatus(flag, status) {
+  foundFlags.set(flag, status);
+  const items = document.querySelectorAll(`.flag-item[data-flag="${CSS.escape(flag)}"]`);
+  items.forEach((item) => {
+    item.classList.remove("flag-correct", "flag-wrong");
+    if (status === "correct") item.classList.add("flag-correct");
+    else if (status === "wrong") item.classList.add("flag-wrong");
+  });
 }
 
 // === Timer ===

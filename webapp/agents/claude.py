@@ -53,9 +53,9 @@ async def _run_agent_sdk(
     )
     from .broadcast import broadcast_to_teammates, get_pending_broadcast
 
-    session_id = None
+    resume_session_id = None
     if continue_session and session_state:
-        session_id = session_state.get("claude_session_id")
+        resume_session_id = session_state.get("claude_session_id")
 
     # Create notify_teammates MCP tool
     mcp_servers = {}
@@ -86,8 +86,7 @@ async def _run_agent_sdk(
         cwd=str(cwd),
         model=model or None,
         effort=effort or None,
-        continue_conversation=continue_session and session_id is not None,
-        session_id=session_id,
+        resume=resume_session_id,
         mcp_servers=mcp_servers if mcp_servers else {},
         cli_path=system_claude,
         stderr=_stderr_handler,

@@ -585,6 +585,7 @@ def save_metadata(challenge: dict) -> None:
         "_solves": challenge.get("_solves", 0),
         "_source_url": challenge.get("_source_url", ""),
         "_connection_id": challenge.get("_connection_id", ""),
+        "detected_flags": challenge.get("detected_flags", {}),
     }
     meta_path = ensure_state_dir(challenge["id"]) / METADATA_FILE
     meta_path.write_text(json.dumps(meta, indent=2))
@@ -769,6 +770,12 @@ def load_challenges_from_disk() -> None:
                             f.write(json.dumps(evt) + "\n")
             runs[run_id] = run
 
+        # No tasks survive a restart — reset stale "solving" runs
+        for run in runs.values():
+            if run["status"] == "solving":
+                run["status"] = "failed"
+                run["error"] = "Server restarted while solving"
+
         challenge = {
             "id": challenge_id,
             "name": meta.get("name", f"Challenge {challenge_id}"),
@@ -790,6 +797,7 @@ def load_challenges_from_disk() -> None:
             "_solves": meta.get("_solves", 0),
             "_source_url": meta.get("_source_url", ""),
             "_connection_id": meta.get("_connection_id", ""),
+            "detected_flags": meta.get("detected_flags", {}),
         }
         challenge["status"] = derive_challenge_status(challenge)
         challenges[challenge_id] = challenge
@@ -972,6 +980,7 @@ async def list_challenges(request: Request) -> JSONResponse:
             "points": c.get("_points", 0),
             "solves": c.get("_solves", 0),
             "runs": runs_summary,
+            "detected_flags": c.get("detected_flags", {}),
         })
     result.sort(key=lambda x: x["created_at"], reverse=True)
     return JSONResponse(result)
@@ -1480,16 +1489,15 @@ async def solve_challenge(request: Request) -> JSONResponse:
 
     def _start_run(run_id: str, run: dict):
         if resume:
-            # Keep output history, clear stale session, start fresh with
-            # a resume prompt that tells the agent to read its notes.
-            run["_session_state"] = {}
+            # Keep output history and session state for true resume
             resume_event = {
                 "type": "system",
-                "message": "Resuming agent (fresh session)...",
+                "message": "Resuming agent session...",
             }
             run["output_lines"].append(resume_event)
             append_output_event(challenge_id, run_id, resume_event)
         else:
+            # Full retry — clear everything
             run["output_lines"] = []
             clear_output_log(challenge_id, run_id)
             run["_session_state"] = {}
@@ -1619,7 +1627,6 @@ async def steer_challenge(request: Request) -> JSONResponse:
 
     run["status"] = "solving"
     run["error"] = None
-    run["_session_state"] = {}
     run.pop("_stop_reason", None)
     run["task"] = asyncio.create_task(
         run_agent_task(
@@ -1688,6 +1695,12 @@ async def mark_solved(request: Request) -> JSONResponse:
 
     body = await request.json()
     run_id = body.get("run_id", "")
+    solved_flag = body.get("flag", "").strip()
+
+    # Persist flag as correct if provided
+    if solved_flag:
+        detected = challenge.setdefault("detected_flags", {})
+        detected[solved_flag] = "correct"
 
     if run_id and run_id in challenge["runs"]:
         target_runs = [challenge["runs"][run_id]]
@@ -1695,7 +1708,7 @@ async def mark_solved(request: Request) -> JSONResponse:
         # Mark the first completed/solving run
         target_runs = [
             r for r in challenge["runs"].values()
-            if r["status"] in ("completed", "solving")
+            if r["status"] in ("completed", "solving", "failed")
         ][:1]
 
     if not target_runs:
@@ -2132,6 +2145,12 @@ def _try_detect_and_submit_flag(
         return
     seen.add(flag)
 
+    # Persist flag in challenge metadata
+    detected = challenge.setdefault("detected_flags", {})
+    if flag not in detected:
+        detected[flag] = "pending"
+        save_metadata(challenge)
+
     # Broadcast flag_found to per-run WS and global WS
     flag_event = {
         "type": "flag_found",
@@ -2191,6 +2210,18 @@ def _try_detect_and_submit_flag(
             run["output_lines"].append(submit_event)
             append_output_event(challenge_id, run_id, submit_event)
             await broadcast(challenge_id, run_id, submit_event)
+
+            detected = challenge.setdefault("detected_flags", {})
+            detected[flag] = "correct" if result.correct else "wrong"
+            save_metadata(challenge)
+
+            await broadcast_global({
+                "type": "flag_result",
+                "challenge_id": challenge_id,
+                "flag": flag,
+                "correct": result.correct,
+                "message": result.message if not result.correct else "",
+            })
 
             if result.correct:
                 run["status"] = "solved"
@@ -2418,11 +2449,19 @@ async def run_agent_task(
     else:
         prompt = build_prompt(challenge, run)
 
-    if continue_msg:
+    has_session = bool(run.get("_session_state", {}).get(
+        "claude_session_id"
+    ) or run.get("_session_state", {}).get("codex_thread_id"))
+
+    if continue_msg and has_session:
         sys_event = {
             "type": "system",
-            "message": f"Continuing {provider.label} conversation "
-            "with guidance...",
+            "message": f"Resuming {provider.label} session...",
+        }
+    elif continue_msg:
+        sys_event = {
+            "type": "system",
+            "message": f"Continuing {provider.label} (new session)...",
         }
     else:
         sys_event = {
@@ -3307,6 +3346,10 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
     try:
         result = await plugin.submit_flag(config, remote_id, flag)
 
+        # Persist flag result
+        detected = challenge.setdefault("detected_flags", {})
+        detected[flag] = "correct" if result.correct else "wrong"
+
         # If correct, mark the challenge as solved
         if result.correct:
             for run in challenge["runs"].values():
@@ -3315,7 +3358,8 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
                     run["error"] = None
                     break
             challenge["status"] = derive_challenge_status(challenge)
-            save_metadata(challenge)
+
+        save_metadata(challenge)
 
         return JSONResponse({
             "correct": result.correct,

@@ -1113,13 +1113,42 @@ async def _run_agent_sdk(
         thread_id = session_state.get("codex_thread_id") if continue_session else None
 
         if thread_id:
-            # Resume existing thread — just send a new turn
+            # Resume existing thread from disk
             log.info("Resuming existing thread: %s", thread_id)
-        else:
-            # Start a new thread
+            resume_params: dict = {
+                "threadId": thread_id,
+                "approvalPolicy": "never",
+                "sandbox": "danger-full-access",
+                "cwd": cwd_str,
+            }
+            if model:
+                resume_params["model"] = model
+            if effort:
+                resolved = _resolve_effort(model, effort)
+                if resolved:
+                    resume_params["config"] = {
+                        "model_reasoning_effort": resolved,
+                    }
+            try:
+                rid = await _send_request("thread/resume", resume_params)
+                resume_result = await _read_response(rid)
+                resumed_id = (
+                    resume_result.get("thread", {}).get("id", "")
+                    or thread_id
+                )
+                log.info("Resumed Codex thread: %s", resumed_id)
+            except Exception as exc:
+                log.warning(
+                    "thread/resume failed for %s: %s — starting fresh",
+                    thread_id, exc,
+                )
+                thread_id = None
+
+        if not thread_id:
+            # Start a new thread (persisted to disk for future resume)
             thread_params: dict = {
                 "cwd": cwd_str,
-                "ephemeral": True,
+                "ephemeral": False,
                 "approvalPolicy": "never",
                 "sandbox": "danger-full-access",
             }
