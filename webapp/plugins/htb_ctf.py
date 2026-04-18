@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from .base import (
     CTFPlatformPlugin,
     ConfigField,
@@ -9,6 +12,8 @@ from .base import (
     RemoteFile,
     SubmitResult,
 )
+
+log = logging.getLogger("ctf-solver.htb")
 
 try:
     import httpx
@@ -201,6 +206,74 @@ class HTBCTFPlugin(CTFPlatformPlugin):
             resp = await client.get(file.url)
             resp.raise_for_status()
             return resp.content
+
+    async def start_instance(
+        self, config: dict, remote_id: str
+    ) -> dict | None:
+        ctf_id = config.get("ctf_id", "").strip()
+        if not ctf_id:
+            return None
+
+        async with _client(config) as client:
+            # Request container start
+            resp = await client.post(
+                "/api/challenges/containers/start",
+                json={"id": int(remote_id)},
+            )
+            data = resp.json()
+            msg = data.get("message", "")
+            log.info("Container start for %s: %s", remote_id, msg)
+
+            # Poll the CTF data until hostname/ports appear (max ~30s)
+            for _ in range(12):
+                await asyncio.sleep(3)
+                resp = await client.get(f"/api/ctfs/{ctf_id}")
+                if resp.status_code != 200:
+                    continue
+                ctf_data = resp.json()
+                for ch in ctf_data.get("challenges", []):
+                    if str(ch.get("id")) != str(remote_id):
+                        continue
+                    hostname = ch.get("hostname")
+                    ports = ch.get("docker_ports")
+                    if hostname and ports:
+                        docker_type = ch.get("docker_instance_type") or ""
+                        port = ports[0] if isinstance(ports, list) else ports
+                        result: dict = {
+                            "host": hostname,
+                            "port": port,
+                        }
+                        if docker_type.lower() == "web":
+                            result["url"] = f"http://{hostname}:{port}"
+                            result["type"] = "web"
+                        elif docker_type.lower() == "tcp":
+                            result["connection"] = f"nc {hostname} {port}"
+                            result["type"] = "tcp"
+                        else:
+                            result["connection"] = f"{hostname}:{port}"
+                            result["type"] = "unknown"
+                        log.info(
+                            "Container ready for %s: %s",
+                            remote_id, result,
+                        )
+                        return result
+                    break
+
+            log.warning("Container for %s did not become ready in time", remote_id)
+            return None
+
+    async def stop_instance(
+        self, config: dict, remote_id: str
+    ) -> None:
+        async with _client(config) as client:
+            resp = await client.post(
+                "/api/challenges/containers/stop",
+                json={"id": int(remote_id)},
+            )
+            log.info(
+                "Container stop for %s: %s",
+                remote_id, resp.json().get("message", ""),
+            )
 
     async def submit_flag(
         self, config: dict, remote_id: str, flag: str

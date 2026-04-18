@@ -117,6 +117,33 @@ def _imported_remote_ids(plugin_name: str, source_url: str = "") -> set[str]:
     return ids
 
 
+def _resolve_plugin_config(challenge: dict) -> tuple:
+    """Resolve plugin instance and config for a challenge.
+
+    Returns (plugin, config) or (None, {}) if not available.
+    """
+    plugin_name = challenge.get("_plugin")
+    remote_id = challenge.get("_remote_id")
+    if not plugin_name or not remote_id:
+        return None, {}
+
+    plugin = get_plugin(plugin_name)
+    if not plugin:
+        return None, {}
+
+    conn_id = challenge.get("_connection_id", "")
+    source_url = challenge.get("_source_url", "")
+    for conn in load_connections():
+        if conn_id and conn.get("id") == conn_id:
+            return plugin, conn["config"]
+        if conn.get("plugin") == plugin_name and source_url:
+            conn_src = plugin.source_url(conn.get("config", {}))
+            if conn_src == source_url:
+                return plugin, conn["config"]
+
+    return None, {}
+
+
 VALID_MODES = {"single", "parallel"}
 
 _FLAG_PATTERNS = [
@@ -583,6 +610,8 @@ def save_metadata(challenge: dict) -> None:
         "_remote_id": challenge.get("_remote_id", ""),
         "_points": challenge.get("_points", 0),
         "_solves": challenge.get("_solves", 0),
+        "_tags": challenge.get("_tags", []),
+        "_instance_info": challenge.get("_instance_info"),
         "_source_url": challenge.get("_source_url", ""),
         "_connection_id": challenge.get("_connection_id", ""),
         "detected_flags": challenge.get("detected_flags", {}),
@@ -795,6 +824,8 @@ def load_challenges_from_disk() -> None:
             "_remote_id": meta.get("_remote_id", ""),
             "_points": meta.get("_points", 0),
             "_solves": meta.get("_solves", 0),
+            "_tags": meta.get("_tags", []),
+            "_instance_info": meta.get("_instance_info"),
             "_source_url": meta.get("_source_url", ""),
             "_connection_id": meta.get("_connection_id", ""),
             "detected_flags": meta.get("detected_flags", {}),
@@ -1993,7 +2024,7 @@ async def download_file(request: Request) -> Response:
 # Build prompt
 # ---------------------------------------------------------------------------
 
-def build_prompt(challenge: dict, run: dict) -> str:
+def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) -> str:
     """Build the CTF solving prompt."""
     agent_name = run["agent"]
     is_parallel = challenge["mode"] == "parallel"
@@ -2091,6 +2122,20 @@ def build_prompt(challenge: dict, run: dict) -> str:
             "formats like flag{{...}}, FLAG{{...}}, "
             "CTF{{...}}, or ask."
         )
+    if instance_info:
+        parts.append("")
+        parts.append("Remote instance connection info:")
+        if instance_info.get("url"):
+            parts.append(f"  URL: {instance_info['url']}")
+        if instance_info.get("connection"):
+            parts.append(f"  Connection: {instance_info['connection']}")
+        if instance_info.get("host") and instance_info.get("port"):
+            parts.append(f"  Host: {instance_info['host']}")
+            parts.append(f"  Port: {instance_info['port']}")
+        inst_type = instance_info.get("type", "")
+        if inst_type:
+            parts.append(f"  Type: {inst_type}")
+
     parts.extend([
         "",
         "The challenge files are in the current directory.",
@@ -2440,6 +2485,55 @@ async def run_agent_task(
     run["solve_start"] = _time.monotonic()
     provider = get_provider(run["agent"])
 
+    # Start remote instance if needed (docker/machine challenges)
+    instance_info = challenge.get("_instance_info")
+    if not instance_info and not continue_msg:
+        tags = challenge.get("_tags", [])
+        needs_instance = any(
+            t == "docker" or t.startswith("docker:") or t == "machine"
+            for t in tags
+        )
+        if needs_instance:
+            remote_id = challenge.get("_remote_id")
+            if remote_id:
+                plugin, config = _resolve_plugin_config(challenge)
+                if plugin:
+                    sys_event_inst = {
+                        "type": "system",
+                        "message": "Starting remote instance...",
+                    }
+                    run["output_lines"].append(sys_event_inst)
+                    append_output_event(challenge_id, run_id, sys_event_inst)
+                    await broadcast(challenge_id, run_id, sys_event_inst)
+                    try:
+                        instance_info = await plugin.start_instance(config, remote_id)
+                        if instance_info:
+                            challenge["_instance_info"] = instance_info
+                            save_metadata(challenge)
+                            ready_msg = "Instance ready"
+                            if instance_info.get("url"):
+                                ready_msg += f": {instance_info['url']}"
+                            elif instance_info.get("connection"):
+                                ready_msg += f": {instance_info['connection']}"
+                            sys_event_ready = {
+                                "type": "system",
+                                "message": ready_msg,
+                            }
+                            run["output_lines"].append(sys_event_ready)
+                            append_output_event(challenge_id, run_id, sys_event_ready)
+                            await broadcast(challenge_id, run_id, sys_event_ready)
+                        else:
+                            log.warning("Instance start returned None for %s", remote_id)
+                    except Exception as exc:
+                        log.error("Failed to start instance for %s: %s", remote_id, exc)
+                        sys_event_fail = {
+                            "type": "system",
+                            "message": f"Warning: failed to start instance: {exc}",
+                        }
+                        run["output_lines"].append(sys_event_fail)
+                        append_output_event(challenge_id, run_id, sys_event_fail)
+                        await broadcast(challenge_id, run_id, sys_event_fail)
+
     if continue_msg:
         prompt = (
             f"{continue_msg}\n\n"
@@ -2448,8 +2542,16 @@ async def run_agent_task(
             "or exhaust all approaches. Read your WORKING_NOTES if you "
             "need to recall what was tried."
         )
+        if instance_info:
+            conn_parts = []
+            if instance_info.get("url"):
+                conn_parts.append(f"URL: {instance_info['url']}")
+            if instance_info.get("connection"):
+                conn_parts.append(f"Connection: {instance_info['connection']}")
+            if conn_parts:
+                prompt += f"\n\nRemote instance: {', '.join(conn_parts)}"
     else:
-        prompt = build_prompt(challenge, run)
+        prompt = build_prompt(challenge, run, instance_info)
 
     has_session = bool(run.get("_session_state", {}).get(
         "claude_session_id"
@@ -3235,6 +3337,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "_remote_id": ch_remote_id,
             "_points": ch_cfg.get("points", 0),
             "_solves": ch_cfg.get("solves", 0),
+            "_tags": ch_cfg.get("tags", []),
             "_source_url": _source_url,
             "_connection_id": _conn_id,
         }

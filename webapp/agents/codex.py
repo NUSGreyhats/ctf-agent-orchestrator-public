@@ -1137,6 +1137,14 @@ async def _run_agent_sdk(
                     or thread_id
                 )
                 log.info("Resumed Codex thread: %s", resumed_id)
+                # Discard notifications from the resume handshake —
+                # stale "idle" status would prematurely end the next turn.
+                if deferred_msgs:
+                    log.debug(
+                        "Clearing %d deferred msgs from resume handshake",
+                        len(deferred_msgs),
+                    )
+                    deferred_msgs.clear()
             except Exception as exc:
                 log.warning(
                     "thread/resume failed for %s: %s — starting fresh",

@@ -101,6 +101,23 @@ class CTFPlatformPlugin:
         """
         return config.get("url", "")
 
+    async def start_instance(
+        self, config: dict, remote_id: str
+    ) -> dict | None:
+        """Start a remote instance for a challenge.
+
+        Returns a dict with connection info (e.g. {"host": "...", "port": 1234,
+        "type": "web"}) or None if not applicable. Implementations should
+        poll until the instance is ready before returning.
+        """
+        return None
+
+    async def stop_instance(
+        self, config: dict, remote_id: str
+    ) -> None:
+        """Stop a remote instance for a challenge."""
+        pass
+
     async def submit_flag(
         self, config: dict, remote_id: str, flag: str
     ) -> SubmitResult:
