@@ -93,6 +93,14 @@ class CTFPlatformPlugin:
         """
         raise NotImplementedError
 
+    def source_url(self, config: dict) -> str:
+        """Return the platform URL for display and connection tracking.
+
+        Default: reads config["url"]. Override for plugins that derive
+        the URL from other config fields.
+        """
+        return config.get("url", "")
+
     async def submit_flag(
         self, config: dict, remote_id: str, flag: str
     ) -> SubmitResult:

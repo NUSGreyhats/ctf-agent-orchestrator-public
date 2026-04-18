@@ -2189,9 +2189,11 @@ def _try_detect_and_submit_flag(
             if conn_id and conn.get("id") == conn_id:
                 config = conn["config"]
                 break
-            if conn.get("plugin") == plugin_name and conn.get("config", {}).get("url") == source_url:
-                config = conn["config"]
-                break
+            if conn.get("plugin") == plugin_name:
+                conn_config = conn.get("config", {})
+                if plugin.source_url(conn_config) == source_url:
+                    config = conn_config
+                    break
 
     if not config:
         return
@@ -3085,6 +3087,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         )
 
     # Pre-compute connection ID for challenge linkage
+    _source_url = plugin.source_url(config)
     _ident = config.get("username") or ""
     if not _ident:
         for _k in ("token", "team_token"):
@@ -3092,7 +3095,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             if _v:
                 _ident = _v[:8] + "..."
                 break
-    _conn_id = f"{plugin_name}:{config.get('url', '')}:{_ident}"
+    _conn_id = f"{plugin_name}:{_source_url}:{_ident}"
 
     created = []
     for ch_cfg in selected:
@@ -3232,7 +3235,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "_remote_id": ch_remote_id,
             "_points": ch_cfg.get("points", 0),
             "_solves": ch_cfg.get("solves", 0),
-            "_source_url": config.get("url", ""),
+            "_source_url": _source_url,
             "_connection_id": _conn_id,
         }
         challenges[challenge_id] = challenge
@@ -3266,7 +3269,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                 if val:
                     identity = val[:8] + "..."
                     break
-        conn_id = f"{plugin_name}:{config.get('url', '')}:{identity}"
+        conn_id = f"{plugin_name}:{_source_url}:{identity}"
         label_suffix = f" ({identity})" if identity and "..." not in identity else ""
         existing = next(
             (c for c in connections if c.get("id") == conn_id), None
@@ -3278,7 +3281,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             connections.append({
                 "id": conn_id,
                 "plugin": plugin_name,
-                "label": f"{get_plugin(plugin_name).label} — {config.get('url', '')}{label_suffix}",
+                "label": f"{get_plugin(plugin_name).label} — {_source_url}{label_suffix}",
                 "config": config,
                 "last_sync": datetime.now().isoformat(),
             })
@@ -3329,12 +3332,12 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
         if conn_id and conn.get("id") == conn_id:
             config = conn["config"]
             break
-        if (
-            conn.get("plugin") == plugin_name
-            and conn.get("config", {}).get("url") == source_url
-        ):
-            config = conn["config"]
-            break
+        if conn.get("plugin") == plugin_name and source_url:
+            conn_config = conn.get("config", {})
+            conn_src = plugin.source_url(conn_config)
+            if conn_src == source_url:
+                config = conn_config
+                break
 
     if not config:
         return JSONResponse(
@@ -3428,7 +3431,7 @@ async def sync_connection(request: Request) -> JSONResponse:
 
     # Filter out already-imported challenges
     imported_ids = _imported_remote_ids(
-        plugin_name, config.get("url", "")
+        plugin_name, plugin.source_url(config)
     )
     new_challenges = [
         c for c in remote_challenges
@@ -3491,7 +3494,7 @@ async def poll_connections(request: Request) -> JSONResponse:
             continue
 
         imported_ids = _imported_remote_ids(
-            plugin_name, config.get("url", "")
+            plugin_name, plugin.source_url(config)
         )
         new_count = sum(
             1 for c in remote_challenges
