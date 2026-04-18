@@ -27,6 +27,7 @@ class RemoteChallenge:
     category: str = ""
     points: int = 0
     files: list[RemoteFile] = field(default_factory=list)
+    solves: int = 0
     solved: bool = False
     tags: list[str] = field(default_factory=list)
 

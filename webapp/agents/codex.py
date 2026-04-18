@@ -16,6 +16,7 @@ CODEX_AUTH_FILE = Path.home() / ".codex" / "auth.json"
 CODEX_CONFIG_FILE = Path.home() / ".codex" / "config.toml"
 CODEX_MODELS_CACHE_FILE = Path.home() / ".codex" / "models_cache.json"
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+CODEX_USAGE_API = "https://chatgpt.com/backend-api/wham/usage"
 REASONING_LEVEL_ORDER = ("minimal", "low", "medium", "high", "xhigh")
 REASONING_LABELS = {
     "minimal": "Minimal",
@@ -273,6 +274,16 @@ def _discover_models() -> tuple[tuple[str, str], ...]:
                     slug,
                     label if isinstance(label, str) and label else slug,
                 ))
+
+    if len(models) <= 1:
+        for slug in (
+            "gpt-5.4", "gpt-5.4-mini",
+            "gpt-5.3-codex", "gpt-5.3-codex-spark",
+            "gpt-5.2",
+        ):
+            if slug not in seen:
+                seen.add(slug)
+                models.append((slug, slug))
 
     return tuple(models)
 
@@ -620,29 +631,139 @@ def _get_session_count() -> int:
     )
 
 
+def _get_codex_token() -> str | None:
+    if not CODEX_AUTH_FILE.exists():
+        return None
+    try:
+        auth = json.loads(CODEX_AUTH_FILE.read_text())
+        return auth.get("tokens", {}).get("access_token")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _fetch_codex_usage() -> dict | None:
+    import requests
+
+    token = _get_codex_token()
+    if not token:
+        return None
+    try:
+        resp = requests.get(
+            CODEX_USAGE_API,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        log.debug("Failed to fetch Codex usage API", exc_info=True)
+    return None
+
+
+def _format_reset_seconds(secs: int | None) -> str:
+    if not secs or secs <= 0:
+        return "now"
+    hours, remainder = divmod(secs, 3600)
+    minutes = remainder // 60
+    if hours > 24:
+        days = hours // 24
+        hours = hours % 24
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
 def _get_usage_data() -> dict | None:
     if not CODEX_AUTH_FILE.exists():
         return None
 
     auth_method = "Configured"
     try:
-        auth = json.loads(CODEX_AUTH_FILE.read_text())
-        auth_method = _detect_auth_method(auth) or auth_method
+        auth_file = json.loads(CODEX_AUTH_FILE.read_text())
+        auth_method = _detect_auth_method(auth_file) or auth_method
     except (json.JSONDecodeError, OSError):
         pass
 
-    return {
+    data = {
         "auth_rows": [
             {"label": "Status", "value": "Configured"},
             {"label": "Method", "value": auth_method},
         ],
-        "stat_rows": [{
-            "label": "Sessions",
-            "value": str(_get_session_count()),
-        }],
+        "stat_rows": [],
         "daily_activity": [],
         "daily_activity_title": None,
     }
+
+    usage = _fetch_codex_usage()
+    if usage:
+        if usage.get("email"):
+            data["auth_rows"].insert(0, {
+                "label": "Account",
+                "value": usage["email"],
+            })
+        if usage.get("plan_type"):
+            data["auth_rows"].append({
+                "label": "Plan",
+                "value": usage["plan_type"].title(),
+            })
+
+        rl = usage.get("rate_limit") or {}
+        pw = rl.get("primary_window") or {}
+        sw = rl.get("secondary_window") or {}
+
+        if "used_percent" in pw:
+            reset = _format_reset_seconds(pw.get("reset_after_seconds"))
+            label = "5h usage"
+            if reset:
+                label += f" (resets in {reset})"
+            data["stat_rows"].append({
+                "label": label,
+                "value": f"{pw['used_percent']}%",
+                "bar": pw["used_percent"],
+            })
+        if "used_percent" in sw:
+            reset = _format_reset_seconds(sw.get("reset_after_seconds"))
+            label = "Weekly usage"
+            if reset:
+                label += f" (resets in {reset})"
+            data["stat_rows"].append({
+                "label": label,
+                "value": f"{sw['used_percent']}%",
+                "bar": sw["used_percent"],
+            })
+
+        for extra in usage.get("additional_rate_limits") or []:
+            name = extra.get("limit_name", "")
+            erl = extra.get("rate_limit") or {}
+            epw = erl.get("primary_window") or {}
+            esw = erl.get("secondary_window") or {}
+            if "used_percent" in epw and name:
+                reset = _format_reset_seconds(
+                    epw.get("reset_after_seconds")
+                )
+                label = f"{name} 5h"
+                if reset:
+                    label += f" (resets in {reset})"
+                data["stat_rows"].append({
+                    "label": label,
+                    "value": f"{epw['used_percent']}%",
+                    "bar": epw["used_percent"],
+                })
+
+        credits_info = usage.get("credits") or {}
+        if credits_info.get("has_credits"):
+            data["stat_rows"].append({
+                "label": "Credits",
+                "value": f"${credits_info.get('balance', '0')}",
+            })
+
+    data["stat_rows"].append({
+        "label": "Sessions",
+        "value": str(_get_session_count()),
+    })
+
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -1150,7 +1271,7 @@ async def _run_agent_sdk(
                         )
                         await _respond(server_id, {
                             "contentItems": [{
-                                "type": "text",
+                                "type": "inputText",
                                 "text": f"Broadcast sent to {count} teammate(s)",
                             }],
                             "success": True,
@@ -1425,7 +1546,7 @@ async def _run_agent_sdk(
 provider = AgentProvider(
     name="codex",
     label="Codex",
-    models=(),
+    models=_discover_models(),
     default_model="",
     auth_connect_command="codex login",
     autonomous_default=False,

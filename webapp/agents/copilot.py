@@ -425,6 +425,8 @@ async def _run_agent_sdk(
             session_kwargs["tools"] = custom_tools
         if resolved_model:
             session_kwargs["model"] = resolved_model
+        if effort and effort in ("low", "medium", "high", "xhigh"):
+            session_kwargs["reasoning_effort"] = effort
 
         # Restore previous session for continue_session
         prev_session_id = None
@@ -807,4 +809,12 @@ provider = AgentProvider(
     normalize_live_event=_normalize_live_event,
     get_usage_data=_get_usage_data,
     run_agent=_run_agent_sdk,
+    effort_levels=(
+        ("", "Provider default"),
+        ("low", "Low"),
+        ("medium", "Medium"),
+        ("high", "High"),
+        ("xhigh", "XHigh"),
+    ),
+    default_effort="high",
 )

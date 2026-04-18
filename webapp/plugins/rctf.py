@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin, urlparse, parse_qs
 
 from .base import (
     CTFPlatformPlugin,
@@ -40,6 +40,10 @@ async def _get_auth_token(config: dict) -> str:
         return token
 
     team_token = config.get("team_token", "").strip()
+    if team_token.startswith("http"):
+        parsed = urlparse(team_token)
+        team_token = parse_qs(parsed.query).get("token", [""])[0]
+    team_token = unquote(team_token)
     if not team_token:
         raise ValueError(
             "Either an auth token or team token is required"
@@ -166,6 +170,7 @@ class RCTFPlugin(CTFPlatformPlugin):
                     description=ch.get("description", ""),
                     category=ch.get("category", ""),
                     points=ch.get("points", 0),
+                    solves=ch.get("solves", 0),
                     files=files,
                     solved=bool(ch.get("solved", False)),
                     tags=ch.get("tags", []),
@@ -176,6 +181,16 @@ class RCTFPlugin(CTFPlatformPlugin):
     async def download_file(
         self, config: dict, file: RemoteFile
     ) -> bytes:
+        base = _base_url(config)
+        is_external = file.url.startswith("http") and not file.url.startswith(base)
+        if is_external:
+            _require_httpx()
+            async with httpx.AsyncClient(
+                verify=False, follow_redirects=True, timeout=30
+            ) as plain_client:
+                resp = await plain_client.get(file.url)
+                resp.raise_for_status()
+                return resp.content
         client, _ = await _client(config)
         async with client:
             resp = await client.get(file.url)

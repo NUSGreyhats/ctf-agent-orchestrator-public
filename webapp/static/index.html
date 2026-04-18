@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CTF Solver</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=20260418k">
 </head>
 <body>
   <!-- Login -->
@@ -25,10 +25,6 @@
     <header>
       <h1>CTF Solver</h1>
       <div class="header-actions">
-        <div class="default-agent-toggle">
-          <span class="toggle-label">Agent:</span>
-          <div id="default-agent-buttons"></div>
-        </div>
         <div class="header-dropdown">
           <button id="btn-add-challenge" class="btn-primary">+ Add Challenge</button>
           <div id="add-challenge-menu" class="dropdown-menu hidden">
@@ -44,6 +40,7 @@
         <button id="btn-logout" class="btn-ghost">Logout</button>
       </div>
     </header>
+    <div id="sync-notify-bar" class="sync-notify-bar hidden"></div>
     <div id="challenges-list"></div>
     <div id="empty-state" class="empty-state hidden">
       <div class="empty-icon">?</div>
@@ -98,6 +95,29 @@
             </select>
           </div>
         </div>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label for="settings-chat-view">Parallel Chat View</label>
+            <select id="settings-chat-view">
+              <option value="split">Split View</option>
+              <option value="tabbed">Tabbed View</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group form-group-inline">
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-auto-submit">
+            <span>Auto-submit flags to platform</span>
+          </label>
+          <span class="checkbox-hint">When a flag is detected, automatically submit it to the CTF platform</span>
+        </div>
+      </div>
+
+      <!-- Agents -->
+      <div class="settings-section">
+        <h2 class="settings-section-title">Agents</h2>
+        <p class="text-muted" style="font-size:0.72rem;margin-bottom:0.5rem;">Select agents to use. 1 agent = single mode, 2+ = parallel mode. Set the model for each provider.</p>
+        <div id="settings-agent-list"></div>
       </div>
 
 
@@ -152,40 +172,15 @@
         <button id="modal-close" class="btn-icon">&times;</button>
       </div>
       <form id="challenge-form">
-        <div class="form-row">
-          <div class="form-group flex-2">
-            <label for="challenge-name">Name</label>
-            <input type="text" id="challenge-name" placeholder="e.g. Secret Image">
-          </div>
-          <div class="form-group flex-1">
-            <label for="challenge-mode">Mode</label>
-            <select id="challenge-mode">
-              <option value="single">Single</option>
-              <option value="parallel">Parallel</option>
-            </select>
-          </div>
+        <div class="form-group">
+          <label for="challenge-name">Name</label>
+          <input type="text" id="challenge-name" placeholder="e.g. Secret Image">
         </div>
 
-        <!-- Single mode: agent + model + effort -->
-        <div id="single-agent-group" class="form-row">
-          <div class="form-group flex-1">
-            <label for="challenge-agent">Agent</label>
-            <select id="challenge-agent"></select>
-          </div>
-          <div class="form-group flex-1" id="model-group">
-            <label for="challenge-model">Model</label>
-            <select id="challenge-model"></select>
-          </div>
-          <div class="form-group flex-1 hidden" id="effort-group">
-            <label for="challenge-effort">Effort</label>
-            <select id="challenge-effort"></select>
-          </div>
-        </div>
-
-        <!-- Parallel mode: agent checkboxes -->
-        <div id="parallel-agent-group" class="form-group hidden">
+        <div class="form-group">
           <label>Agents</label>
-          <div id="parallel-agent-checkboxes" class="agent-checkbox-group"></div>
+          <div id="challenge-agent-list" class="agent-row-list"></div>
+          <button type="button" id="btn-add-challenge-agent" class="btn-ghost btn-sm">+ Add Agent</button>
         </div>
 
         <div class="form-group">
@@ -250,34 +245,10 @@
       <!-- Phase 3: preview + edit -->
       <div id="bulk-phase-preview" class="hidden">
         <div class="bulk-global-bar">
-          <div class="form-row">
-            <div class="form-group flex-1">
-              <label for="bulk-mode">Mode</label>
-              <select id="bulk-mode">
-                <option value="single">Single</option>
-                <option value="parallel">Parallel</option>
-              </select>
-            </div>
-          </div>
-          <!-- Single mode options for bulk -->
-          <div id="bulk-single-group" class="form-row">
-            <div class="form-group flex-1">
-              <label for="bulk-agent">Agent</label>
-              <select id="bulk-agent"></select>
-            </div>
-            <div class="form-group flex-1" id="bulk-model-group">
-              <label for="bulk-model">Model</label>
-              <select id="bulk-model"></select>
-            </div>
-            <div class="form-group flex-1 hidden" id="bulk-effort-group">
-              <label for="bulk-effort">Effort</label>
-              <select id="bulk-effort"></select>
-            </div>
-          </div>
-          <!-- Parallel mode options for bulk -->
-          <div id="bulk-parallel-group" class="form-group hidden">
+          <div class="form-group">
             <label>Agents</label>
-            <div id="bulk-parallel-checkboxes" class="agent-checkbox-group"></div>
+            <div id="bulk-agent-list" class="agent-row-list"></div>
+            <button type="button" id="btn-add-bulk-agent" class="btn-ghost btn-sm">+ Add Agent</button>
           </div>
           <div class="form-row">
             <div class="form-group flex-1">
@@ -319,6 +290,7 @@
       <div class="header-actions">
         <button id="btn-start" class="btn-primary hidden">Start</button>
         <button id="btn-retry" class="btn-primary hidden">Retry</button>
+        <button id="btn-resume" class="btn-secondary hidden">Resume</button>
         <button id="btn-unsolve" class="btn-primary hidden">Un-solve</button>
         <button id="btn-stop" class="btn-danger hidden">Stop</button>
         <button id="btn-sidebar-toggle" class="btn-ghost btn-sidebar-toggle">Panel</button>
@@ -438,34 +410,10 @@
       <!-- Phase 3: Preview and select (mirrors bulk upload) -->
       <div id="import-phase-preview" class="hidden">
         <div class="bulk-global-bar">
-          <div class="form-row">
-            <div class="form-group flex-1">
-              <label for="import-mode">Mode</label>
-              <select id="import-mode">
-                <option value="single">Single</option>
-                <option value="parallel">Parallel</option>
-              </select>
-            </div>
-          </div>
-          <!-- Single mode options -->
-          <div id="import-single-group" class="form-row">
-            <div class="form-group flex-1">
-              <label for="import-agent">Agent</label>
-              <select id="import-agent"></select>
-            </div>
-            <div class="form-group flex-1" id="import-model-group">
-              <label for="import-model">Model</label>
-              <select id="import-model"></select>
-            </div>
-            <div class="form-group flex-1 hidden" id="import-effort-group">
-              <label for="import-effort">Effort</label>
-              <select id="import-effort"></select>
-            </div>
-          </div>
-          <!-- Parallel mode options -->
-          <div id="import-parallel-group" class="form-group hidden">
+          <div class="form-group">
             <label>Agents</label>
-            <div id="import-parallel-checkboxes" class="agent-checkbox-group"></div>
+            <div id="import-agent-list" class="agent-row-list"></div>
+            <button type="button" id="btn-add-import-agent" class="btn-ghost btn-sm">+ Add Agent</button>
           </div>
           <div class="form-row">
             <div class="form-group flex-1">
@@ -492,6 +440,10 @@
             </div>
           </div>
         </div>
+        <div class="import-select-bar">
+          <button type="button" id="btn-import-select-all" class="btn-ghost btn-sm">Select All</button>
+          <button type="button" id="btn-import-deselect-all" class="btn-ghost btn-sm">Deselect All</button>
+        </div>
         <div id="import-challenge-list" class="bulk-challenge-list"></div>
         <button id="btn-import-submit" class="btn-primary btn-full">Import Selected</button>
       </div>
@@ -514,6 +466,6 @@
   </div>
 
   <div id="toast-container" class="toast-container"></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260418k"></script>
 </body>
 </html>

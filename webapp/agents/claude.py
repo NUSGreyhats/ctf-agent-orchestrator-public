@@ -15,6 +15,8 @@ log = logging.getLogger("ctf-solver.claude")
 
 CLAUDE_STATS_FILE = Path.home() / ".claude" / "stats-cache.json"
 CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
+CLAUDE_CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
+CLAUDE_USAGE_API = "https://api.anthropic.com/api/oauth/usage"
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +344,62 @@ def _get_stats() -> dict | None:
     return None
 
 
+def _get_oauth_token() -> str | None:
+    if not CLAUDE_CREDENTIALS_FILE.exists():
+        return None
+    try:
+        creds = json.loads(CLAUDE_CREDENTIALS_FILE.read_text())
+        return creds.get("claudeAiOauth", {}).get("accessToken")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _fetch_usage_api() -> dict | None:
+    import requests
+
+    token = _get_oauth_token()
+    if not token:
+        return None
+    try:
+        resp = requests.get(
+            CLAUDE_USAGE_API,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": "oauth-2025-04-20",
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        log.debug("Failed to fetch Claude usage API", exc_info=True)
+    return None
+
+
+def _format_reset_time(iso_str: str | None) -> str:
+    if not iso_str:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        reset = datetime.fromisoformat(iso_str)
+        now = datetime.now(timezone.utc)
+        delta = reset - now
+        secs = int(delta.total_seconds())
+        if secs <= 0:
+            return "now"
+        hours, remainder = divmod(secs, 3600)
+        minutes = remainder // 60
+        if hours > 24:
+            days = hours // 24
+            hours = hours % 24
+            return f"{days}d {hours}h"
+        if hours:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"
+    except Exception:
+        return ""
+
+
 def _get_usage_data() -> dict | None:
     auth = _get_auth()
     if not auth or not auth.get("loggedIn"):
@@ -360,6 +418,60 @@ def _get_usage_data() -> dict | None:
         "daily_activity": [],
         "daily_activity_title": "Daily Activity (Claude)",
     }
+
+    usage_api = _fetch_usage_api()
+    if usage_api:
+        five = usage_api.get("five_hour") or {}
+        seven = usage_api.get("seven_day") or {}
+        if "utilization" in five:
+            reset = _format_reset_time(five.get("resets_at"))
+            label = "5h usage"
+            if reset:
+                label += f" (resets in {reset})"
+            data["stat_rows"].append({
+                "label": label,
+                "value": f"{five['utilization']:.0f}%",
+                "bar": five["utilization"],
+            })
+        if "utilization" in seven:
+            reset = _format_reset_time(seven.get("resets_at"))
+            label = "Weekly usage"
+            if reset:
+                label += f" (resets in {reset})"
+            data["stat_rows"].append({
+                "label": label,
+                "value": f"{seven['utilization']:.0f}%",
+                "bar": seven["utilization"],
+            })
+
+        for key, display in (
+            ("seven_day_opus", "Opus weekly"),
+            ("seven_day_sonnet", "Sonnet weekly"),
+        ):
+            bucket = usage_api.get(key)
+            if bucket and "utilization" in bucket:
+                reset = _format_reset_time(bucket.get("resets_at"))
+                label = display
+                if reset:
+                    label += f" (resets in {reset})"
+                data["stat_rows"].append({
+                    "label": label,
+                    "value": f"{bucket['utilization']:.0f}%",
+                    "bar": bucket["utilization"],
+                })
+
+        extra = usage_api.get("extra_usage") or {}
+        if extra.get("is_enabled"):
+            used = extra.get("used_credits", 0)
+            limit = extra.get("monthly_limit", 0)
+            currency = extra.get("currency", "USD")
+            pct = extra.get("utilization", 0)
+            data["stat_rows"].append({
+                "label": "Extra usage credits",
+                "value": f"{currency} {used:,.0f} / {limit:,.0f}",
+                "bar": pct,
+            })
+
     stats = _get_stats()
     if stats:
         total_sessions = stats.get("totalSessions", 0)
@@ -374,11 +486,11 @@ def _get_usage_data() -> dict | None:
                 "label": "Messages",
                 "value": f"{total_messages:,}",
             })
-        for model, usage in stats.get("modelUsage", {}).items():
-            input_tokens = usage.get("inputTokens", 0)
-            input_tokens += usage.get("cacheReadInputTokens", 0)
-            input_tokens += usage.get("cacheCreationInputTokens", 0)
-            output_tokens = usage.get("outputTokens", 0)
+        for model, tok_usage in stats.get("modelUsage", {}).items():
+            input_tokens = tok_usage.get("inputTokens", 0)
+            input_tokens += tok_usage.get("cacheReadInputTokens", 0)
+            input_tokens += tok_usage.get("cacheCreationInputTokens", 0)
+            output_tokens = tok_usage.get("outputTokens", 0)
             total_tokens = input_tokens + output_tokens
             data["stat_rows"].append({
                 "label": model,
@@ -401,11 +513,14 @@ provider = AgentProvider(
     label="Claude",
     models=(
         ("", "Provider default"),
-        ("opus", "Opus"),
-        ("sonnet", "Sonnet"),
-        ("haiku", "Haiku"),
+        ("claude-opus-4-7", "Opus 4.7"),
+        ("claude-sonnet-4-6", "Sonnet 4.6"),
+        ("claude-opus-4-6", "Opus 4.6"),
+        ("claude-opus-4-5-20251101", "Opus 4.5"),
+        ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+        ("claude-sonnet-4-5-20250929", "Sonnet 4.5"),
     ),
-    default_model="opus",
+    default_model="claude-opus-4-7",
     auth_connect_command="claude auth login",
     autonomous_default=False,
     badge_mode="model",

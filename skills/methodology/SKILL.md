@@ -27,26 +27,26 @@ relevant skill **before** deeper analysis.
 
 | Category | Skill |
 |---|---|
-| Cryptography | `/ctf-crypto` |
-| Binary exploitation | `/ctf-pwn` |
-| Reverse engineering | `/ctf-reverse` |
-| Web exploitation | `/ctf-web` |
-| Mixed / unclear | `/ctf-misc` |
-| OSINT | `/ctf-osint` |
-| Malware analysis | `/ctf-malware` |
-| Disk forensics | `forensics/disk/SKILL.md` |
-| File forensics / stego | `forensics/file/SKILL.md` |
-| Memory forensics | `forensics/memory/SKILL.md` |
-| Network forensics | `forensics/network/SKILL.md` |
+| Cryptography | `ctf-crypto` |
+| Binary exploitation | `ctf-pwn` |
+| Reverse engineering | `ctf-reverse` |
+| Web exploitation | `ctf-web` |
+| Mixed / unclear | `ctf-misc` |
+| OSINT | `ctf-osint` |
+| Malware analysis | `ctf-malware` |
+| Disk forensics | `disk-forensics` |
+| File forensics / stego | `file-forensics` |
+| Memory forensics | `memory-forensics` |
+| Network forensics | `network-forensics` |
 
 Load tool skills when needed:
 
 | Tool | Skill |
 |---|---|
-| IDA Pro | `tools/ida/SKILL.md` |
-| libdebug | `tools/libdebug/SKILL.md` |
-| GDB + GEF | `tools/kernel-gef/SKILL.md` |
-| APK analysis | `tools/apk-analysis/SKILL.md` |
+| IDA Pro | `analyze-with-ida-domain-api` |
+| libdebug | `libdebug-debugging` |
+| GDB + GEF | `kernel-gef-debugging` |
+| APK analysis | `apk-analysis` |
 
 Load multiple skills if the challenge spans categories.
 

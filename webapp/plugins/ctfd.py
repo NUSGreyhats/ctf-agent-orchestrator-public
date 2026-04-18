@@ -196,6 +196,7 @@ class CTFdPlugin(CTFPlatformPlugin):
                     description=description,
                     category=ch.get("category", ""),
                     points=ch.get("value", 0),
+                    solves=detail.get("solves", 0) or ch.get("solves", 0),
                     files=files,
                     solved=bool(ch.get("solved_by_me")),
                     tags=tags,

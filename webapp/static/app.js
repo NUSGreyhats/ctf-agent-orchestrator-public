@@ -14,6 +14,7 @@ let stepCount = 0;
 let defaultAgent = null;
 let defaultFlagFormat = "";
 let currentTheme = "dark";
+let chatViewMode = "split";
 let csrfToken = null;
 let agentCatalog = [];
 let agentByName = new Map();
@@ -25,6 +26,7 @@ let currentRuns = [];               // run objects for current challenge
 let activeRunId = null;             // which run tab is active
 let currentChallengeMode = "single";
 let wsConnections = new Map();      // run_id -> WebSocket
+let globalWs = null;
 
 // Per-run counters (future use for per-tab badges)
 let runToolCounts = new Map();
@@ -80,22 +82,9 @@ function getAgentAutonomousDefault(agentName) {
 }
 
 // === Agent UI Renderers ===
-function renderAgentToggleButtons() {
-  const container = $("#default-agent-buttons");
-  container.innerHTML = agentCatalog.map((agent) => `
-    <button class="agent-toggle-btn" data-agent="${esc(agent.name)}">${esc(agent.label)}</button>
-  `).join("");
-  container.querySelectorAll(".agent-toggle-btn").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      defaultAgent = btn.dataset.agent;
-      updateAgentToggleUI();
-      await api("/api/settings", {
-        method: "PUT",
-        body: JSON.stringify({ default_agent: defaultAgent }),
-      });
-    });
-  });
-}
+let enabledAgents = [];
+let agentModels = {};
+let agentEfforts = {};
 
 function renderAgentSelect(selectEl) {
   selectEl.innerHTML = agentCatalog.map((agent) =>
@@ -103,28 +92,88 @@ function renderAgentSelect(selectEl) {
   ).join("");
 }
 
-function renderAgentCheckboxes(container) {
-  container.innerHTML = agentCatalog.map((agent) => {
-    const modelOptions = (agent.models || []).map((m) =>
+function createAgentRow(agentName, model, effort) {
+  const row = document.createElement("div");
+  row.className = "agent-row";
+
+  const providerSel = document.createElement("select");
+  providerSel.className = "agent-row-provider";
+  providerSel.innerHTML = agentCatalog.map((a) =>
+    `<option value="${esc(a.name)}" ${a.name === agentName ? "selected" : ""}>${esc(a.label)}</option>`
+  ).join("");
+
+  const modelSel = document.createElement("select");
+  modelSel.className = "agent-row-model";
+
+  const effortSel = document.createElement("select");
+  effortSel.className = "agent-row-effort";
+
+  const removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.className = "agent-row-remove";
+  removeBtn.textContent = "\u00d7";
+  removeBtn.title = "Remove";
+
+  function updateDropdowns() {
+    const meta = getAgentMeta(providerSel.value);
+    const models = meta.models || [];
+    modelSel.innerHTML = models.map((m) =>
       `<option value="${esc(m.value)}">${esc(m.label)}</option>`
-    ).join("");
-    return `<div class="agent-model-row">
-      <label class="checkbox-label agent-checkbox-item">
-        <input type="checkbox" class="parallel-agent-cb" value="${esc(agent.name)}" checked>
-        <span>${esc(agent.label)}</span>
-      </label>
-      <select class="pool-model-sel" data-agent="${esc(agent.name)}">${modelOptions}</select>
-    </div>`;
-  }).join("");
+    ).join("") || '<option value="">Provider default</option>';
+    if (model && models.some((m) => m.value === model)) {
+      modelSel.value = model;
+      model = "";
+    }
+    const efforts = meta.effort_levels || [];
+    if (efforts.length) {
+      effortSel.innerHTML = efforts.map((e) =>
+        `<option value="${esc(e.value)}">${esc(e.label)}</option>`
+      ).join("");
+      effortSel.classList.remove("hidden");
+      if (effort && efforts.some((e) => e.value === effort)) {
+        effortSel.value = effort;
+        effort = "";
+      } else if (meta.default_effort) {
+        effortSel.value = meta.default_effort;
+      }
+    } else {
+      effortSel.innerHTML = "";
+      effortSel.classList.add("hidden");
+    }
+  }
+
+  providerSel.addEventListener("change", () => { model = ""; effort = ""; updateDropdowns(); });
+  removeBtn.addEventListener("click", () => row.remove());
+
+  row.append(providerSel, modelSel, effortSel, removeBtn);
+  updateDropdowns();
+  return row;
 }
 
-function getCheckedAgents(container) {
-  return Array.from(container.querySelectorAll(".parallel-agent-cb:checked"))
-    .map((cb) => {
-      const agentName = cb.value;
-      const modelSel = container.querySelector(`.pool-model-sel[data-agent="${agentName}"]`);
-      return { agent: agentName, model: modelSel ? modelSel.value : "" };
-    });
+function addAgentRow(container, agentName, model, effort) {
+  const name = agentName || primaryAgentName();
+  const m = model || agentModels[name] || "";
+  const e = effort || agentEfforts[name] || "";
+  container.appendChild(createAgentRow(name, m, e));
+}
+
+function populateAgentList(container, btnId) {
+  container.innerHTML = "";
+  if (enabledAgents.length > 0) {
+    for (const name of enabledAgents) {
+      addAgentRow(container, name, agentModels[name] || "", agentEfforts[name] || "");
+    }
+  } else {
+    addAgentRow(container);
+  }
+}
+
+function getAgentRows(container) {
+  return Array.from(container.querySelectorAll(".agent-row")).map((row) => ({
+    agent: row.querySelector(".agent-row-provider").value,
+    model: row.querySelector(".agent-row-model").value,
+    effort: row.querySelector(".agent-row-effort")?.value || "",
+  }));
 }
 
 function renderUsageShell() {
@@ -147,11 +196,6 @@ async function loadAgentCatalog() {
   const data = await res.json();
   agentCatalog = data.agents || [];
   agentByName = new Map(agentCatalog.map((agent) => [agent.name, agent]));
-  renderAgentToggleButtons();
-  renderAgentSelect($("#challenge-agent"));
-  renderAgentSelect($("#bulk-agent"));
-  renderAgentCheckboxes($("#parallel-agent-checkboxes"));
-  renderAgentCheckboxes($("#bulk-parallel-checkboxes"));
   renderUsageShell();
   return true;
 }
@@ -180,6 +224,7 @@ $("#login-form").addEventListener("submit", async (e) => {
     const data = await res.json();
     csrfToken = data.csrf_token;
     if (await loadAgentCatalog()) {
+      connectGlobalWS();
       await handleDeepLink();
       loadDefaultAgent();
     }
@@ -204,19 +249,19 @@ async function loadDefaultAgent() {
   if (!agentByName.has(defaultAgent)) defaultAgent = primaryAgentName();
   defaultFlagFormat = settings.default_flag_format || "";
   currentTheme = settings.theme || "dark";
+  chatViewMode = settings.chat_view_mode || "split";
+  enabledAgents = settings.enabled_agents && settings.enabled_agents.length
+    ? settings.enabled_agents
+    : [defaultAgent];
+  agentModels = settings.agent_models || {};
+  agentEfforts = settings.agent_efforts || {};
   applyTheme(currentTheme);
-  updateAgentToggleUI();
 }
 
 function applyTheme(theme) {
   document.body.classList.toggle("light", theme === "light");
 }
 
-function updateAgentToggleUI() {
-  document.querySelectorAll(".agent-toggle-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.agent === defaultAgent);
-  });
-}
 
 // === Agent Auth Check ===
 async function checkAgentAuth() {
@@ -269,46 +314,67 @@ async function loadChallenges() {
     return;
   }
   empty.classList.add("hidden");
-  list.innerHTML = challenges.map((c) => {
-    const mode = c.mode || "single";
-    const runs = c.runs || [];
-    const runCount = runs.length;
-    const isPending = c.status === "pending";
 
-    // Mode badge
-    const modeLabel = mode.replace(/_/g, " ");
-    const modeBadge = `<span class="badge badge-mode">${esc(modeLabel)}</span>`;
+  // Group challenges by category, sort by points (status priority) within
+  const groups = {};
+  for (const c of challenges) {
+    const cat = c.category || "Uncategorized";
+    if (!groups[cat]) groups[cat] = [];
+    groups[cat].push(c);
+  }
+  const sortedCats = Object.keys(groups).sort();
 
-    // Agent / model display
-    let agentDisplay = "";
-    if (isParallelMode(mode)) {
-      agentDisplay = `<span class="card-agent">${runCount} run${runCount !== 1 ? "s" : ""}</span>`;
-    } else if (runs.length > 0) {
-      const run = runs[0];
-      const agentMeta = getAgentMeta(run.agent);
-      if (agentMeta.badge_mode === "label") {
-        agentDisplay = `<span class="card-agent card-agent-${run.agent}">${esc(agentMeta.label)}</span>`;
-      } else {
-        agentDisplay = `<span class="card-agent">${esc(run.model || agentMeta.default_model)}</span>`;
+  let html = "";
+  for (const cat of sortedCats) {
+    html += `<div class="dash-category-group">
+      <div class="dash-category-header">${esc(cat)}</div>
+      <div class="dash-card-grid">`;
+    for (const c of groups[cat]) {
+      const mode = c.mode || "single";
+      const runs = c.runs || [];
+      const runCount = runs.length;
+      const isPending = c.status === "pending";
+
+      const modeLabel = mode.replace(/_/g, " ");
+      const totalDuration = runs.reduce((sum, r) => sum + (r.duration_ms || 0), 0);
+
+      const solvesNum = c.solves ?? 0;
+      const ptsStr = c.points ? `${c.points} pts` : "";
+      const solvesStr = `${solvesNum} solve${solvesNum !== 1 ? "s" : ""}`;
+      const challengeInfo = [ptsStr, solvesStr].filter(Boolean).join(" \u00b7 ");
+
+      let agentLabel = "";
+      if (isParallelMode(mode)) {
+        agentLabel = `${runCount} run${runCount !== 1 ? "s" : ""}`;
+      } else if (runs.length > 0) {
+        const run = runs[0];
+        const agentMeta = getAgentMeta(run.agent);
+        agentLabel = agentMeta.badge_mode === "label"
+          ? agentMeta.label
+          : (run.model || agentMeta.default_model);
       }
+      const runInfo = [
+        modeLabel,
+        agentLabel,
+        `${c.files.length} file${c.files.length !== 1 ? "s" : ""}`,
+      ].filter(Boolean).join(" \u00b7 ");
+
+      const dur = formatDuration(totalDuration);
+
+      html += `
+      <div class="challenge-card status-${c.status}" data-id="${c.id}">
+        <span class="badge badge-${c.status}">${c.status}</span>
+        <span class="card-name">${esc(c.name)}</span>
+        <span class="card-info-line">${esc(challengeInfo)}</span>
+        <span class="card-info-line card-info-dim">${esc(runInfo)}</span>
+        ${dur ? `<span class="card-info-line card-info-dim">${esc(dur)}</span>` : ""}
+        ${isPending ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Start</button>` : ""}
+        <button class="btn-card-delete" data-id="${c.id}" title="Delete">&times;</button>
+      </div>`;
     }
-
-    // Total duration across all runs
-    const totalDuration = runs.reduce((sum, r) => sum + (r.duration_ms || 0), 0);
-
-    return `
-    <div class="challenge-card status-${c.status}" data-id="${c.id}">
-      <span class="badge badge-${c.status}">${c.status}</span>
-      <span class="card-name">${esc(c.name)}</span>
-      <span class="card-desc">${esc(c.description || "")}</span>
-      ${modeBadge}
-      ${agentDisplay}
-      <span class="card-files">${c.files.length} file${c.files.length !== 1 ? "s" : ""}</span>
-      <span class="card-duration">${formatDuration(totalDuration)}</span>
-      ${isPending ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Start</button>` : ""}
-      <button class="btn-card-delete" data-id="${c.id}" title="Delete">&times;</button>
-    </div>`;
-  }).join("");
+    html += `</div></div>`;
+  }
+  list.innerHTML = html;
 
   list.querySelectorAll(".challenge-card").forEach((card) =>
     card.addEventListener("click", (e) => {
@@ -340,60 +406,9 @@ setInterval(() => {
   if (!views.dashboard.classList.contains("hidden")) loadChallenges();
 }, 5000);
 
-// === Mode Selector Logic (New Challenge) ===
-function updateModeOptions() {
-  const mode = $("#challenge-mode").value;
-  const singleGroup = $("#single-agent-group");
-  const parallelGroup = $("#parallel-agent-group");
-
-  if (isParallelMode(mode)) {
-    singleGroup.classList.add("hidden");
-    parallelGroup.classList.remove("hidden");
-  } else {
-    singleGroup.classList.remove("hidden");
-    parallelGroup.classList.add("hidden");
-    updateModelOptions();
-  }
-}
-
-function updateModelOptions() {
-  const agent = $("#challenge-agent").value;
-  const modelGroup = $("#model-group");
-  const effortGroup = $("#effort-group");
-  const sel = $("#challenge-model");
-  const effortSel = $("#challenge-effort");
-
-  modelGroup.classList.remove("hidden");
-  const meta = getAgentMeta(agent);
-  sel.disabled = false;
-  sel.innerHTML = (meta.models || []).map((m) =>
-    `<option value="${m.value}">${esc(m.label)}</option>`
-  ).join("");
-  sel.value = meta.default_model;
-
-  const effortLevels = meta.effort_levels || [];
-  if (!effortLevels.length) {
-    effortGroup.classList.add("hidden");
-    effortSel.disabled = true;
-    effortSel.innerHTML = '<option value="">Provider default</option>';
-  } else {
-    effortGroup.classList.remove("hidden");
-    effortSel.disabled = false;
-    effortSel.innerHTML = effortLevels.map((e) =>
-      `<option value="${e.value}">${esc(e.label)}</option>`
-    ).join("");
-    effortSel.value = meta.default_effort || "";
-  }
-}
-
-$("#challenge-mode").addEventListener("change", () => {
-  updateModeOptions();
-});
-
-$("#challenge-agent").addEventListener("change", () => {
-  updateModelOptions();
-  const agent = $("#challenge-agent").value;
-  $("#challenge-autonomous").checked = getAgentAutonomousDefault(agent);
+// === Agent list for New Challenge ===
+$("#btn-add-challenge-agent").addEventListener("click", () => {
+  addAgentRow($("#challenge-agent-list"));
 });
 
 // === Add Challenge Dropdown ===
@@ -462,19 +477,61 @@ async function triggerSync(connId) {
   $("#import-phase-loading").classList.add("hidden");
   $("#import-phase-preview").classList.remove("hidden");
 
-  // Set up preview controls
-  $("#import-mode").value = "single";
-  renderAgentSelect($("#import-agent"));
-  renderAgentCheckboxes($("#import-parallel-checkboxes"));
-  $("#import-agent").value = defaultAgent;
-  updateImportModeOptions();
-  updateImportModels();
-  $("#import-autonomous").checked = getAgentAutonomousDefault(defaultAgent);
+  // Set up preview controls using saved agent settings
+  populateAgentList($("#import-agent-list"));
+  $("#import-autonomous").checked = getAgentAutonomousDefault(primaryAgentName());
   $("#import-flag").value = defaultFlagFormat;
 
   renderImportPreview();
   $("#import-overlay").classList.remove("hidden");
 }
+
+// === Auto-sync polling (every 5 minutes) ===
+let _syncPollTimer = null;
+
+async function pollConnections() {
+  try {
+    const res = await api("/api/connections/poll");
+    if (!res || !res.ok) return;
+    const data = await res.json();
+    const bar = $("#sync-notify-bar");
+
+    if (data.new_total > 0) {
+      bar.innerHTML = `<span class="sync-notify-text">!! ${data.new_total} new challenge${data.new_total !== 1 ? "s" : ""} to sync !!</span><button class="sync-notify-close" title="Dismiss">&times;</button>`;
+      bar.classList.remove("hidden");
+      bar.querySelector(".sync-notify-close").addEventListener("click", (e) => {
+        e.stopPropagation();
+        bar.classList.add("hidden");
+      });
+    } else {
+      bar.classList.add("hidden");
+    }
+
+    if (data.updates && data.updates.length) {
+      loadChallenges();
+    }
+  } catch (_) {}
+}
+
+function startSyncPoll() {
+  if (_syncPollTimer) return;
+  _syncPollTimer = setInterval(pollConnections, 5 * 60 * 1000);
+  setTimeout(pollConnections, 5000);
+}
+
+// Start polling once we're logged in
+const _origLoadChallenges = loadChallenges;
+loadChallenges = async function() {
+  await _origLoadChallenges();
+  startSyncPoll();
+};
+
+// Click notification bar to open sync dropdown
+document.addEventListener("click", (e) => {
+  if (e.target.id === "sync-notify-bar") {
+    $("#add-challenge-menu").classList.remove("hidden");
+  }
+});
 
 $("#btn-add-challenge").addEventListener("click", (e) => {
   e.stopPropagation();
@@ -491,11 +548,8 @@ $("#add-challenge-menu").addEventListener("click", (e) => {
 
 // === New Challenge Modal ===
 $("#btn-new-challenge").addEventListener("click", () => {
-  $("#challenge-mode").value = "single";
-  $("#challenge-agent").value = defaultAgent;
-  updateModeOptions();
-  updateModelOptions();
-  $("#challenge-autonomous").checked = getAgentAutonomousDefault(defaultAgent);
+  populateAgentList($("#challenge-agent-list"));
+  $("#challenge-autonomous").checked = getAgentAutonomousDefault(primaryAgentName());
   $("#challenge-flag").value = defaultFlagFormat;
   $("#modal-overlay").classList.remove("hidden");
   $("#challenge-name").focus();
@@ -510,8 +564,6 @@ function closeModal() {
   $("#challenge-form").reset();
   pendingChallengeUploads = [];
   $("#file-list").innerHTML = "";
-  updateModeOptions();
-  updateModelOptions();
 }
 
 // === File Upload / Drop Zone ===
@@ -605,28 +657,18 @@ function updateFileList() {
     .map(({ path }) => `<span>${esc(path)}</span>`).join("");
 }
 
-// Initial mode/model setup
-updateModeOptions();
-
 // === Create Challenge Submit ===
 $("#challenge-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const mode = $("#challenge-mode").value;
+  const agents = getAgentRows($("#challenge-agent-list"));
+  const mode = agents.length > 1 ? "parallel" : "single";
   const fd = new FormData();
   fd.append("name", $("#challenge-name").value);
   fd.append("description", $("#challenge-desc").value);
   fd.append("flag_format", $("#challenge-flag").value);
   fd.append("mode", mode);
   fd.append("autonomous", $("#challenge-autonomous").checked ? "true" : "false");
-
-  if (isParallelMode(mode)) {
-    const agents = getCheckedAgents($("#parallel-agent-checkboxes"));
-    fd.append("agents", JSON.stringify(agents));
-  } else {
-    fd.append("agents", $("#challenge-agent").value);
-    fd.append("model", $("#challenge-model").disabled ? "" : $("#challenge-model").value);
-    fd.append("effort", $("#challenge-effort").disabled ? "" : $("#challenge-effort").value);
-  }
+  fd.append("agents", JSON.stringify(agents));
 
   for (const upload of pendingChallengeUploads) {
     fd.append("files", upload.file, upload.path);
@@ -671,58 +713,10 @@ function resetBulkModal() {
   showBulkPhase("upload");
 }
 
-function updateBulkModeOptions() {
-  const mode = $("#bulk-mode").value;
-  const singleGroup = $("#bulk-single-group");
-  const parallelGroup = $("#bulk-parallel-group");
-
-  if (isParallelMode(mode)) {
-    singleGroup.classList.add("hidden");
-    parallelGroup.classList.remove("hidden");
-  } else {
-    singleGroup.classList.remove("hidden");
-    parallelGroup.classList.add("hidden");
-    updateBulkModels();
-  }
-}
-
-function updateBulkModels() {
-  const agent = $("#bulk-agent").value;
-  const modelGroup = $("#bulk-model-group");
-  const effortGroup = $("#bulk-effort-group");
-  const sel = $("#bulk-model");
-  const effortSel = $("#bulk-effort");
-
-  modelGroup.classList.remove("hidden");
-  const meta = getAgentMeta(agent);
-  sel.disabled = false;
-  sel.innerHTML = (meta.models || []).map((m) =>
-    `<option value="${m.value}">${esc(m.label)}</option>`
-  ).join("");
-  sel.value = meta.default_model;
-
-  const effortLevels = meta.effort_levels || [];
-  if (!effortLevels.length) {
-    effortGroup.classList.add("hidden");
-    effortSel.disabled = true;
-    effortSel.innerHTML = '<option value="">Provider default</option>';
-  } else {
-    effortGroup.classList.remove("hidden");
-    effortSel.disabled = false;
-    effortSel.innerHTML = effortLevels.map((e) =>
-      `<option value="${e.value}">${esc(e.label)}</option>`
-    ).join("");
-    effortSel.value = meta.default_effort || "";
-  }
-}
-
 $("#btn-bulk-upload").addEventListener("click", () => {
   resetBulkModal();
-  $("#bulk-mode").value = "single";
-  $("#bulk-agent").value = defaultAgent;
-  updateBulkModeOptions();
-  updateBulkModels();
-  $("#bulk-autonomous").checked = getAgentAutonomousDefault(defaultAgent);
+  populateAgentList($("#bulk-agent-list"));
+  $("#bulk-autonomous").checked = getAgentAutonomousDefault(primaryAgentName());
   $("#bulk-flag").value = defaultFlagFormat;
   bulkOverlay.classList.remove("hidden");
 });
@@ -736,11 +730,8 @@ function closeBulkModal() {
   resetBulkModal();
 }
 
-$("#bulk-mode").addEventListener("change", updateBulkModeOptions);
-$("#bulk-agent").addEventListener("change", () => {
-  updateBulkModels();
-  const agent = $("#bulk-agent").value;
-  $("#bulk-autonomous").checked = getAgentAutonomousDefault(agent);
+$("#btn-add-bulk-agent").addEventListener("click", () => {
+  addAgentRow($("#bulk-agent-list"));
 });
 
 bulkDropZone.addEventListener("dragover", (e) => { e.preventDefault(); bulkDropZone.classList.add("dragover"); });
@@ -833,7 +824,8 @@ function updateBulkSubmitLabel() {
 $("#btn-bulk-submit").addEventListener("click", async () => {
   if (!bulkPreviewToken) return;
 
-  const mode = $("#bulk-mode").value;
+  const agentRows = getAgentRows($("#bulk-agent-list"));
+  const mode = agentRows.length > 1 ? "parallel" : "single";
   const rows = document.querySelectorAll(".bulk-ch-row");
   const challengeConfigs = Array.from(rows).map((row, i) => ({
     folder_name: bulkPreviewChallenges[i].folder_name,
@@ -842,17 +834,6 @@ $("#btn-bulk-submit").addEventListener("click", async () => {
     flag_format: row.querySelector(".bulk-ch-flag").value.trim(),
     enabled: row.querySelector(".bulk-ch-enabled").checked,
   }));
-
-  let agents, model, effort;
-  if (isParallelMode(mode)) {
-    agents = JSON.stringify(getCheckedAgents($("#bulk-parallel-checkboxes")));
-    model = "";
-    effort = "";
-  } else {
-    agents = $("#bulk-agent").value;
-    model = $("#bulk-model").disabled ? "" : $("#bulk-model").value;
-    effort = $("#bulk-effort").disabled ? "" : $("#bulk-effort").value;
-  }
 
   const btn = $("#btn-bulk-submit");
   btn.disabled = true;
@@ -864,9 +845,9 @@ $("#btn-bulk-submit").addEventListener("click", async () => {
         preview_token: bulkPreviewToken,
         flag_format: $("#bulk-flag").value.trim(),
         mode: mode,
-        agents: agents,
-        model: model,
-        effort: effort,
+        agents: JSON.stringify(agentRows),
+        model: "",
+        effort: "",
         autonomous: $("#bulk-autonomous").checked,
         paused: $("#bulk-paused") ? $("#bulk-paused").checked : false,
         challenges: challengeConfigs,
@@ -981,6 +962,7 @@ function updateStatusBadge(status) {
 function updateButtons(status) {
   $("#btn-start").classList.toggle("hidden", status !== "pending");
   $("#btn-retry").classList.toggle("hidden", status !== "failed" && status !== "completed");
+  $("#btn-resume").classList.toggle("hidden", status !== "failed" && status !== "completed");
   $("#btn-unsolve").classList.toggle("hidden", status !== "solved");
 
   $("#btn-stop").classList.toggle("hidden", status !== "solving");
@@ -1020,6 +1002,15 @@ $("#btn-retry").addEventListener("click", async () => {
   if (res && res.ok) {
     updateStatusBadge("solving"); updateButtons("solving"); startTimer();
     // Re-open to pick up new runs from the server
+    openChallenge(currentChallengeId);
+  }
+});
+
+$("#btn-resume").addEventListener("click", async () => {
+  if (!currentChallengeId) return;
+  const res = await api(`/api/challenges/${currentChallengeId}/solve?resume=1`, { method: "POST" });
+  if (res && res.ok) {
+    updateStatusBadge("solving"); updateButtons("solving"); startTimer();
     openChallenge(currentChallengeId);
   }
 });
@@ -1065,6 +1056,38 @@ function connectAllRuns(challengeId, runs) {
   for (const run of runs) {
     connectRunWS(challengeId, run.id, run.agent);
   }
+}
+
+function connectGlobalWS() {
+  if (globalWs && globalWs.readyState <= WebSocket.OPEN) return;
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  globalWs = new WebSocket(`${proto}//${location.host}/ws/events`);
+  globalWs.onmessage = (e) => {
+    const event = JSON.parse(e.data);
+    if (event.type === "flag_found") {
+      showFlagFoundToast(
+        event.challenge_name || "Challenge",
+        event.agent || "Agent",
+        event.flag || "???",
+        event.challenge_id
+      );
+    }
+    if (event.type === "challenge_status" && event.challenge_id) {
+      updateDashboardChallengeStatus(event.challenge_id, event.status);
+    }
+  };
+  globalWs.onclose = () => {
+    setTimeout(connectGlobalWS, 3000);
+  };
+}
+
+function updateDashboardChallengeStatus(challengeId, status) {
+  const card = document.querySelector(`[data-id="${challengeId}"]`);
+  if (!card) return;
+  const badge = card.querySelector(".badge");
+  if (!badge) return;
+  badge.textContent = status;
+  badge.className = "badge badge-" + status;
 }
 
 function connectRunWS(challengeId, runId, agentLabel) {
@@ -1129,10 +1152,19 @@ function scrollBottom() {
 }
 
 function scrollBottomIfActive(runId) {
+  if (isSplitView()) {
+    const f = document.getElementById(`feed-${runId}`);
+    if (autoScroll && f) f.scrollTop = f.scrollHeight;
+    return;
+  }
   if (runId === activeRunId) scrollBottom();
 }
 
 // === Run Tabs ===
+function isSplitView() {
+  return chatViewMode === "split" && currentRuns.length > 1;
+}
+
 function initRunTabs(runs) {
   currentRuns = runs;
   const tabBar = $("#run-tabs");
@@ -1143,6 +1175,11 @@ function initRunTabs(runs) {
   const scrollBtn = feedsEl.querySelector("#btn-scroll-bottom");
   feedsEl.innerHTML = "";
   if (scrollBtn) feedsEl.appendChild(scrollBtn);
+
+  // Remove split mode classes
+  feedsEl.classList.remove("split-mode");
+  delete feedsEl.dataset.panes;
+  tabBar.classList.remove("hidden");
 
   if (!runs.length) {
     // Create a default placeholder feed
@@ -1162,30 +1199,67 @@ function initRunTabs(runs) {
   }
 
   activeRunId = runs[0].id;
+  const useSplit = chatViewMode === "split" && runs.length > 1;
+
+  const globalSteer = $("#steer-bar");
+  if (useSplit) {
+    feedsEl.classList.add("split-mode");
+    feedsEl.dataset.panes = String(runs.length);
+    tabBar.classList.add("hidden");
+    globalSteer.classList.add("hidden");
+  } else {
+    globalSteer.classList.remove("hidden");
+  }
 
   for (const run of runs) {
     const agentMeta = getAgentMeta(run.agent);
     const label = agentMeta.label || run.agent;
-
-    const btn = document.createElement("button");
-    btn.className = `run-tab${run.id === activeRunId ? " active" : ""}`;
-    btn.dataset.run = run.id;
     const dotClass = run.status === "solving" ? "dot-running"
       : run.status === "solved" ? "dot-solved"
       : run.status === "failed" ? "dot-error"
       : run.status === "completed" ? "dot-done"
-
       : run.status === "pending" ? "dot-pending"
       : "dot-running";
-    btn.innerHTML = `<span class="run-tab-dot ${dotClass}"></span>${esc(label)}`;
-    btn.addEventListener("click", () => switchRunTab(run.id));
-    tabBar.appendChild(btn);
 
-    const feed = document.createElement("div");
-    feed.id = `feed-${run.id}`;
-    feed.className = `panel-body run-feed${run.id === activeRunId ? " active" : ""}`;
-    feedsEl.insertBefore(feed, scrollBtn);
-    setupFeedScroll(feed);
+    if (!useSplit) {
+      const btn = document.createElement("button");
+      btn.className = `run-tab${run.id === activeRunId ? " active" : ""}`;
+      btn.dataset.run = run.id;
+      btn.innerHTML = `<span class="run-tab-dot ${dotClass}"></span>${esc(label)}`;
+      btn.addEventListener("click", () => switchRunTab(run.id));
+      tabBar.appendChild(btn);
+    }
+
+    if (useSplit) {
+      const pane = document.createElement("div");
+      pane.className = "split-pane";
+      pane.innerHTML = `<div class="split-pane-header"><span class="run-tab-dot ${dotClass}"></span>${esc(label)}</div>`;
+      const feed = document.createElement("div");
+      feed.id = `feed-${run.id}`;
+      feed.className = "panel-body run-feed active";
+      pane.appendChild(feed);
+
+      const steer = document.createElement("div");
+      steer.className = "steer-bar split-steer";
+      steer.innerHTML = `<input type="text" class="split-steer-input" placeholder="Guide ${esc(label)}..." autocomplete="off"><button class="btn-primary btn-sm split-steer-btn">Send</button>`;
+      const steerInput = steer.querySelector(".split-steer-input");
+      const steerBtn = steer.querySelector(".split-steer-btn");
+      const sendFn = () => sendSteerToRun(run.id, steerInput);
+      steerBtn.addEventListener("click", sendFn);
+      steerInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendFn(); }
+      });
+      pane.appendChild(steer);
+
+      feedsEl.insertBefore(pane, scrollBtn);
+      setupFeedScroll(feed);
+    } else {
+      const feed = document.createElement("div");
+      feed.id = `feed-${run.id}`;
+      feed.className = `panel-body run-feed${run.id === activeRunId ? " active" : ""}`;
+      feedsEl.insertBefore(feed, scrollBtn);
+      setupFeedScroll(feed);
+    }
   }
 }
 
@@ -1214,35 +1288,73 @@ function addRunTab(run) {
     : run.status === "pending" ? "dot-pending"
     : "dot-running";
 
-  const btn = document.createElement("button");
-  btn.className = "run-tab";
-  btn.dataset.run = run.id;
-  btn.innerHTML = `<span class="run-tab-dot ${dotClass}"></span>${esc(label)}`;
-  btn.addEventListener("click", () => switchRunTab(run.id));
-  tabBar.appendChild(btn);
+  const useSplit = isSplitView();
 
-  const feed = document.createElement("div");
-  feed.id = `feed-${run.id}`;
-  feed.className = "panel-body run-feed";
-  feedsEl.insertBefore(feed, scrollBtn);
-  setupFeedScroll(feed);
+  if (!useSplit) {
+    const btn = document.createElement("button");
+    btn.className = "run-tab";
+    btn.dataset.run = run.id;
+    btn.innerHTML = `<span class="run-tab-dot ${dotClass}"></span>${esc(label)}`;
+    btn.addEventListener("click", () => switchRunTab(run.id));
+    tabBar.appendChild(btn);
+
+    const feed = document.createElement("div");
+    feed.id = `feed-${run.id}`;
+    feed.className = "panel-body run-feed";
+    feedsEl.insertBefore(feed, scrollBtn);
+    setupFeedScroll(feed);
+  } else {
+    const pane = document.createElement("div");
+    pane.className = "split-pane";
+    pane.innerHTML = `<div class="split-pane-header"><span class="run-tab-dot ${dotClass}"></span>${esc(label)}</div>`;
+    const feed = document.createElement("div");
+    feed.id = `feed-${run.id}`;
+    feed.className = "panel-body run-feed active";
+    pane.appendChild(feed);
+
+    const steer = document.createElement("div");
+    steer.className = "steer-bar split-steer";
+    steer.innerHTML = `<input type="text" class="split-steer-input" placeholder="Guide ${esc(label)}..." autocomplete="off"><button class="btn-primary btn-sm split-steer-btn">Send</button>`;
+    const steerInput = steer.querySelector(".split-steer-input");
+    const steerBtn = steer.querySelector(".split-steer-btn");
+    const sendFn = () => sendSteerToRun(run.id, steerInput);
+    steerBtn.addEventListener("click", sendFn);
+    steerInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendFn(); }
+    });
+    pane.appendChild(steer);
+
+    feedsEl.insertBefore(pane, scrollBtn);
+    setupFeedScroll(feed);
+  }
 }
 
 function updateRunTabDot(runId, status) {
-  const btn = document.querySelector(`[data-run="${runId}"]`);
-  if (!btn) return;
-  const dot = btn.querySelector(".run-tab-dot");
-  if (!dot) return;
   const dotMap = {
     solved: "dot-solved",
     failed: "dot-error",
     error: "dot-error",
     solving: "dot-running",
     completed: "dot-done",
-
     pending: "dot-pending",
   };
-  dot.className = `run-tab-dot ${dotMap[status] || "dot-done"}`;
+  const cls = `run-tab-dot ${dotMap[status] || "dot-done"}`;
+
+  // Tab button dot
+  const btn = document.querySelector(`[data-run="${runId}"]`);
+  if (btn) {
+    const dot = btn.querySelector(".run-tab-dot");
+    if (dot) dot.className = cls;
+  }
+  // Split pane header dot
+  const feed = document.getElementById(`feed-${runId}`);
+  if (feed) {
+    const pane = feed.closest(".split-pane");
+    if (pane) {
+      const dot = pane.querySelector(".run-tab-dot");
+      if (dot) dot.className = cls;
+    }
+  }
 }
 
 // === Steer Run Select ===
@@ -1501,6 +1613,24 @@ function showToast(message, type = "info") {
   }, 4000);
 }
 
+function showFlagFoundToast(challengeName, agent, flag, challengeId) {
+  const container = $("#toast-container");
+  const toast = document.createElement("div");
+  toast.className = "toast toast-flag";
+  toast.innerHTML = `<strong>Flag found!</strong> ${esc(agent)} found a flag in <em>${esc(challengeName)}</em><br><code>${esc(flag)}</code><br><span class="toast-flag-action">Click to open</span>`;
+  toast.style.cursor = "pointer";
+  toast.addEventListener("click", () => {
+    toast.remove();
+    if (challengeId) openChallenge(challengeId);
+  });
+  container.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add("toast-visible"));
+  setTimeout(() => {
+    toast.classList.remove("toast-visible");
+    setTimeout(() => toast.remove(), 300);
+  }, 15000);
+}
+
 // === Run Event Rendering ===
 function renderRunEvent(runId, event) {
   // Get or create the feed for this run
@@ -1512,6 +1642,8 @@ function renderRunEvent(runId, event) {
   if (!feed) return;
 
   // --- Run-level status: update only this run's tab dot ---
+  if (event.type === "flag_found") return;
+
   if (event.type === "run_status") {
     updateRunTabDot(event.run_id || runId, event.status);
     if (event.error) {
@@ -2327,6 +2459,22 @@ $("#btn-sidebar-toggle").addEventListener("click", () => {
 });
 
 // === Steer ===
+async function sendSteerToRun(runId, inputEl) {
+  const msg = inputEl.value.trim();
+  if (!msg || !currentChallengeId) return;
+  inputEl.value = "";
+  const res = await api(`/api/challenges/${currentChallengeId}/steer`, {
+    method: "POST",
+    body: JSON.stringify({ message: msg, run_id: runId }),
+  });
+  if (res && res.ok) {
+    updateStatusBadge("solving");
+    updateButtons("solving");
+    startTimer();
+    $("#error-banner").classList.add("hidden");
+  }
+}
+
 async function sendSteer() {
   const input = $("#steer-input");
   const msg = input.value.trim();
@@ -2392,7 +2540,7 @@ function renderUsage(data) {
         .map((row) => kvRow(row.label, row.value))
         .join("");
       stats.innerHTML = (entry.stat_rows || [])
-        .map((row) => kvRow(row.label, row.value))
+        .map((row) => kvRow(row.label, row.value, row.bar))
         .join("");
     } else {
       badge.textContent = "not connected";
@@ -2417,8 +2565,15 @@ function renderUsage(data) {
   }
 }
 
-function kvRow(key, value) {
-  return `<span class="usage-kv"><span class="usage-k">${esc(String(key))}</span> ${esc(String(value))}</span>`;
+function kvRow(key, value, bar) {
+  let html = `<span class="usage-kv"><span class="usage-k">${esc(String(key))}</span> ${esc(String(value))}`;
+  if (bar !== undefined && bar !== null) {
+    const pct = Math.min(Math.max(Number(bar), 0), 100);
+    const cls = pct >= 90 ? "bar-danger" : pct >= 70 ? "bar-warn" : "bar-ok";
+    html += `<span class="usage-bar"><span class="usage-bar-fill ${cls}" style="width:${pct}%"></span></span>`;
+  }
+  html += `</span>`;
+  return html;
 }
 
 function renderChallengeStats(stats) {
@@ -2499,14 +2654,9 @@ $("#btn-import").addEventListener("click", async () => {
   $("#import-phase-loading").classList.add("hidden");
   $("#import-phase-preview").classList.add("hidden");
   $("#import-status").classList.add("hidden");
-  // Set up preview controls (will be shown after fetch)
-  $("#import-mode").value = "single";
-  renderAgentSelect($("#import-agent"));
-  renderAgentCheckboxes($("#import-parallel-checkboxes"));
-  $("#import-agent").value = defaultAgent;
-  updateImportModeOptions();
-  updateImportModels();
-  $("#import-autonomous").checked = getAgentAutonomousDefault(defaultAgent);
+  // Set up preview controls using saved agent settings
+  populateAgentList($("#import-agent-list"));
+  $("#import-autonomous").checked = getAgentAutonomousDefault(primaryAgentName());
   $("#import-flag").value = defaultFlagFormat;
   $("#import-overlay").classList.remove("hidden");
 });
@@ -2576,141 +2726,115 @@ $("#btn-import-fetch").addEventListener("click", async () => {
 
 function renderImportPreview() {
   const list = $("#import-challenge-list");
-  list.innerHTML = importFetchedChallenges.map((c, i) => {
-    const fileLabel = c.files.length
-      ? `${c.files.length} file${c.files.length !== 1 ? "s" : ""}`
-      : "No files";
-    const solvedClass = c.solved ? "import-ch-solved" : "";
-    return `
-    <div class="bulk-ch-row ${solvedClass}" data-index="${i}">
-      <div class="bulk-ch-row-header">
-        <input type="checkbox" class="import-ch-enabled" ${c.solved ? "" : "checked"}>
-        <input type="text" class="bulk-ch-name" value="${esc(c.name)}">
-        <span class="bulk-ch-files-label">${esc(fileLabel)}</span>
-        <span class="card-agent">${esc(c.category || "misc")}</span>
-        ${c.points ? `<span class="card-agent">${c.points} pts</span>` : ""}
-        ${c.solved ? '<span class="badge badge-solved">solved</span>' : ""}
-      </div>
-      <div class="bulk-ch-row-body">
-        <div class="bulk-ch-col">
-          <div class="bulk-field-label">Description</div>
-          <textarea class="bulk-ch-desc" rows="2">${esc(c.description || "")}</textarea>
-        </div>
-      </div>
-    </div>`;
-  }).join("");
 
-  // Apply skip-solved default
+  // Group by category, sort by points within each category
+  const indexed = importFetchedChallenges.map((c, i) => ({ ...c, _idx: i }));
+  const groups = {};
+  for (const c of indexed) {
+    const cat = c.category || "misc";
+    if (!groups[cat]) groups[cat] = [];
+    groups[cat].push(c);
+  }
+  for (const cat of Object.keys(groups)) {
+    groups[cat].sort((a, b) => (a.points || 0) - (b.points || 0));
+  }
+  const sortedCats = Object.keys(groups).sort();
+
+  let html = "";
+  for (const cat of sortedCats) {
+    html += `<div class="import-category-group">
+      <div class="import-category-header">${esc(cat)}</div>
+      <div class="import-card-grid">`;
+    for (const c of groups[cat]) {
+      const fileLabel = c.files.length
+        ? `${c.files.length} file${c.files.length !== 1 ? "s" : ""}`
+        : "No files";
+      const solvedClass = c.solved ? "import-ch-solved" : "";
+      html += `
+      <div class="import-card ${solvedClass}" data-index="${c._idx}">
+        <div class="import-card-top">
+          <input type="checkbox" class="import-ch-enabled" ${c.solved ? "" : "checked"}>
+          <input type="text" class="bulk-ch-name" value="${esc(c.name)}">
+        </div>
+        <div class="import-card-meta">
+          ${c.points ? `<span class="import-card-badge">${c.points} pts</span>` : ""}
+          <span class="import-card-badge">${c.solves ?? 0} solve${c.solves !== 1 ? "s" : ""}</span>
+          <span class="import-card-badge">${esc(fileLabel)}</span>
+          ${c.solved ? '<span class="badge badge-solved">solved</span>' : ""}
+        </div>
+        <textarea class="bulk-ch-desc" rows="2" placeholder="Description">${esc(c.description || "")}</textarea>
+      </div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  list.innerHTML = html;
   updateImportSkipSolved();
 }
 
 function updateImportSkipSolved() {
   const skip = $("#import-skip-solved").checked;
-  const rows = document.querySelectorAll("#import-challenge-list .bulk-ch-row");
-  rows.forEach((row, i) => {
-    const ch = importFetchedChallenges[i];
-    const cb = row.querySelector(".import-ch-enabled");
+  const cards = document.querySelectorAll("#import-challenge-list .import-card");
+  cards.forEach((card) => {
+    const idx = parseInt(card.dataset.index, 10);
+    const ch = importFetchedChallenges[idx];
+    const cb = card.querySelector(".import-ch-enabled");
     if (ch && ch.solved && skip) {
       cb.checked = false;
-      row.classList.add("bulk-ch-disabled");
+      card.classList.add("bulk-ch-disabled");
     }
   });
 }
 
-function updateImportModeOptions() {
-  const mode = $("#import-mode").value;
-  const singleGroup = $("#import-single-group");
-  const parallelGroup = $("#import-parallel-group");
-
-  if (isParallelMode(mode)) {
-    singleGroup.classList.add("hidden");
-    parallelGroup.classList.remove("hidden");
-  } else {
-    singleGroup.classList.remove("hidden");
-    parallelGroup.classList.add("hidden");
-    updateImportModels();
-  }
-}
-
-function updateImportModels() {
-  const agent = $("#import-agent").value;
-  const modelGroup = $("#import-model-group");
-  const effortGroup = $("#import-effort-group");
-  const sel = $("#import-model");
-  const effortSel = $("#import-effort");
-
-  modelGroup.classList.remove("hidden");
-  const meta = getAgentMeta(agent);
-  sel.disabled = false;
-  sel.innerHTML = (meta.models || []).map((m) =>
-    `<option value="${m.value}">${esc(m.label)}</option>`
-  ).join("");
-  sel.value = meta.default_model;
-
-  const effortLevels = meta.effort_levels || [];
-  if (!effortLevels.length) {
-    effortGroup.classList.add("hidden");
-    effortSel.disabled = true;
-    effortSel.innerHTML = '<option value="">Provider default</option>';
-  } else {
-    effortGroup.classList.remove("hidden");
-    effortSel.disabled = false;
-    effortSel.innerHTML = effortLevels.map((e) =>
-      `<option value="${e.value}">${esc(e.label)}</option>`
-    ).join("");
-    effortSel.value = meta.default_effort || "";
-  }
-}
-
-$("#import-mode").addEventListener("change", () => {
-  updateImportModeOptions();
-  const agent = $("#import-agent").value;
-  $("#import-autonomous").checked = getAgentAutonomousDefault(agent);
+$("#btn-add-import-agent").addEventListener("click", () => {
+  addAgentRow($("#import-agent-list"));
 });
-$("#import-agent").addEventListener("change", () => {
-  updateImportModels();
-  const agent = $("#import-agent").value;
-  $("#import-autonomous").checked = getAgentAutonomousDefault(agent);
+
+$("#btn-import-select-all").addEventListener("click", () => {
+  document.querySelectorAll("#import-challenge-list .import-ch-enabled").forEach((cb) => { cb.checked = true; });
+});
+$("#btn-import-deselect-all").addEventListener("click", () => {
+  document.querySelectorAll("#import-challenge-list .import-ch-enabled").forEach((cb) => { cb.checked = false; });
 });
 
 $("#import-skip-solved").addEventListener("change", () => {
-  const rows = document.querySelectorAll("#import-challenge-list .bulk-ch-row");
+  const cards = document.querySelectorAll("#import-challenge-list .import-card");
   const skip = $("#import-skip-solved").checked;
-  rows.forEach((row, i) => {
-    const ch = importFetchedChallenges[i];
-    const cb = row.querySelector(".import-ch-enabled");
+  cards.forEach((card) => {
+    const idx = parseInt(card.dataset.index, 10);
+    const ch = importFetchedChallenges[idx];
+    const cb = card.querySelector(".import-ch-enabled");
     if (ch && ch.solved) {
       cb.checked = !skip;
-      row.classList.toggle("bulk-ch-disabled", skip);
+      card.classList.toggle("bulk-ch-disabled", skip);
     }
   });
 });
 
-function getImportAgents() {
-  const mode = $("#import-mode").value;
-  if (isParallelMode(mode)) {
-    return JSON.stringify(getCheckedAgents($("#import-parallel-checkboxes")));
-  }
-  return $("#import-agent").value;
-}
-
 $("#btn-import-submit").addEventListener("click", async () => {
-  const rows = document.querySelectorAll("#import-challenge-list .bulk-ch-row");
-  const selected = Array.from(rows).map((row, i) => ({
-    enabled: row.querySelector(".import-ch-enabled").checked,
-    remote_id: importFetchedChallenges[i].remote_id,
-    name: row.querySelector(".bulk-ch-name").value.trim(),
-    description: row.querySelector(".bulk-ch-desc").value.trim(),
-    category: importFetchedChallenges[i].category,
-    files: importFetchedChallenges[i].files,
-  }));
+  const cards = document.querySelectorAll("#import-challenge-list .import-card");
+  const selected = Array.from(cards).map((card) => {
+    const idx = parseInt(card.dataset.index, 10);
+    const ch = importFetchedChallenges[idx];
+    return {
+      enabled: card.querySelector(".import-ch-enabled").checked,
+      remote_id: ch.remote_id,
+      name: card.querySelector(".bulk-ch-name").value.trim(),
+      description: card.querySelector(".bulk-ch-desc").value.trim(),
+      category: ch.category,
+      points: ch.points || 0,
+      solves: ch.solves || 0,
+      files: ch.files,
+    };
+  });
 
   const btn = $("#btn-import-submit");
   btn.disabled = true;
   btn.textContent = "Importing...";
 
   try {
-    const mode = $("#import-mode").value;
+    const agentRows = getAgentRows($("#import-agent-list"));
+    const mode = agentRows.length > 1 ? "parallel" : "single";
     const res = await api("/api/plugins/import", {
       method: "POST",
       body: JSON.stringify({
@@ -2718,9 +2842,9 @@ $("#btn-import-submit").addEventListener("click", async () => {
         config: importPluginConfig,
         challenges: selected,
         mode: mode,
-        agents: getImportAgents(),
-        model: isParallelMode(mode) ? "" : ($("#import-model").disabled ? "" : $("#import-model").value),
-        effort: isParallelMode(mode) ? "" : ($("#import-effort").disabled ? "" : $("#import-effort").value),
+        agents: JSON.stringify(agentRows),
+        model: "",
+        effort: "",
         flag_format: $("#import-flag").value.trim(),
         autonomous: $("#import-autonomous").checked,
         paused: $("#import-paused").checked,
@@ -2799,6 +2923,34 @@ $("#btn-settings").addEventListener("click", async () => {
   // General
   $("#settings-flag-format").value = s.default_flag_format || "";
   $("#settings-theme").value = s.theme || "dark";
+  $("#settings-chat-view").value = s.chat_view_mode || "split";
+  $("#settings-auto-submit").checked = !!s.auto_submit_flags;
+
+  // Agents
+  const agentList = $("#settings-agent-list");
+  const savedEnabled = s.enabled_agents && s.enabled_agents.length ? s.enabled_agents : [defaultAgent];
+  const savedModels = s.agent_models || {};
+  const savedEfforts = s.agent_efforts || {};
+  agentList.innerHTML = agentCatalog.map((agent) => {
+    const checked = savedEnabled.includes(agent.name) ? "checked" : "";
+    const modelOptions = (agent.models || []).map((m) =>
+      `<option value="${esc(m.value)}" ${savedModels[agent.name] === m.value ? "selected" : ""}>${esc(m.label)}</option>`
+    ).join("");
+    const efforts = agent.effort_levels || [];
+    const effortHtml = efforts.length
+      ? `<select class="settings-agent-effort" data-agent="${esc(agent.name)}">${efforts.map((e) =>
+          `<option value="${esc(e.value)}" ${savedEfforts[agent.name] === e.value ? "selected" : ""}>${esc(e.label)}</option>`
+        ).join("")}</select>`
+      : "";
+    return `<div class="settings-agent-row">
+      <label class="checkbox-label">
+        <input type="checkbox" class="settings-agent-cb" value="${esc(agent.name)}" ${checked}>
+        <span>${esc(agent.label)}</span>
+      </label>
+      <select class="settings-agent-model" data-agent="${esc(agent.name)}">${modelOptions}</select>
+      ${effortHtml}
+    </div>`;
+  }).join("");
 
   // VPN
   const vpnRes = await api("/api/vpn");
@@ -2823,15 +2975,37 @@ $("#btn-settings-back").addEventListener("click", () => {
 });
 
 $("#btn-settings-save").addEventListener("click", async () => {
+  const selectedAgents = Array.from(document.querySelectorAll(".settings-agent-cb:checked")).map((cb) => cb.value);
+  const models = {};
+  document.querySelectorAll(".settings-agent-model").forEach((sel) => {
+    if (sel.value) models[sel.dataset.agent] = sel.value;
+  });
+  const efforts = {};
+  document.querySelectorAll(".settings-agent-effort").forEach((sel) => {
+    if (sel.value) efforts[sel.dataset.agent] = sel.value;
+  });
+
   const body = {
     default_flag_format: $("#settings-flag-format").value.trim(),
     theme: $("#settings-theme").value,
+    chat_view_mode: $("#settings-chat-view").value,
+    auto_submit_flags: $("#settings-auto-submit").checked,
+    enabled_agents: selectedAgents,
+    agent_models: models,
+    agent_efforts: efforts,
+    default_agent: selectedAgents[0] || defaultAgent,
   };
   const res = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
   if (res && res.ok) {
     const saved = await res.json();
     defaultFlagFormat = saved.default_flag_format || "";
     currentTheme = saved.theme || "dark";
+    chatViewMode = saved.chat_view_mode || "split";
+    enabledAgents = saved.enabled_agents && saved.enabled_agents.length
+      ? saved.enabled_agents : [defaultAgent];
+    agentModels = saved.agent_models || {};
+    agentEfforts = saved.agent_efforts || {};
+    defaultAgent = saved.default_agent || enabledAgents[0];
     applyTheme(currentTheme);
     showToast("Settings saved", "success");
   }
@@ -2944,6 +3118,7 @@ window.addEventListener("hashchange", () => {
   }
   if (!catalogOk) return;
 
+  connectGlobalWS();
   // Show UI immediately, load settings in background
   await handleDeepLink();
   loadDefaultAgent();   // non-blocking

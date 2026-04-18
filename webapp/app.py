@@ -151,9 +151,6 @@ SETTINGS_FILE = CHALLENGES_DIR / "settings.json"
 _PREVIEW_TTL = 3600
 _bulk_previews: dict[str, dict] = {}
 
-_SKILLS_ROOT = "/root/ctf-agent-wrapper/skills"
-_METHODOLOGY_SKILL = f"{_SKILLS_ROOT}/methodology/SKILL.md"
-
 
 # ---------------------------------------------------------------------------
 # Challenge status derivation
@@ -276,7 +273,10 @@ def setup_parallel_run_dir(challenge_id: str, run_id: str) -> Path:
 
 
 def setup_parallel_cross_notes(challenge_id: str, runs: dict | None = None) -> None:
-    """Symlink each agent's WORKING_NOTES into other agents' run dirs."""
+    """Symlink each agent's WORKING_NOTES into other agents' run dirs.
+
+    Also seeds each agent's own notes file so symlinks never dangle.
+    """
     if runs is None:
         challenge = challenges.get(challenge_id)
         if not challenge:
@@ -284,6 +284,25 @@ def setup_parallel_cross_notes(challenge_id: str, runs: dict | None = None) -> N
         runs = challenge["runs"]
     runs_dir = CHALLENGES_DIR / challenge_id / "_runs"
     run_items = list(runs.items())
+
+    # Seed each agent's own notes file so cross-symlinks resolve
+    for rid, run in run_items:
+        run_dir = runs_dir / rid
+        if not run_dir.exists():
+            continue
+        own_notes = run_dir / f"WORKING_NOTES_{run['agent']}.md"
+        if not own_notes.exists():
+            own_notes.write_text(
+                f"# Working Notes — {run['agent']}\n"
+                "## Challenge Understanding\n"
+                "## Hypotheses\n"
+                "## Key Findings\n"
+                "## Tools & Techniques Tried\n"
+                "## Dead Ends\n"
+                "## Next Steps\n"
+            )
+
+    # Cross-link: symlink each teammate's notes into this run dir
     for rid, run in run_items:
         run_dir = runs_dir / rid
         if not run_dir.exists():
@@ -295,8 +314,6 @@ def setup_parallel_cross_notes(challenge_id: str, runs: dict | None = None) -> N
             other_notes = runs_dir / other_rid / notes_name
             link = run_dir / notes_name
             if not link.exists():
-                # Create a symlink even if the file doesn't exist yet
-                # (the agent will create it)
                 link.symlink_to(other_notes)
 
 
@@ -500,15 +517,18 @@ def load_settings() -> dict:
         "default_flag_format": "",
         "theme": "dark",
         "auto_submit_flags": False,
+        "chat_view_mode": "split",
+        "enabled_agents": [],
+        "agent_models": {},
+        "agent_efforts": {},
     }
     if SETTINGS_FILE.exists():
         try:
             loaded = json.loads(SETTINGS_FILE.read_text())
             if isinstance(loaded, dict):
-                defaults.update({
-                    k: v for k, v in loaded.items()
-                    if k in defaults
-                })
+                for k, v in loaded.items():
+                    if k in defaults:
+                        defaults[k] = v
         except (json.JSONDecodeError, OSError):
             pass
     return defaults
@@ -550,6 +570,7 @@ def save_metadata(challenge: dict) -> None:
         "id": challenge["id"],
         "name": challenge["name"],
         "description": challenge["description"],
+        "category": challenge.get("category", ""),
         "flag_format": challenge["flag_format"],
         "mode": challenge["mode"],
         "autonomous": challenge.get("autonomous", False),
@@ -560,6 +581,8 @@ def save_metadata(challenge: dict) -> None:
         "runs": _serialize_runs(challenge),
         "_plugin": challenge.get("_plugin", ""),
         "_remote_id": challenge.get("_remote_id", ""),
+        "_points": challenge.get("_points", 0),
+        "_solves": challenge.get("_solves", 0),
         "_source_url": challenge.get("_source_url", ""),
         "_connection_id": challenge.get("_connection_id", ""),
     }
@@ -592,12 +615,13 @@ def parse_agents_field(agents_str: str) -> list[dict]:
                     {
                         "agent": entry.get("agent", "") if isinstance(entry, dict) else str(entry),
                         "model": entry.get("model", "") if isinstance(entry, dict) else "",
+                        "effort": entry.get("effort", "") if isinstance(entry, dict) else "",
                     }
                     for entry in parsed
                 ]
         except json.JSONDecodeError:
             pass
-    return [{"agent": a.strip(), "model": ""} for a in agents_str.split(",") if a.strip()]
+    return [{"agent": a.strip(), "model": "", "effort": ""} for a in agents_str.split(",") if a.strip()]
 
 
 def resolved_default_model(agent: str) -> str:
@@ -759,8 +783,11 @@ def load_challenges_from_disk() -> None:
             "files": meta.get("files", []),
             "error": meta.get("error"),
             "runs": runs,
+            "category": meta.get("category", ""),
             "_plugin": meta.get("_plugin", ""),
             "_remote_id": meta.get("_remote_id", ""),
+            "_points": meta.get("_points", 0),
+            "_solves": meta.get("_solves", 0),
             "_source_url": meta.get("_source_url", ""),
             "_connection_id": meta.get("_connection_id", ""),
         }
@@ -818,7 +845,10 @@ def _check_rate_limit(client_ip: str) -> JSONResponse | None:
 
 async def index(request: Request) -> Response:
     html_path = Path(__file__).parent / "static" / "index.html"
-    return HTMLResponse(html_path.read_text())
+    return HTMLResponse(
+        html_path.read_text(),
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 async def login(request: Request) -> JSONResponse:
@@ -877,7 +907,7 @@ async def broadcast(challenge_id: str, run_id: str, data: dict):
 
 
 async def broadcast_challenge(challenge_id: str, data: dict):
-    """Send data to ALL runs' WebSocket clients (challenge-level updates)."""
+    """Send data to ALL runs' WebSocket clients AND global clients."""
     challenge = challenges.get(challenge_id)
     if not challenge:
         return
@@ -890,6 +920,23 @@ async def broadcast_challenge(challenge_id: str, data: dict):
                 dead.append(ws)
         for ws in dead:
             run["ws_clients"].discard(ws)
+    enriched = {**data, "challenge_id": challenge_id}
+    await broadcast_global(enriched)
+
+
+_global_ws_clients: set = set()
+
+
+async def broadcast_global(data: dict):
+    """Send data to all globally-connected WebSocket clients."""
+    dead = []
+    for ws in list(_global_ws_clients):
+        try:
+            await ws.send_json(data)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _global_ws_clients.discard(ws)
 
 
 # ---------------------------------------------------------------------------
@@ -915,12 +962,15 @@ async def list_challenges(request: Request) -> JSONResponse:
             "id": c["id"],
             "name": c["name"],
             "description": c["description"],
+            "category": c.get("category", ""),
             "flag_format": c["flag_format"],
             "mode": c["mode"],
             "status": c["status"],
             "error": c.get("error"),
             "created_at": c["created_at"],
             "files": c["files"],
+            "points": c.get("_points", 0),
+            "solves": c.get("_solves", 0),
             "runs": runs_summary,
         })
     result.sort(key=lambda x: x["created_at"], reverse=True)
@@ -1031,7 +1081,7 @@ async def create_challenge(request: Request) -> JSONResponse:
         agent_name = entry["agent"]
         run_id = uuid.uuid4().hex[:8]
         run_model = entry.get("model") or model or resolved_default_model(agent_name)
-        run_effort = normalize_effort_for_agent(agent_name, effort)
+        run_effort = normalize_effort_for_agent(agent_name, entry.get("effort") or effort)
         run = make_run(
             run_id=run_id,
             agent=agent_name,
@@ -1052,6 +1102,7 @@ async def create_challenge(request: Request) -> JSONResponse:
         "id": challenge_id,
         "name": display_name,
         "description": description,
+        "category": "",
         "flag_format": flag_format,
         "mode": mode,
         "autonomous": autonomous,
@@ -1425,31 +1476,46 @@ async def solve_challenge(request: Request) -> JSONResponse:
         return JSONResponse({"error": "already solving"}, status_code=409)
 
     target_run_id = request.query_params.get("run_id")
+    resume = request.query_params.get("resume") == "1"
+
+    def _start_run(run_id: str, run: dict):
+        if resume:
+            # Keep output history, clear stale session, start fresh with
+            # a resume prompt that tells the agent to read its notes.
+            run["_session_state"] = {}
+            resume_event = {
+                "type": "system",
+                "message": "Resuming agent (fresh session)...",
+            }
+            run["output_lines"].append(resume_event)
+            append_output_event(challenge_id, run_id, resume_event)
+        else:
+            run["output_lines"] = []
+            clear_output_log(challenge_id, run_id)
+            run["_session_state"] = {}
+        run["status"] = "solving"
+        run.pop("_stop_reason", None)
+        run["task"] = asyncio.create_task(
+            run_agent_task(
+                challenge_id, run_id,
+                continue_msg=(
+                    "Continue working on this CTF challenge. "
+                    "Read your WORKING_NOTES file to recall "
+                    "what was already tried."
+                ) if resume else None,
+            )
+        )
 
     if target_run_id:
-        # Restart a specific run
         run = challenge["runs"].get(target_run_id)
         if not run:
             return JSONResponse(
                 {"error": "run not found"}, status_code=404
             )
-        run["status"] = "solving"
-        run["output_lines"] = []
-        clear_output_log(challenge_id, target_run_id)
-        run.pop("_stop_reason", None)
-        run["task"] = asyncio.create_task(
-            run_agent_task(challenge_id, target_run_id)
-        )
+        _start_run(target_run_id, run)
     else:
-        # Restart all runs
         for run_id, run in challenge["runs"].items():
-            run["status"] = "solving"
-            run["output_lines"] = []
-            clear_output_log(challenge_id, run_id)
-            run.pop("_stop_reason", None)
-            run["task"] = asyncio.create_task(
-                run_agent_task(challenge_id, run_id)
-            )
+            _start_run(run_id, run)
 
     challenge["status"] = derive_challenge_status(challenge)
     save_metadata(challenge)
@@ -1553,6 +1619,7 @@ async def steer_challenge(request: Request) -> JSONResponse:
 
     run["status"] = "solving"
     run["error"] = None
+    run["_session_state"] = {}
     run.pop("_stop_reason", None)
     run["task"] = asyncio.create_task(
         run_agent_task(
@@ -1926,18 +1993,16 @@ def build_prompt(challenge: dict, run: dict) -> str:
 
     parts = [
         "You are solving a CTF challenge.",
-        f"Read {_METHODOLOGY_SKILL} first and follow it for the full "
+        "Load the ctf-methodology skill first and follow it for the full "
         "solve. It contains the triage workflow and routes you to the "
         "correct category and tool skills.",
         "",
         "Key tool rules:",
         "- For ANY binary (ELF/PE): use IDA Pro for static analysis "
-        f"(read {_SKILLS_ROOT}/tools/ida/SKILL.md). Do NOT use objdump "
+        "(load the analyze-with-ida-domain-api skill). Do NOT use objdump "
         "or readelf as primary analysis — IDA is installed and licensed.",
-        "- For runtime debugging: use libdebug (read "
-        f"{_SKILLS_ROOT}/tools/libdebug/SKILL.md), not raw GDB.",
-        "- For kernel challenges: use GDB+GEF via MCP (read "
-        f"{_SKILLS_ROOT}/tools/kernel-gef/SKILL.md).",
+        "- For runtime debugging: use libdebug (load the libdebug-debugging skill), not raw GDB.",
+        "- For kernel challenges: use GDB+GEF via MCP (load the kernel-gef-debugging skill).",
         "- Run ctfgrep first for a quick flag search across encodings.",
         "",
         f"Maintain `{notes_file}` with this structure:",
@@ -1976,20 +2041,27 @@ def build_prompt(challenge: dict, run: dict) -> str:
             parts.extend([
                 "",
                 "Only read teammates' notes if you have exhausted your "
-                "own ideas or are completely stuck. Try your own approaches "
-                "first.",
+                "own ideas or are completely stuck.",
                 "",
-                "When you make a significant, validated breakthrough — "
-                "something you are certain about and have confirmed works "
-                "(e.g., found the correct vulnerability, extracted a key, "
-                "decoded the flag format) — call the `notify_teammates` "
-                "tool. Do NOT share hypotheses or unverified findings. "
-                "Your teammates will receive it at their next natural "
-                "pause.",
+                "Call `notify_teammates` when you confirm any of these:",
+                "- The vulnerability class or challenge category "
+                '(e.g., "this is a heap UAF", "RSA with small e")',
+                "- A key, secret, password, or credential you extracted",
+                "- A decoded or decrypted intermediate value",
+                "- The correct tool or technique to use "
+                '(e.g., "Fermat factorization works here")',
+                "- A dead end that would waste a teammate's time "
+                '(e.g., "the SSTI filter blocks all builtins")',
+                "- The flag",
                 "",
-                "You may receive '[Teammate breakthrough]' messages between "
-                "turns. Read them and incorporate useful findings into your "
-                "approach.",
+                "Do NOT notify for unverified hypotheses or guesses — "
+                "only confirmed findings. "
+                "Notify early and often. Do not wait until you have "
+                "the flag.",
+                "",
+                "You may receive '[Teammate breakthrough]' messages "
+                "between turns. Read them and incorporate useful "
+                "findings into your approach.",
             ])
 
     parts.extend([
@@ -2032,23 +2104,10 @@ def build_prompt(challenge: dict, run: dict) -> str:
 # Run agent
 # ---------------------------------------------------------------------------
 
-def _try_auto_submit_flag(
+def _try_detect_and_submit_flag(
     challenge_id: str, run_id: str, event: dict, challenge: dict
 ) -> None:
-    """Check event for flags and auto-submit if enabled."""
-    settings = load_settings()
-    if not settings.get("auto_submit_flags"):
-        return
-
-    plugin_name = challenge.get("_plugin")
-    remote_id = challenge.get("_remote_id")
-    if not plugin_name or not remote_id:
-        return
-
-    plugin = get_plugin(plugin_name)
-    if not plugin:
-        return
-
+    """Detect flags in agent output. Broadcast to frontend and auto-submit if enabled."""
     # Extract text from assistant message
     msg = event.get("message", {})
     text_parts = []
@@ -2067,12 +2126,40 @@ def _try_auto_submit_flag(
     if not run:
         return
 
-    # Guard: track which flags have been submitted or are in-flight
-    submitted = run.setdefault("_flags_submitted", set())
-    if flag in submitted:
+    # Guard: track which flags have been seen
+    seen = run.setdefault("_flags_submitted", set())
+    if flag in seen:
         return
-    # Mark immediately to prevent duplicate concurrent submissions
-    submitted.add(flag)
+    seen.add(flag)
+
+    # Broadcast flag_found to per-run WS and global WS
+    flag_event = {
+        "type": "flag_found",
+        "flag": flag,
+        "run_id": run_id,
+        "agent": run["agent"],
+        "challenge_id": challenge_id,
+        "challenge_name": challenge.get("name", ""),
+    }
+
+    async def _notify():
+        await broadcast(challenge_id, run_id, flag_event)
+        await broadcast_global(flag_event)
+    asyncio.create_task(_notify())
+
+    # Auto-submit if enabled
+    settings = load_settings()
+    if not settings.get("auto_submit_flags"):
+        return
+
+    plugin_name = challenge.get("_plugin")
+    remote_id = challenge.get("_remote_id")
+    if not plugin_name or not remote_id:
+        return
+
+    plugin = get_plugin(plugin_name)
+    if not plugin:
+        return
 
     # Find saved connection config
     config = {}
@@ -2119,6 +2206,31 @@ def _try_auto_submit_flag(
                     "type": "challenge_status",
                     "status": challenge["status"],
                 })
+                # Stop sibling runs in parallel mode
+                if challenge["mode"] == "parallel":
+                    for other_id, other_run in challenge["runs"].items():
+                        if other_id == run_id:
+                            continue
+                        if other_run["status"] not in ("solving", "pending"):
+                            continue
+                        await stop_run(other_run, "sibling_solved")
+                        other_run["status"] = "failed"
+                        stop_evt = {
+                            "type": "system",
+                            "message": (
+                                f"Stopped: {run['agent']} solved "
+                                "the challenge."
+                            ),
+                        }
+                        other_run["output_lines"].append(stop_evt)
+                        append_output_event(challenge_id, other_id, stop_evt)
+                        await broadcast(challenge_id, other_id, stop_evt)
+                        await broadcast(challenge_id, other_id, {
+                            "type": "run_status",
+                            "run_id": other_id,
+                            "status": "failed",
+                        })
+                    save_metadata(challenge)
             else:
                 # Allow resubmission of different flags
                 submitted.discard(flag)
@@ -2210,7 +2322,7 @@ async def _run_agent_sdk_path(
 
             # Auto-submit flag detection
             if etype == "assistant":
-                _try_auto_submit_flag(
+                _try_detect_and_submit_flag(
                     challenge_id, run_id, event, challenge
                 )
 
@@ -2461,7 +2573,7 @@ async def run_agent_task(
                     not run.get("_flag_submitted")
                     and event.get("type") == "assistant"
                 ):
-                    _try_auto_submit_flag(
+                    _try_detect_and_submit_flag(
                         challenge_id, run_id, event, challenge
                     )
 
@@ -2641,6 +2753,21 @@ async def challenge_ws(websocket: WebSocket):
         run["ws_clients"].discard(websocket)
 
 
+async def global_events_ws(websocket: WebSocket):
+    if not websocket.session.get("authenticated"):
+        await websocket.close(code=4001)
+        return
+    await websocket.accept()
+    _global_ws_clients.add(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _global_ws_clients.discard(websocket)
+
+
 # ---------------------------------------------------------------------------
 # Settings / Agents / Usage
 # ---------------------------------------------------------------------------
@@ -2723,6 +2850,30 @@ async def update_settings(request: Request) -> JSONResponse:
             settings["theme"] = theme
     if "auto_submit_flags" in body:
         settings["auto_submit_flags"] = bool(body["auto_submit_flags"])
+    if "chat_view_mode" in body:
+        mode = str(body["chat_view_mode"])
+        if mode in ("split", "tabbed"):
+            settings["chat_view_mode"] = mode
+    if "enabled_agents" in body:
+        agents = body["enabled_agents"]
+        if isinstance(agents, list):
+            settings["enabled_agents"] = [
+                a for a in agents if a in VALID_AGENTS
+            ]
+    if "agent_models" in body:
+        models = body["agent_models"]
+        if isinstance(models, dict):
+            settings["agent_models"] = {
+                k: str(v) for k, v in models.items()
+                if k in VALID_AGENTS
+            }
+    if "agent_efforts" in body:
+        efforts = body["agent_efforts"]
+        if isinstance(efforts, dict):
+            settings["agent_efforts"] = {
+                k: str(v) for k, v in efforts.items()
+                if k in VALID_AGENTS
+            }
     save_settings(settings)
     return JSONResponse(settings)
 
@@ -2850,6 +3001,7 @@ async def plugin_fetch_challenges(request: Request) -> JSONResponse:
                 "description": c.description,
                 "category": c.category,
                 "points": c.points,
+                "solves": c.solves,
                 "files": [
                     {"name": f.name, "url": f.url}
                     for f in c.files
@@ -2912,6 +3064,8 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         ch_description = ch_cfg.get("description", "")
         ch_remote_id = ch_cfg.get("remote_id", "")
         ch_category = ch_cfg.get("category", "")
+        if ch_category:
+            ch_description = f"Challenge Category: {ch_category}\n\n{ch_description}" if ch_description else f"Challenge Category: {ch_category}"
         ch_flag_format = ch_cfg.get("flag_format", "") or flag_format
         remote_files = ch_cfg.get("files", [])
 
@@ -3026,6 +3180,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "id": challenge_id,
             "name": ch_name,
             "description": ch_description,
+            "category": ch_category,
             "flag_format": ch_flag_format,
             "mode": mode,
             "autonomous": autonomous,
@@ -3036,6 +3191,8 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "runs": runs,
             "_plugin": plugin_name,
             "_remote_id": ch_remote_id,
+            "_points": ch_cfg.get("points", 0),
+            "_solves": ch_cfg.get("solves", 0),
             "_source_url": config.get("url", ""),
             "_connection_id": _conn_id,
         }
@@ -3253,6 +3410,7 @@ async def sync_connection(request: Request) -> JSONResponse:
                 "description": c.description,
                 "category": c.category,
                 "points": c.points,
+                "solves": c.solves,
                 "files": [
                     {"name": f.name, "url": f.url}
                     for f in c.files
@@ -3262,6 +3420,67 @@ async def sync_connection(request: Request) -> JSONResponse:
             }
             for c in new_challenges
         ],
+    })
+
+
+async def poll_connections(request: Request) -> JSONResponse:
+    """Background poll: check all connections for new challenges and updated scores."""
+    if err := require_auth(request):
+        return err
+
+    connections = load_connections()
+    if not connections:
+        return JSONResponse({"new_total": 0, "updates": []})
+
+    new_total = 0
+    updates = []
+
+    for conn in connections:
+        plugin_name = conn.get("plugin", "")
+        config = conn.get("config", {})
+        plugin = get_plugin(plugin_name)
+        if not plugin:
+            continue
+        try:
+            remote_challenges = await plugin.fetch_challenges(config)
+        except Exception:
+            continue
+
+        imported_ids = _imported_remote_ids(
+            plugin_name, config.get("url", "")
+        )
+        new_count = sum(
+            1 for c in remote_challenges
+            if str(c.remote_id) not in imported_ids
+        )
+        new_total += new_count
+
+        for rc in remote_challenges:
+            rid = str(rc.remote_id)
+            if rid not in imported_ids:
+                continue
+            for ch in challenges.values():
+                if ch.get("_plugin") == plugin_name and ch.get("_remote_id") == rid:
+                    changed = False
+                    if rc.points and ch.get("_points") != rc.points:
+                        ch["_points"] = rc.points
+                        changed = True
+                    if rc.solves and ch.get("_solves") != rc.solves:
+                        ch["_solves"] = rc.solves
+                        changed = True
+                    if changed:
+                        save_metadata(ch)
+                        updates.append({
+                            "id": ch["id"],
+                            "name": ch["name"],
+                            "points": rc.points,
+                            "solves": rc.solves,
+                        })
+                    break
+
+    return JSONResponse({
+        "new_total": new_total,
+        "updates": updates,
     })
 
 
@@ -3621,6 +3840,7 @@ routes = [
     Route("/api/connections", list_connections, methods=["GET"]),
     Route("/api/connections/delete", delete_connection, methods=["POST"]),
     Route("/api/connections/sync", sync_connection, methods=["POST"]),
+    Route("/api/connections/poll", poll_connections, methods=["GET"]),
     Route("/api/settings", get_settings, methods=["GET"]),
     Route("/api/settings", update_settings, methods=["PUT"]),
     Route("/api/challenges", list_challenges, methods=["GET"]),
@@ -3640,6 +3860,7 @@ routes = [
     Route("/api/challenges/{id}/files", list_files, methods=["GET"]),
     Route("/api/challenges/{id}/files/{path:path}", get_file, methods=["GET"]),
     Route("/api/challenges/{id}/download/{path:path}", download_file, methods=["GET"]),
+    WebSocketRoute("/ws/events", global_events_ws),
     WebSocketRoute("/ws/{id}/{run_id}", challenge_ws),
     Mount(
         "/static",
@@ -3647,6 +3868,20 @@ routes = [
         name="static",
     ),
 ]
+
+class NoCacheStaticMiddleware:
+    def __init__(self, app):
+        self.app = app
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"].startswith("/static/"):
+            async def send_with_nocache(message):
+                if message["type"] == "http.response.start":
+                    headers = list(message.get("headers", []))
+                    headers.append((b"cache-control", b"no-cache, no-store, must-revalidate"))
+                    message["headers"] = headers
+                await send(message)
+            return await self.app(scope, receive, send_with_nocache)
+        return await self.app(scope, receive, send)
 
 app = Starlette(
     routes=routes,
@@ -3662,6 +3897,7 @@ app = Starlette(
         ),
     ],
 )
+app = NoCacheStaticMiddleware(app)
 
 if __name__ == "__main__":
     import uvicorn
