@@ -121,6 +121,11 @@ async def _run_agent_sdk(
                         "content": str(getattr(block, "content", "")),
                         "is_error": getattr(block, "is_error", False),
                     })
+            if msg.error:
+                content.append({
+                    "type": "text",
+                    "text": f"[API Error: {msg.error}]",
+                })
             if not content:
                 return None
             event = {"type": "assistant", "message": {"content": content}}
@@ -147,6 +152,20 @@ async def _run_agent_sdk(
             if content:
                 return {"type": "user", "message": {"content": content}}
 
+        elif isinstance(msg, TaskStartedMessage):
+            desc = getattr(msg, "description", "") or ""
+            task_type = getattr(msg, "task_type", "") or ""
+            label = desc or task_type or "background task"
+            return {"type": "system", "message": f"Started {label}"}
+
+        elif isinstance(msg, TaskNotificationMessage):
+            status = getattr(msg, "status", "")
+            summary = getattr(msg, "summary", "")
+            return {"type": "system", "message": f"Task {status}: {summary}" if summary else f"Task {status}"}
+
+        elif isinstance(msg, TaskProgressMessage):
+            return None
+
         elif isinstance(msg, SystemMessage):
             subtype = getattr(msg, "subtype", "")
             data = getattr(msg, "data", {}) or {}
@@ -154,7 +173,6 @@ async def _run_agent_sdk(
                 if session_state is not None and data.get("session_id"):
                     session_state["claude_session_id"] = data["session_id"]
                 return None
-            # Extract display text from data or subtype
             text = data.get("message", "") or subtype
             if text:
                 return {"type": "system", "message": text}
@@ -175,30 +193,32 @@ async def _run_agent_sdk(
 
         elif isinstance(msg, RateLimitEvent):
             info = msg.rate_limit_info
-            return {
+            if not info:
+                return None
+            status = getattr(info, "status", "")
+            resets_at = getattr(info, "resets_at", None)
+            rate_type = getattr(info, "rate_limit_type", "")
+            utilization = getattr(info, "utilization", None)
+            event = {
                 "type": "rate_limit_event",
                 "rate_limit_info": {
-                    "status": getattr(info, "status", ""),
-                    "utilization": getattr(info, "utilization", 0),
-                } if info else {},
+                    "status": status,
+                    "utilization": utilization,
+                    "resets_at": resets_at,
+                    "rate_limit_type": rate_type,
+                },
             }
-
-        elif isinstance(msg, TaskStartedMessage):
-            return {
-                "type": "system",
-                "message": f"Background task started: {getattr(msg, 'description', '')}",
-            }
-
-        elif isinstance(msg, TaskNotificationMessage):
-            status = getattr(msg, "status", "")
-            summary = getattr(msg, "summary", "")
-            return {
-                "type": "system",
-                "message": f"Background task {status}: {summary}",
-            }
-
-        elif isinstance(msg, TaskProgressMessage):
-            return None
+            if status == "rejected":
+                import time as _time
+                wait_msg = ""
+                if resets_at:
+                    wait_secs = max(0, resets_at - _time.time())
+                    wait_msg = f" (resets in {int(wait_secs)}s)"
+                event["_also_system"] = {
+                    "type": "system",
+                    "message": f"Rate limited{wait_msg} — waiting for capacity",
+                }
+            return event
 
         elif isinstance(msg, StreamEvent):
             event_data = msg.event or {}
@@ -211,49 +231,78 @@ async def _run_agent_sdk(
 
         return None
 
+    # Queue for broadcast messages to inject via streaming input.
+    # Messages yielded by the generator are queued by the SDK and
+    # delivered after Claude finishes its current tool call — no
+    # interruption, no lost work.
+    _broadcast_queue: asyncio.Queue[str] = asyncio.Queue()
+    _broadcast_ui_events: asyncio.Queue[dict] = asyncio.Queue()
+    _poll_task: asyncio.Task | None = None
+
+    async def _poll_broadcasts():
+        while True:
+            await asyncio.sleep(5)
+            try:
+                pending = await get_pending_broadcast(challenge_id, run_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+            if not pending:
+                continue
+            log.info("Queuing broadcast for Claude streaming input")
+            _broadcast_ui_events.put_nowait({
+                "type": "system",
+                "subtype": "teammate_broadcast",
+                "message": f"[Teammate breakthrough]: {pending}",
+            })
+            await _broadcast_queue.put(pending)
+
+    async def _message_stream():
+        """Async generator that yields the initial prompt and any broadcasts."""
+        yield {
+            "type": "user",
+            "message": {"role": "user", "content": prompt},
+        }
+        while True:
+            pending = await _broadcast_queue.get()
+            yield {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": (
+                        f"[Teammate breakthrough received]:\n{pending}\n\n"
+                        "Incorporate this into your approach if relevant. "
+                        "Continue working on the challenge."
+                    ),
+                },
+            }
+
+    client = ClaudeSDKClient(options)
     try:
-        async with ClaudeSDKClient(options) as client:
-            # Store ref so caller can kill process if needed
-            _run = kwargs.get("_run")
-            if _run is not None:
-                _run["_sdk_client"] = client
+        # Store ref so caller can kill process if needed
+        _run = kwargs.get("_run")
+        if _run is not None:
+            _run["_sdk_client"] = client
 
-            # Send the initial prompt
-            await client.query(prompt)
+        if challenge_id and run_id:
+            _poll_task = asyncio.create_task(_poll_broadcasts())
 
-            # Main loop: process turns, check for broadcasts between turns
-            while True:
-                async for msg in client.receive_response():
-                    event = _normalize_msg(msg)
-                    if event:
-                        yield event
+        # connect() with async generator spawns stream_input as a
+        # background task — messages are delivered between tool calls.
+        await client.connect(_message_stream())
 
-                # Turn finished — check for pending broadcasts
-                if challenge_id and run_id:
-                    try:
-                        pending = await get_pending_broadcast(
-                            challenge_id, run_id
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        pending = None
-                    if pending:
-                        log.info("Injecting broadcast between Claude turns")
-                        yield {
-                            "type": "system",
-                            "subtype": "teammate_broadcast",
-                            "message": f"[Teammate breakthrough]: {pending}",
-                        }
-                        await client.query(
-                            f"[Teammate breakthrough received]:\n{pending}\n\n"
-                            "Incorporate this into your approach if relevant. "
-                            "Continue working on the challenge."
-                        )
-                        continue
+        async for msg in client.receive_messages():
+                # Drain broadcast UI events
+                while not _broadcast_ui_events.empty():
+                    yield _broadcast_ui_events.get_nowait()
 
-                # No broadcast pending — agent is done
-                break
+                event = _normalize_msg(msg)
+                if event:
+                    also = event.pop("_also_system", None)
+                    yield event
+                    if also:
+                        yield also
 
     except asyncio.CancelledError:
         raise
@@ -263,6 +312,13 @@ async def _run_agent_sdk(
         if _stderr_lines:
             err_msg += "\nstderr:\n" + "\n".join(_stderr_lines[-20:])
         yield {"type": "error", "message": err_msg}
+    finally:
+        if _poll_task and not _poll_task.done():
+            _poll_task.cancel()
+        try:
+            await client.disconnect()
+        except (Exception, asyncio.CancelledError):
+            pass
 
 
 # ---------------------------------------------------------------------------

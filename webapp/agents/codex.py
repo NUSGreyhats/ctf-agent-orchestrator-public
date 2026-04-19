@@ -1185,6 +1185,7 @@ async def _run_agent_sdk(
     last_yielded_text = ""
     # Accumulator for reasoning deltas — flush as one block
     reasoning_buffer: list[str] = []
+    _inject_task: asyncio.Task | None = None
 
     try:
         # --- Handshake (sequential request/response) ---
@@ -1212,7 +1213,7 @@ async def _run_agent_sdk(
             resume_params: dict = {
                 "threadId": thread_id,
                 "approvalPolicy": "never",
-                "sandbox": "dangerFullAccess",
+                "sandbox": "danger-full-access",
             }
             if model:
                 resume_params["model"] = model
@@ -1251,7 +1252,7 @@ async def _run_agent_sdk(
                 "cwd": cwd_str,
                 "ephemeral": False,
                 "approvalPolicy": "never",
-                "sandbox": "dangerFullAccess",
+                "sandbox": "danger-full-access",
             }
             # Add notify_teammates dynamic tool for parallel mode
             if challenge_id and run_id:
