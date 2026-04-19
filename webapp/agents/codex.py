@@ -1474,6 +1474,24 @@ async def _run_agent_sdk(
                 # (will come in item/completed)
                 continue
 
+            if method == "item/commandExecution/terminalInteraction":
+                call_id = params.get("itemId", "")
+                interaction = params.get("interaction", {})
+                content = interaction.get("content", "")
+                itype = interaction.get("type", "")
+                if content:
+                    label = "stdin" if itype == "stdin" else itype or "terminal"
+                    yield {
+                        "type": "user",
+                        "message": {"content": [{
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": f"[{label}] {content}",
+                            "is_error": False,
+                        }]},
+                    }
+                continue
+
             if method == "item/fileChange/outputDelta":
                 # Streaming file change output
                 continue
@@ -1594,6 +1612,6 @@ provider = AgentProvider(
     get_usage_data=_get_usage_data,
     get_models=_discover_models,
     effort_levels=_discover_effort_levels(),
-    default_effort="medium",
+    default_effort="xhigh",
     run_agent=_run_agent_sdk,
 )

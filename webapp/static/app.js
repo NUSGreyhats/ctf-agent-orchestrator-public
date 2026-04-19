@@ -208,29 +208,32 @@ async function api(path, opts = {}) {
     headers["Content-Type"] = headers["Content-Type"] || "application/json";
   }
   const res = await fetch(path, { ...opts, headers });
-  if (res.status === 401) { showView("login"); csrfToken = null; return null; }
+  if (res.status === 401) { window.location.reload(); return null; }
   return res;
 }
 
 // === Login ===
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const res = await fetch("/api/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password: $("#login-password").value }),
+  const pw = $("#login-password").value;
+  // Try Basic Auth first (sets session cookie for future requests)
+  const basicRes = await fetch("/api/challenges", {
+    headers: { "Authorization": "Basic " + btoa("user:" + pw) },
   });
-  if (res.ok) {
-    const data = await res.json();
-    csrfToken = data.csrf_token;
+  if (basicRes.ok) {
+    const csrfRes = await fetch("/api/csrf-token");
+    if (csrfRes.ok) {
+      const data = await csrfRes.json();
+      csrfToken = data.csrf_token;
+    }
     if (await loadAgentCatalog()) {
+      showView("dashboard");
       connectGlobalWS();
       await handleDeepLink();
       loadDefaultAgent();
     }
   } else {
-    const data = await res.json().catch(() => ({}));
-    $("#login-error").textContent = data.error || "Invalid password";
+    $("#login-error").textContent = "Invalid password";
     $("#login-error").classList.remove("hidden");
   }
 });
@@ -1176,6 +1179,14 @@ function isSplitView() {
   return chatViewMode === "split" && currentRuns.length > 1;
 }
 
+function runTabLabel(run, agentMeta) {
+  const base = agentMeta.label || run.agent;
+  const parts = [];
+  if (run.model) parts.push(run.model);
+  if (run.effort) parts.push(run.effort);
+  return parts.length ? `${base} (${parts.join(", ")})` : base;
+}
+
 function initRunTabs(runs) {
   currentRuns = runs;
   const tabBar = $("#run-tabs");
@@ -1224,7 +1235,7 @@ function initRunTabs(runs) {
 
   for (const run of runs) {
     const agentMeta = getAgentMeta(run.agent);
-    const label = agentMeta.label || run.agent;
+    const label = runTabLabel(run, agentMeta);
     const dotClass = run.status === "solving" ? "dot-running"
       : run.status === "solved" ? "dot-solved"
       : run.status === "failed" ? "dot-error"
@@ -1291,7 +1302,7 @@ function addRunTab(run) {
   const scrollBtn = feedsEl.querySelector("#btn-scroll-bottom");
 
   const agentMeta = getAgentMeta(run.agent);
-  const label = agentMeta.label || run.agent;
+  const label = runTabLabel(run, agentMeta);
   const dotClass = run.status === "solving" ? "dot-running"
     : run.status === "solved" ? "dot-solved"
     : run.status === "failed" ? "dot-error"
@@ -2842,6 +2853,7 @@ $("#btn-import-submit").addEventListener("click", async () => {
       category: ch.category,
       points: ch.points || 0,
       solves: ch.solves || 0,
+      tags: ch.tags || [],
       files: ch.files,
     };
   });
@@ -3118,14 +3130,7 @@ window.addEventListener("hashchange", () => {
 
 // === Init ===
 (async () => {
-  // Single request to check auth — if it fails, show login
-  const authCheck = await fetch("/api/challenges");
-  if (!authCheck.ok) {
-    showView("login");
-    return;
-  }
-
-  // Auth valid — fetch CSRF token and agent catalog in parallel
+  // Page is served behind HTTP Basic Auth — session is already valid.
   const [csrfRes, catalogOk] = await Promise.all([
     fetch("/api/csrf-token"),
     loadAgentCatalog(),
@@ -3137,7 +3142,6 @@ window.addEventListener("hashchange", () => {
   if (!catalogOk) return;
 
   connectGlobalWS();
-  // Show UI immediately, load settings in background
   await handleDeepLink();
-  loadDefaultAgent();   // non-blocking
+  loadDefaultAgent();
 })();

@@ -76,7 +76,7 @@ TLS_ENABLED = bool(os.environ.get("TLS_CERTFILE"))
 APP_ROOT_DIR = Path("/root/ctf-agent-wrapper")
 CHALLENGES_DIR = APP_ROOT_DIR / "challenges"
 CHALLENGES_DIR.mkdir(parents=True, exist_ok=True)
-STATE_ROOT_DIR = Path("/root/.ctf-solver-state")
+STATE_ROOT_DIR = APP_ROOT_DIR / "state"
 STATE_ROOT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Rate limiting for login
@@ -167,9 +167,11 @@ def detect_flag(text: str, flag_format: str = "") -> str | None:
                 )
             )
     for pat in patterns:
-        m = pat.search(text)
-        if m:
-            return m.group(0)
+        for m in pat.finditer(text):
+            candidate = m.group(0)
+            if flag_format and candidate == flag_format:
+                continue
+            return candidate
     return None
 
 METADATA_FILE = "challenge.json"
@@ -841,10 +843,31 @@ load_challenges_from_disk()
 # Auth and CSRF
 # ---------------------------------------------------------------------------
 
-def require_auth(request: Request) -> JSONResponse | None:
-    if not request.session.get("authenticated"):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    return None
+def _check_basic_auth(auth_header: str) -> bool:
+    """Validate HTTP Basic Auth credentials (any username, password = APP_PASSWORD)."""
+    if not auth_header.startswith("Basic "):
+        return False
+    try:
+        import base64
+        decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+        _, _, password = decoded.partition(":")
+        return secrets.compare_digest(password, APP_PASSWORD)
+    except Exception:
+        return False
+
+
+def require_auth(request: Request) -> Response | None:
+    if request.session.get("authenticated"):
+        return None
+    auth = request.headers.get("authorization", "")
+    if _check_basic_auth(auth):
+        request.session["authenticated"] = True
+        return None
+    return Response(
+        content="Unauthorized",
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="CTF Solver"'},
+    )
 
 
 def require_csrf(request: Request) -> JSONResponse | None:
@@ -883,6 +906,14 @@ def _check_rate_limit(client_ip: str) -> JSONResponse | None:
 # ---------------------------------------------------------------------------
 
 async def index(request: Request) -> Response:
+    # Support ?token=PASSWORD for easy bookmarkable login
+    token = request.query_params.get("token", "")
+    if token and secrets.compare_digest(token, APP_PASSWORD):
+        request.session["authenticated"] = True
+        from starlette.responses import RedirectResponse
+        return RedirectResponse(url="/", status_code=302)
+    if err := require_auth(request):
+        return err
     html_path = Path(__file__).parent / "static" / "index.html"
     return HTMLResponse(
         html_path.read_text(),
@@ -993,6 +1024,7 @@ async def list_challenges(request: Request) -> JSONResponse:
                 "id": run["id"],
                 "agent": run["agent"],
                 "model": run["model"],
+                "effort": run.get("effort", ""),
                 "status": run["status"],
                 "error": run.get("error"),
                 "duration_ms": run.get("duration_ms"),
@@ -2138,7 +2170,8 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
 
     parts.extend([
         "",
-        "The challenge files are in the current directory.",
+        "The challenge files are in the current directory (some may be symlinks).",
+        "Use `ls -la` to list files, not `find . -type f` which misses symlinks.",
         "Do not inspect parent directories, repository root files, .git metadata, "
         "or unrelated system paths.",
         "If the current directory has no challenge files, report that clearly and stop. "
@@ -2390,6 +2423,8 @@ async def _run_agent_sdk_path(
             etype = event.get("type", "")
 
             if etype in ("assistant", "user", "result"):
+                if not saw_message and session_state.get("claude_session_id"):
+                    save_metadata(challenge)
                 saw_message = True
             if etype == "error":
                 last_error = event.get("message", "")
@@ -2854,8 +2889,10 @@ async def run_agent_task(
 
 async def challenge_ws(websocket: WebSocket):
     if not websocket.session.get("authenticated"):
-        await websocket.close(code=4001)
-        return
+        auth = websocket.headers.get("authorization", "")
+        if not _check_basic_auth(auth):
+            await websocket.close(code=4001)
+            return
 
     challenge_id = websocket.path_params["id"]
     run_id = websocket.path_params["run_id"]
@@ -2898,8 +2935,10 @@ async def challenge_ws(websocket: WebSocket):
 
 async def global_events_ws(websocket: WebSocket):
     if not websocket.session.get("authenticated"):
-        await websocket.close(code=4001)
-        return
+        auth = websocket.headers.get("authorization", "")
+        if not _check_basic_auth(auth):
+            await websocket.close(code=4001)
+            return
     await websocket.accept()
     _global_ws_clients.add(websocket)
     try:
@@ -4042,7 +4081,7 @@ app = Starlette(
             secret_key=SESSION_SECRET,
             max_age=86400,
             session_cookie="ctf_session",
-            same_site="strict",
+            same_site="lax",
             https_only=TLS_ENABLED,
         ),
     ],

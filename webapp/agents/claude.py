@@ -78,8 +78,12 @@ async def _run_agent_sdk(
     import shutil
     system_claude = shutil.which("claude")
 
+    _stderr_lines: list[str] = []
+
     def _stderr_handler(line: str) -> None:
-        log.warning("Claude CLI stderr: %s", line.rstrip())
+        stripped = line.rstrip()
+        log.warning("Claude CLI stderr: %s", stripped)
+        _stderr_lines.append(stripped)
 
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
@@ -90,6 +94,7 @@ async def _run_agent_sdk(
         mcp_servers=mcp_servers if mcp_servers else {},
         cli_path=system_claude,
         stderr=_stderr_handler,
+        env={"IS_SANDBOX": "1"},
     )
 
     client = ClaudeSDKClient(options)
@@ -267,8 +272,11 @@ async def _run_agent_sdk(
                 yield event_data
 
     except Exception as exc:
-        log.error("Claude SDK error: %s", exc)
-        yield {"type": "error", "message": str(exc)}
+        log.error("Claude SDK error: %s", exc, exc_info=True)
+        err_msg = str(exc)
+        if _stderr_lines:
+            err_msg += "\nstderr:\n" + "\n".join(_stderr_lines[-20:])
+        yield {"type": "error", "message": err_msg}
     finally:
         if poll_task and not poll_task.done():
             poll_task.cancel()
@@ -535,5 +543,5 @@ provider = AgentProvider(
         ("high", "High"),
         ("max", "Max"),
     ),
-    default_effort="medium",
+    default_effort="high",
 )

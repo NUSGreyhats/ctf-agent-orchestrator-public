@@ -210,7 +210,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 .challenge-card:hover { border-color: var(--accent); background: var(--bg-hover); }
 .challenge-card.status-solving { border-left: 3px solid var(--yellow); }
-.challenge-card.status-solved { border-left: 3px solid var(--green); }
+.challenge-card.status-solved { border-left: 3px solid var(--green); background: var(--green-dim); border-color: var(--green); }
 .challenge-card.status-failed { border-left: 3px solid var(--red); }
 .challenge-card.status-pending { border-left: 3px solid var(--text-dim); }
 .challenge-card > .badge { position: absolute; top: 0.45rem; right: 0.45rem; font-size: 0.58rem; }
