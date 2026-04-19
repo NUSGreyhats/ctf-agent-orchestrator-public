@@ -874,46 +874,60 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
         }
 
     if item_type == "fileChange":
+        log.debug("fileChange item (%s): %s", item_event_type, json.dumps(item, default=str)[:500])
+        file_path = item.get("filePath", "") or item.get("path", "") or item.get("file", "")
+        diff = item.get("patch", "") or item.get("diff", "") or item.get("content", "")
         if item_event_type == "started":
             return {
                 "type": "assistant",
                 "message": {"content": [{
                     "type": "tool_use",
                     "id": item_id,
-                    "name": "patch",
+                    "name": "Edit",
                     "input": {
-                        "path": item.get("path", ""),
+                        "file_path": file_path,
+                        "diff": diff,
                     },
                 }]},
             }
         # completed
-        result = {
-            "status": item.get("status", ""),
-            "path": item.get("path", ""),
-        }
-        is_error = item.get("status", "") not in {
-            "completed", "applied",
-        }
+        if not file_path:
+            file_path = item.get("filePath", "") or item.get("path", "") or ""
+        if not diff:
+            diff = item.get("patch", "") or item.get("diff", "") or item.get("content", "")
+        status = item.get("status", "")
+        is_error = status not in {"completed", "applied"}
+        display = diff if diff else f"{file_path} ({status})"
         return {
             "type": "user",
             "message": {"content": [{
                 "type": "tool_result",
                 "tool_use_id": item_id,
-                "content": json.dumps(result, indent=2, default=str),
+                "content": display,
                 "is_error": is_error,
             }]},
         }
 
     if item_type == "mcpToolCall":
+        log.debug("mcpToolCall item (%s): %s", item_event_type, json.dumps(item, default=str)[:500])
         invocation = item.get("invocation", {})
+        server_name = invocation.get("serverName", "") or invocation.get("server", "")
+        tool_name = invocation.get("tool", "") or invocation.get("toolName", "") or invocation.get("name", "")
+        display_name = f"{server_name}:{tool_name}" if server_name else tool_name or "mcp_tool"
+        arguments = invocation.get("arguments", {}) or invocation.get("input", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {"input": arguments}
         if item_event_type == "started":
             return {
                 "type": "assistant",
                 "message": {"content": [{
                     "type": "tool_use",
                     "id": item_id,
-                    "name": invocation.get("tool", "mcp_tool"),
-                    "input": invocation.get("arguments", {}),
+                    "name": display_name,
+                    "input": arguments,
                 }]},
             }
         # completed
@@ -925,14 +939,20 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
                 is_error = True
             elif "Ok" in mcp_result:
                 mcp_result = mcp_result["Ok"]
+        # Extract text content from MCP result
+        if isinstance(mcp_result, dict) and "content" in mcp_result:
+            content_parts = mcp_result["content"]
+            if isinstance(content_parts, list):
+                text_parts = [p.get("text", "") for p in content_parts if isinstance(p, dict) and p.get("type") == "text"]
+                if text_parts:
+                    mcp_result = "\n".join(text_parts)
+        result_str = mcp_result if isinstance(mcp_result, str) else json.dumps(mcp_result, indent=2, default=str)
         return {
             "type": "user",
             "message": {"content": [{
                 "type": "tool_result",
                 "tool_use_id": item_id,
-                "content": json.dumps(
-                    mcp_result, indent=2, default=str
-                ),
+                "content": result_str,
                 "is_error": is_error,
             }]},
         }
@@ -970,7 +990,61 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
             }]},
         }
 
-    # Unrecognized item types — skip silently
+    if item_type == "dynamicToolCall":
+        log.debug("dynamicToolCall item (%s): %s", item_event_type, json.dumps(item, default=str)[:500])
+        tool_name = item.get("name", "") or item.get("tool", "tool")
+        arguments = item.get("arguments", {}) or item.get("input", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {"input": arguments}
+        if item_event_type == "started":
+            return {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": item_id,
+                    "name": tool_name,
+                    "input": arguments,
+                }]},
+            }
+        result = item.get("result", item.get("output", ""))
+        is_error = item.get("status", "") not in {"completed", ""}
+        result_str = result if isinstance(result, str) else json.dumps(result, indent=2, default=str)
+        return {
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": item_id,
+                "content": result_str,
+                "is_error": is_error,
+            }]},
+        }
+
+    if item_type == "imageView":
+        path = item.get("path", "") or item.get("url", "")
+        if item_event_type == "started":
+            return {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": item_id,
+                    "name": "view_image",
+                    "input": {"path": path},
+                }]},
+            }
+        return {
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": item_id,
+                "content": f"Image viewed: {path}",
+                "is_error": False,
+            }]},
+        }
+
+    log.debug("Unrecognized item type: %s (%s): %s", item_type, item_event_type, json.dumps(item, default=str)[:300])
     return None
 
 
@@ -1220,6 +1294,67 @@ async def _run_agent_sdk(
         turn_result = await _read_response(rid)
         log.info("Turn started: %s", json.dumps(turn_result)[:200])
 
+        # --- Background broadcast injection ---
+        _inject_task: asyncio.Task | None = None
+        _broadcast_ui_events: asyncio.Queue[dict] = asyncio.Queue()
+
+        async def _inject_broadcasts():
+            """Poll for broadcasts and inject them into the thread mid-turn."""
+            while True:
+                await asyncio.sleep(5)
+                if not challenge_id or not run_id:
+                    continue
+                try:
+                    from .broadcast import get_pending_broadcast
+                    pending = await get_pending_broadcast(
+                        challenge_id, run_id
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    continue
+                if not pending:
+                    continue
+                log.info("Injecting broadcast into Codex thread via inject_items")
+                _broadcast_ui_events.put_nowait({
+                    "type": "system",
+                    "subtype": "teammate_broadcast",
+                    "message": f"[Teammate breakthrough]: {pending}",
+                })
+                try:
+                    # Write request to stdin only; the response will be
+                    # consumed by the main event loop as a regular message.
+                    rid = _next_id()
+                    request = {
+                        "jsonrpc": "2.0",
+                        "id": rid,
+                        "method": "thread/inject_items",
+                        "params": {
+                            "threadId": thread_id,
+                            "items": [{
+                                "type": "message",
+                                "role": "user",
+                                "content": [{
+                                    "type": "input_text",
+                                    "text": (
+                                        f"[Teammate breakthrough]:\n{pending}\n\n"
+                                        "Incorporate this into your approach "
+                                        "if relevant. Continue working."
+                                    ),
+                                }],
+                            }],
+                        },
+                    }
+                    proc.stdin.write(
+                        json.dumps(request).encode() + b"\n"
+                    )
+                    await proc.stdin.drain()
+                except Exception as exc:
+                    log.warning("Failed to inject broadcast into Codex: %s", exc)
+
+        if challenge_id and run_id:
+            _inject_task = asyncio.create_task(_inject_broadcasts())
+
         # --- Event loop: read JSON-RPC messages from stdout ---
         assert proc.stdout is not None
 
@@ -1228,6 +1363,10 @@ async def _run_agent_sdk(
         deferred_msgs.clear()
 
         while True:
+            # Drain broadcast UI events from inject task
+            while not _broadcast_ui_events.empty():
+                yield _broadcast_ui_events.get_nowait()
+
             # Drain queued messages first
             if msg_queue:
                 msg = msg_queue.pop(0)
@@ -1388,42 +1527,6 @@ async def _run_agent_sdk(
                     turn_done = True
 
             if turn_done:
-
-                # Check for pending broadcasts from teammates
-                if challenge_id and run_id:
-                    from .broadcast import get_pending_broadcast
-                    pending = await get_pending_broadcast(
-                        challenge_id, run_id
-                    )
-                    if pending:
-                        yield {
-                            "type": "system",
-                            "subtype": "teammate_broadcast",
-                            "message": (
-                                f"[Teammate breakthrough]: {pending}"
-                            ),
-                        }
-                        # Send as new turn
-                        turn_rid = await _send_request(
-                            "turn/start", {
-                                "threadId": thread_id,
-                                "input": [{
-                                    "type": "text",
-                                    "text": (
-                                        f"[Teammate breakthrough]:\n{pending}\n\n"
-                                        "Incorporate this into your approach "
-                                        "if relevant. Continue working."
-                                    ),
-                                }],
-                            },
-                        )
-                        await _read_response(turn_rid)
-                        # Drain any notifications consumed during handshake
-                        if deferred_msgs:
-                            msg_queue.extend(deferred_msgs)
-                            deferred_msgs.clear()
-                        continue  # Process the new turn's events
-
                 break
 
             if method == "item/started":
@@ -1493,7 +1596,7 @@ async def _run_agent_sdk(
                 continue
 
             if method == "item/fileChange/outputDelta":
-                # Streaming file change output
+                # Streaming file change diff output — accumulate
                 continue
 
             if method == "command/exec/outputDelta":
@@ -1578,6 +1681,8 @@ async def _run_agent_sdk(
         log.error("Codex app-server error: %s", exc, exc_info=True)
         yield {"type": "error", "message": str(exc)}
     finally:
+        if _inject_task and not _inject_task.done():
+            _inject_task.cancel()
         # Clean up the subprocess
         try:
             if proc.stdin and not proc.stdin.is_closing():

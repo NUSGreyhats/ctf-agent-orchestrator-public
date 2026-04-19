@@ -39,4 +39,9 @@ echo "  Password: $APP_PASSWORD"
 echo "============================================"
 echo ""
 
+# Kill orphaned agent processes from previous runs
+pkill -f "claude.*--input-format stream-json" 2>/dev/null || true
+pkill -f "codex app-server" 2>/dev/null || true
+sleep 1
+
 exec python3 "$SCRIPT_DIR/app.py"

@@ -99,6 +99,11 @@ async def _run_agent_sdk(
 
     client = ClaudeSDKClient(options)
 
+    # Store client ref so caller can disconnect after generator closes
+    _run = kwargs.get("_run")
+    if _run is not None:
+        _run["_sdk_client"] = client
+
     # Queue for broadcast events that the background poller discovered
     # and injected via client.query(). We yield these in the main loop
     # so the webapp can display them.
@@ -107,12 +112,17 @@ async def _run_agent_sdk(
 
     async def _poll_broadcasts() -> None:
         """Poll for teammate broadcasts and inject them mid-session."""
+        injecting = False
         while True:
             await asyncio.sleep(5)
+            if injecting:
+                continue
             try:
                 pending = await get_pending_broadcast(
                     challenge_id, run_id
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 continue
             if not pending:
@@ -123,14 +133,20 @@ async def _run_agent_sdk(
                 "subtype": "teammate_broadcast",
                 "message": f"[Teammate breakthrough]: {pending}",
             })
+            injecting = True
             try:
+                await client.interrupt()
                 await client.query(
                     f"[Teammate breakthrough received]:\n{pending}\n\n"
                     "Incorporate this into your approach if relevant. "
                     "Continue working on the challenge."
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 log.warning("Failed to inject broadcast: %s", exc)
+            finally:
+                injecting = False
 
     try:
         await client.connect(prompt)
@@ -280,10 +296,9 @@ async def _run_agent_sdk(
     finally:
         if poll_task and not poll_task.done():
             poll_task.cancel()
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        # NOTE: client.disconnect() is handled by the caller via
+        # run["_sdk_client"] because async generators cannot await
+        # during GeneratorExit.
 
 
 # ---------------------------------------------------------------------------

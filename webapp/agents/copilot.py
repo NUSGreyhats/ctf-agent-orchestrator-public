@@ -507,6 +507,9 @@ async def _run_agent_sdk(
 
                 done = True
 
+    except asyncio.CancelledError:
+        log.info("Copilot SDK run cancelled")
+        raise
     except Exception as exc:
         log.error("Copilot SDK error: %s", exc)
         yield {"type": "error", "message": str(exc)}

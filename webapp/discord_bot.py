@@ -63,6 +63,25 @@ SLASH_COMMANDS = [
         "description": "Resume stopped agents on this challenge",
     },
     {
+        "name": "ctf",
+        "description": "Show overall CTF status — all challenges grouped by category",
+    },
+    {
+        "name": "files",
+        "description": "List files or fetch a file from agent working directories",
+        "options": [{
+            "name": "path",
+            "description": "File path to fetch (omit to list files)",
+            "type": 3,
+            "required": False,
+        }, {
+            "name": "agent",
+            "description": "Agent name (claude/codex, defaults to all)",
+            "type": 3,
+            "required": False,
+        }],
+    },
+    {
         "name": "solved",
         "description": "Mark this challenge as solved",
         "options": [{
@@ -102,6 +121,19 @@ class DiscordBot:
             )
         return self._client
 
+    async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Make a request with automatic rate-limit retry."""
+        client = self._get_client()
+        for attempt in range(5):
+            resp = await client.request(method, url, **kwargs)
+            if resp.status_code == 429:
+                retry_after = resp.json().get("retry_after", 5)
+                log.warning("Discord rate limited, retrying in %.1fs", retry_after)
+                await asyncio.sleep(float(retry_after))
+                continue
+            return resp
+        return resp  # return last response even if still 429
+
     async def close(self):
         if self._client and not self._client.is_closed:
             await self._client.aclose()
@@ -110,7 +142,7 @@ class DiscordBot:
         if self.application_id:
             return self.application_id
         client = self._get_client()
-        resp = await client.get("/users/@me")
+        resp = await self._request("GET", "/users/@me")
         if resp.status_code == 200:
             self.application_id = resp.json().get("id", "")
         return self.application_id
@@ -127,7 +159,7 @@ class DiscordBot:
         else:
             url = f"/applications/{app_id}/commands"
             scope = "global"
-        resp = await client.put(url, json=SLASH_COMMANDS)
+        resp = await self._request("PUT", url, json=SLASH_COMMANDS)
         if resp.status_code == 200:
             log.info("Registered %d %s slash commands", len(SLASH_COMMANDS), scope)
         else:
@@ -139,7 +171,6 @@ class DiscordBot:
         content: str = "", embed: dict | None = None,
         flags: int = 0,
     ) -> None:
-        client = self._get_client()
         data: dict[str, Any] = {}
         if content:
             data["content"] = _truncate(content)
@@ -148,7 +179,8 @@ class DiscordBot:
         if flags:
             data["flags"] = flags
         try:
-            await client.post(
+            await self._request(
+                "POST",
                 f"/interactions/{interaction_id}/{interaction_token}/callback",
                 json={"type": 4, "data": data},
             )
@@ -158,9 +190,9 @@ class DiscordBot:
     async def defer_interaction(
         self, interaction_id: str, interaction_token: str,
     ) -> None:
-        client = self._get_client()
         try:
-            await client.post(
+            await self._request(
+                "POST",
                 f"/interactions/{interaction_id}/{interaction_token}/callback",
                 json={"type": 5},
             )
@@ -174,14 +206,14 @@ class DiscordBot:
         app_id = self.application_id
         if not app_id:
             return
-        client = self._get_client()
         payload: dict[str, Any] = {}
         if content:
             payload["content"] = _truncate(content)
         if embed:
             payload["embeds"] = [embed]
         try:
-            await client.post(
+            await self._request(
+                "POST",
                 f"/webhooks/{app_id}/{interaction_token}",
                 json=payload,
             )
@@ -189,9 +221,9 @@ class DiscordBot:
             log.error("Failed to send followup: %s", exc)
 
     async def create_thread(self, name: str, initial_message: str = "") -> str | None:
-        client = self._get_client()
         try:
-            resp = await client.post(
+            resp = await self._request(
+                "POST",
                 f"/channels/{self.channel_id}/threads",
                 json={
                     "name": name[:100],
@@ -214,7 +246,6 @@ class DiscordBot:
     async def send_message(
         self, thread_id: str, content: str = "", embed: dict | None = None
     ) -> dict | None:
-        client = self._get_client()
         payload: dict[str, Any] = {}
         if content:
             payload["content"] = _truncate(content)
@@ -223,7 +254,8 @@ class DiscordBot:
         if not payload:
             return None
         try:
-            resp = await client.post(
+            resp = await self._request(
+                "POST",
                 f"/channels/{thread_id}/messages",
                 json=payload,
             )
@@ -242,9 +274,9 @@ class DiscordBot:
         return await self.send_message(self.channel_id, content, embed)
 
     async def rename_thread(self, thread_id: str, name: str) -> bool:
-        client = self._get_client()
         try:
-            resp = await client.patch(
+            resp = await self._request(
+                "PATCH",
                 f"/channels/{thread_id}",
                 json={"name": name[:100]},
             )
@@ -253,16 +285,43 @@ class DiscordBot:
             log.error("Discord rename_thread error: %s", exc)
             return False
 
-    async def list_guild_channels(self) -> list[dict]:
-        client = self._get_client()
+    async def list_active_threads(self, channel_id: str = "") -> list[dict]:
+        """List active threads in a channel (or the bot's default channel)."""
+        cid = channel_id or self.channel_id
         try:
-            resp = await client.get("/users/@me/guilds")
+            resp = await self._request("GET", f"/channels/{cid}/threads/active")
+            if resp.status_code == 200:
+                return resp.json().get("threads", [])
+            # Fallback: guild-level active threads
+            resp2 = await self._request("GET", f"/channels/{cid}")
+            if resp2.status_code == 200:
+                guild_id = resp2.json().get("guild_id")
+                if guild_id:
+                    resp3 = await self._request("GET", f"/guilds/{guild_id}/threads/active")
+                    if resp3.status_code == 200:
+                        threads = resp3.json().get("threads", [])
+                        return [t for t in threads if t.get("parent_id") == cid]
+        except Exception as exc:
+            log.error("Discord list_active_threads error: %s", exc)
+        return []
+
+    async def find_thread_by_name(self, name: str) -> str | None:
+        """Find an existing thread by name. Returns thread ID or None."""
+        threads = await self.list_active_threads()
+        for t in threads:
+            if t.get("name") == name:
+                return t.get("id")
+        return None
+
+    async def list_guild_channels(self) -> list[dict]:
+        try:
+            resp = await self._request("GET", "/users/@me/guilds")
             if resp.status_code != 200:
                 return []
             guilds = resp.json()
             channels = []
             for guild in guilds:
-                resp = await client.get(f"/guilds/{guild['id']}/channels")
+                resp = await self._request("GET", f"/guilds/{guild['id']}/channels")
                 if resp.status_code != 200:
                     continue
                 for ch in resp.json():
@@ -316,7 +375,7 @@ class DiscordGateway:
         if self._ws:
             try:
                 await self._ws.close()
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 pass
 
     async def _connect_and_listen(self):

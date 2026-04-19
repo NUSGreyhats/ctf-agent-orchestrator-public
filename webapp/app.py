@@ -584,6 +584,14 @@ async def discord_create_thread(challenge: dict) -> None:
         return
     thread_name = make_thread_name(challenge)
     embed = make_challenge_embed(challenge)
+    # Reuse existing thread if one matches
+    existing_id = await bot.find_thread_by_name(thread_name)
+    if existing_id:
+        challenge["_discord_thread_id"] = existing_id
+        save_metadata(challenge)
+        await bot.send_message(existing_id, embed=embed)
+        log.info("Discord thread reused: %s -> %s", thread_name, existing_id)
+        return
     thread_id = await bot.create_thread(thread_name)
     if thread_id:
         challenge["_discord_thread_id"] = thread_id
@@ -592,10 +600,8 @@ async def discord_create_thread(challenge: dict) -> None:
         log.info("Discord thread created: %s -> %s", thread_name, thread_id)
 
 
-async def discord_mark_solved(challenge: dict) -> None:
+async def discord_mark_solved(challenge: dict, flag: str = "", agent: str = "") -> None:
     thread_id = challenge.get("_discord_thread_id", "")
-    if not thread_id:
-        return
     bot = get_bot(load_settings())
     if not bot:
         return
@@ -605,7 +611,15 @@ async def discord_mark_solved(challenge: dict) -> None:
         new_name = f"[solved][{category}] {name}"
     else:
         new_name = f"[solved] {name}"
-    await bot.rename_thread(thread_id, new_name)
+    if thread_id:
+        await bot.rename_thread(thread_id, new_name)
+    # Post to main channel
+    parts = [f"\U0001f6a9 **{name}** solved!"]
+    if agent:
+        parts.append(f"by `{agent}`")
+    if flag:
+        parts.append(f"— `{flag}`")
+    await bot.send_channel_message(" ".join(parts))
 
 
 async def discord_notify(challenge: dict, content: str = "", embed: dict | None = None) -> None:
@@ -1944,7 +1958,7 @@ async def mark_solved(request: Request) -> JSONResponse:
             challenge,
             embed=make_solve_embed(challenge, solved_flag or "???", agent),
         )
-        await discord_mark_solved(challenge)
+        await discord_mark_solved(challenge, solved_flag or "", agent)
     return JSONResponse({"status": challenge["status"]})
 
 
@@ -2466,7 +2480,7 @@ def _try_detect_and_submit_flag(
                     challenge,
                     embed=make_solve_embed(challenge, flag, run.get("agent", "")),
                 )
-                await discord_mark_solved(challenge)
+                await discord_mark_solved(challenge, flag, run.get("agent", ""))
             else:
                 # Allow resubmission of different flags
                 submitted.discard(flag)
@@ -2532,6 +2546,7 @@ async def _run_agent_sdk_path(
             session_state=session_state,
             challenge_id=challenge_id if is_parallel else "",
             run_id=run_id if is_parallel else "",
+            _run=run,
         ):
             # Check if we've been stopped externally
             stop_reason = run.get("_stop_reason")
@@ -2577,6 +2592,15 @@ async def _run_agent_sdk_path(
         append_output_event(challenge_id, run_id, err_event)
         await broadcast(challenge_id, run_id, err_event)
     finally:
+        # The generator's finally block cannot await (GeneratorExit),
+        # so we disconnect the client here instead.
+        sdk_client = run.pop("_sdk_client", None)
+        if sdk_client:
+            try:
+                await sdk_client.disconnect()
+                log.info("[%s/%s] Claude SDK client disconnected", challenge_id[:8], run_id[:8])
+            except (Exception, asyncio.CancelledError):
+                log.warning("[%s/%s] Claude SDK client disconnect failed", challenge_id[:8], run_id[:8])
         # Unregister from broadcast bus
         if is_parallel:
             unregister_run(challenge_id, run_id)
@@ -2747,6 +2771,10 @@ async def run_agent_task(
     run["output_lines"].append(sys_event)
     append_output_event(challenge_id, run_id, sys_event)
     await broadcast(challenge_id, run_id, sys_event)
+    model_info = run.get('model', '')
+    if run.get('effort'):
+        model_info += f", {run['effort']}"
+    await discord_notify(challenge, f"**{run['agent']}** ({model_info}) — {sys_event['message']}")
 
     # --- SDK path: use provider's run_agent if available ---
     if provider.supports_sdk:
@@ -3700,7 +3728,7 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
                 challenge,
                 embed=make_solve_embed(challenge, flag, solved_agent),
             )
-            await discord_mark_solved(challenge)
+            await discord_mark_solved(challenge, flag, solved_agent)
 
         save_metadata(challenge)
 
@@ -4226,6 +4254,42 @@ async def _handle_discord_interaction(interaction: dict) -> None:
     if not bot:
         return
 
+    # /ctf works from any channel
+    if cmd == "ctf":
+        by_cat: dict[str, list[dict]] = {}
+        for c in challenges.values():
+            cat = c.get("category", "") or "Uncategorized"
+            by_cat.setdefault(cat, []).append(c)
+        if not by_cat:
+            await bot.respond_to_interaction(
+                interaction_id, interaction_token, "No challenges loaded")
+            return
+        status_emoji = {
+            "solved": "\u2705", "solving": "\u25b6", "pending": "\u23f8",
+            "failed": "\u274c", "completed": "\u2714",
+        }
+        lines = []
+        total = sum(len(v) for v in by_cat.values())
+        solved = sum(1 for c in challenges.values() if c.get("status") == "solved")
+        lines.append(f"**CTF Dashboard** — {solved}/{total} solved\n")
+        for cat in sorted(by_cat.keys()):
+            lines.append(f"**{cat}**")
+            for c in sorted(by_cat[cat], key=lambda x: x.get("name", "")):
+                emoji = status_emoji.get(c.get("status", ""), "\u2753")
+                name = c.get("name", "?")
+                agents = ", ".join(
+                    f"{r.get('agent', '?')}" for r in c.get("runs", {}).values()
+                )
+                points = c.get("_points", 0)
+                pts = f" [{points}pts]" if points else ""
+                lines.append(f"{emoji} {name}{pts} — {c.get('status', '?')} ({agents})")
+            lines.append("")
+        from discord_bot import _truncate
+        await bot.respond_to_interaction(
+            interaction_id, interaction_token,
+            _truncate("\n".join(lines)))
+        return
+
     ch_id = _thread_to_challenge_id(channel_id)
     if not ch_id:
         await bot.respond_to_interaction(
@@ -4281,7 +4345,7 @@ async def _handle_discord_interaction(interaction: dict) -> None:
                 await bot.followup_interaction(
                     interaction_token,
                     embed=make_solve_embed(challenge, flag, f"{author} (Discord)"))
-                await discord_mark_solved(challenge)
+                await discord_mark_solved(challenge, flag, f"{author} (Discord)")
                 for run in challenge["runs"].values():
                     if run["status"] == "solving":
                         await stop_run(run, "discord_solved")
@@ -4372,7 +4436,80 @@ async def _handle_discord_interaction(interaction: dict) -> None:
         await bot.respond_to_interaction(
             interaction_id, interaction_token,
             embed=make_solve_embed(challenge, flag or "—", f"{author} (Discord)"))
-        await discord_mark_solved(challenge)
+        await discord_mark_solved(challenge, flag or "", f"{author} (Discord)")
+
+    elif cmd == "files":
+        file_path = options.get("path", "")
+        agent_filter = options.get("agent", "")
+        ch_id_short = ch_id
+        ch_dir = CHALLENGES_DIR / ch_id_short
+
+        if file_path:
+            # Fetch a specific file
+            await bot.defer_interaction(interaction_id, interaction_token)
+            found = False
+            for rid, run in challenge["runs"].items():
+                if agent_filter and run.get("agent") != agent_filter:
+                    continue
+                run_cwd = get_run_cwd(ch_id, run)
+                target = run_cwd / file_path
+                if target.exists() and target.is_file():
+                    try:
+                        content = target.read_text(errors="replace")
+                        agent = run.get("agent", "?")
+                        header = f"**{agent}** — `{file_path}`\n"
+                        from discord_bot import _truncate
+                        await bot.followup_interaction(
+                            interaction_token,
+                            header + f"```\n{_truncate(content, 1800)}\n```")
+                        found = True
+                        break
+                    except Exception as exc:
+                        await bot.followup_interaction(
+                            interaction_token, f"Error reading {file_path}: {exc}")
+                        found = True
+                        break
+            if not found:
+                await bot.followup_interaction(
+                    interaction_token, f"File not found: `{file_path}`")
+        else:
+            # List files
+            lines = []
+            for rid, run in challenge["runs"].items():
+                if agent_filter and run.get("agent") != agent_filter:
+                    continue
+                agent = run.get("agent", "?")
+                run_cwd = get_run_cwd(ch_id, run)
+                if not run_cwd.exists():
+                    continue
+                files = []
+                for f in sorted(run_cwd.rglob("*")):
+                    if f.is_file():
+                        rel = f.relative_to(run_cwd)
+                        # Skip symlinks to shared dirs and working notes
+                        if str(rel).startswith("_shared") or str(rel).startswith("WORKING_NOTES_"):
+                            continue
+                        size = f.stat().st_size
+                        if size > 1024 * 1024:
+                            size_str = f"{size / 1024 / 1024:.1f}MB"
+                        elif size > 1024:
+                            size_str = f"{size / 1024:.1f}KB"
+                        else:
+                            size_str = f"{size}B"
+                        files.append(f"`{rel}` ({size_str})")
+                if files:
+                    lines.append(f"**{agent}:**")
+                    lines.extend(files[:30])
+                    if len(files) > 30:
+                        lines.append(f"... and {len(files) - 30} more")
+            if lines:
+                from discord_bot import _truncate
+                await bot.respond_to_interaction(
+                    interaction_id, interaction_token,
+                    _truncate("\n".join(lines)))
+            else:
+                await bot.respond_to_interaction(
+                    interaction_id, interaction_token, "No files found")
 
 
 _discord_gateway: DiscordGateway | None = None

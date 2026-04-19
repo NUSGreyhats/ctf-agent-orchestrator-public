@@ -51,6 +51,8 @@ async def broadcast_to_teammates(
     if _discord_hook:
         try:
             await _discord_hook(challenge_id, source_run_id, message)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             log.warning("Discord breakthrough hook failed: %s", exc)
     return count
