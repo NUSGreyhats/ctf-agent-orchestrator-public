@@ -2592,15 +2592,18 @@ async def _run_agent_sdk_path(
         append_output_event(challenge_id, run_id, err_event)
         await broadcast(challenge_id, run_id, err_event)
     finally:
-        # The generator's finally block cannot await (GeneratorExit),
-        # so we disconnect the client here instead.
+        # Kill the Claude process if still alive (async with handles
+        # normal disconnect, but cancellation may skip __aexit__)
         sdk_client = run.pop("_sdk_client", None)
         if sdk_client:
             try:
-                await sdk_client.disconnect()
-                log.info("[%s/%s] Claude SDK client disconnected", challenge_id[:8], run_id[:8])
+                transport = getattr(sdk_client, '_transport', None)
+                proc = getattr(transport, '_process', None) if transport else None
+                if proc and proc.returncode is None:
+                    proc.kill()
+                    log.info("[%s/%s] Claude process killed (pid=%s)", challenge_id[:8], run_id[:8], proc.pid)
             except (Exception, asyncio.CancelledError):
-                log.warning("[%s/%s] Claude SDK client disconnect failed", challenge_id[:8], run_id[:8])
+                pass
         # Unregister from broadcast bus
         if is_parallel:
             unregister_run(challenge_id, run_id)

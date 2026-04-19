@@ -874,9 +874,15 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
         }
 
     if item_type == "fileChange":
-        log.debug("fileChange item (%s): %s", item_event_type, json.dumps(item, default=str)[:500])
-        file_path = item.get("filePath", "") or item.get("path", "") or item.get("file", "")
-        diff = item.get("patch", "") or item.get("diff", "") or item.get("content", "")
+        changes = item.get("changes", [])
+        paths = [c.get("path", "") for c in changes if c.get("path")]
+        diffs = [c.get("diff", "") for c in changes if c.get("diff")]
+        kinds = [c.get("kind", "") for c in changes]
+        kind_str = kinds[0] if kinds else ""
+        if isinstance(kind_str, dict):
+            kind_str = kind_str.get("type", "")
+        file_path = paths[0] if paths else ""
+        diff = "\n".join(diffs)
         if item_event_type == "started":
             return {
                 "type": "assistant",
@@ -886,17 +892,13 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
                     "name": "Edit",
                     "input": {
                         "file_path": file_path,
-                        "diff": diff,
+                        "kind": kind_str,
                     },
                 }]},
             }
         # completed
-        if not file_path:
-            file_path = item.get("filePath", "") or item.get("path", "") or ""
-        if not diff:
-            diff = item.get("patch", "") or item.get("diff", "") or item.get("content", "")
         status = item.get("status", "")
-        is_error = status not in {"completed", "applied"}
+        is_error = status not in {"completed", "applied", "inProgress"}
         display = diff if diff else f"{file_path} ({status})"
         return {
             "type": "user",
@@ -909,12 +911,11 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
         }
 
     if item_type == "mcpToolCall":
-        log.debug("mcpToolCall item (%s): %s", item_event_type, json.dumps(item, default=str)[:500])
-        invocation = item.get("invocation", {})
-        server_name = invocation.get("serverName", "") or invocation.get("server", "")
-        tool_name = invocation.get("tool", "") or invocation.get("toolName", "") or invocation.get("name", "")
+        # Spec: direct fields server, tool, arguments, result, error, status
+        server_name = item.get("server", "") or item.get("invocation", {}).get("serverName", "")
+        tool_name = item.get("tool", "") or item.get("invocation", {}).get("tool", "")
         display_name = f"{server_name}:{tool_name}" if server_name else tool_name or "mcp_tool"
-        arguments = invocation.get("arguments", {}) or invocation.get("input", {})
+        arguments = item.get("arguments", {}) or item.get("invocation", {}).get("arguments", {})
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
@@ -931,22 +932,36 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
                 }]},
             }
         # completed
+        status = item.get("status", "")
+        is_error = status == "failed"
+        mcp_error = item.get("error")
         mcp_result = item.get("result", {})
-        is_error = False
-        if isinstance(mcp_result, dict):
+        if mcp_error:
+            result_str = str(mcp_error)
+            is_error = True
+        elif isinstance(mcp_result, dict):
             if "Err" in mcp_result:
-                mcp_result = {"error": mcp_result["Err"]}
+                result_str = str(mcp_result["Err"])
                 is_error = True
             elif "Ok" in mcp_result:
                 mcp_result = mcp_result["Ok"]
-        # Extract text content from MCP result
-        if isinstance(mcp_result, dict) and "content" in mcp_result:
-            content_parts = mcp_result["content"]
-            if isinstance(content_parts, list):
-                text_parts = [p.get("text", "") for p in content_parts if isinstance(p, dict) and p.get("type") == "text"]
-                if text_parts:
-                    mcp_result = "\n".join(text_parts)
-        result_str = mcp_result if isinstance(mcp_result, str) else json.dumps(mcp_result, indent=2, default=str)
+                if isinstance(mcp_result, dict) and "content" in mcp_result:
+                    content_parts = mcp_result["content"]
+                    if isinstance(content_parts, list):
+                        text_parts = [p.get("text", "") for p in content_parts
+                                      if isinstance(p, dict) and p.get("type") == "text"]
+                        if text_parts:
+                            result_str = "\n".join(text_parts)
+                        else:
+                            result_str = json.dumps(mcp_result, indent=2, default=str)
+                    else:
+                        result_str = json.dumps(mcp_result, indent=2, default=str)
+                else:
+                    result_str = json.dumps(mcp_result, indent=2, default=str)
+            else:
+                result_str = json.dumps(mcp_result, indent=2, default=str)
+        else:
+            result_str = str(mcp_result)
         return {
             "type": "user",
             "message": {"content": [{
@@ -991,9 +1006,9 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
         }
 
     if item_type == "dynamicToolCall":
-        log.debug("dynamicToolCall item (%s): %s", item_event_type, json.dumps(item, default=str)[:500])
-        tool_name = item.get("name", "") or item.get("tool", "tool")
-        arguments = item.get("arguments", {}) or item.get("input", {})
+        # Spec: tool, arguments, status, contentItems, success, durationMs
+        tool_name = item.get("tool", "tool")
+        arguments = item.get("arguments", {})
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
@@ -1009,9 +1024,14 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
                     "input": arguments,
                 }]},
             }
-        result = item.get("result", item.get("output", ""))
-        is_error = item.get("status", "") not in {"completed", ""}
-        result_str = result if isinstance(result, str) else json.dumps(result, indent=2, default=str)
+        is_error = not item.get("success", True)
+        content_items = item.get("contentItems", [])
+        if content_items:
+            text_parts = [ci.get("text", "") for ci in content_items
+                          if isinstance(ci, dict) and ci.get("type") in ("inputText", "text")]
+            result_str = "\n".join(text_parts) if text_parts else json.dumps(content_items, default=str)
+        else:
+            result_str = item.get("status", "completed")
         return {
             "type": "user",
             "message": {"content": [{
@@ -1192,8 +1212,7 @@ async def _run_agent_sdk(
             resume_params: dict = {
                 "threadId": thread_id,
                 "approvalPolicy": "never",
-                "sandbox": "danger-full-access",
-                "cwd": cwd_str,
+                "sandbox": "dangerFullAccess",
             }
             if model:
                 resume_params["model"] = model
@@ -1232,7 +1251,7 @@ async def _run_agent_sdk(
                 "cwd": cwd_str,
                 "ephemeral": False,
                 "approvalPolicy": "never",
-                "sandbox": "danger-full-access",
+                "sandbox": "dangerFullAccess",
             }
             # Add notify_teammates dynamic tool for parallel mode
             if challenge_id and run_id:

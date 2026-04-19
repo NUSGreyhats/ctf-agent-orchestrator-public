@@ -44,6 +44,9 @@ async def _run_agent_sdk(
         ResultMessage,
         StreamEvent,
         RateLimitEvent,
+        TaskStartedMessage,
+        TaskNotificationMessage,
+        TaskProgressMessage,
         TextBlock,
         ThinkingBlock,
         ToolUseBlock,
@@ -69,7 +72,7 @@ async def _run_agent_sdk(
         async def notify_teammates(params):
             msg = params.get("message", "")
             count = await broadcast_to_teammates(challenge_id, run_id, msg)
-            return {"status": f"Broadcast sent to {count} teammate(s)"}
+            return {"content": [{"type": "text", "text": f"Broadcast sent to {count} teammate(s)"}]}
 
         mcp_servers["ctf-collab"] = create_sdk_mcp_server(
             "ctf-collab", tools=[notify_teammates]
@@ -90,215 +93,176 @@ async def _run_agent_sdk(
         cwd=str(cwd),
         model=model or None,
         effort=effort or None,
-        resume=resume_session_id,
+        resume=resume_session_id if resume_session_id else None,
         mcp_servers=mcp_servers if mcp_servers else {},
         cli_path=system_claude,
         stderr=_stderr_handler,
         env={"IS_SANDBOX": "1"},
     )
 
-    client = ClaudeSDKClient(options)
+    def _normalize_msg(msg) -> dict | None:
+        """Convert an SDK message to our normalized event dict."""
+        if isinstance(msg, AssistantMessage):
+            content = []
+            for block in msg.content:
+                if isinstance(block, ThinkingBlock):
+                    content.append({"type": "thinking", "thinking": block.thinking})
+                elif isinstance(block, TextBlock):
+                    content.append({"type": "text", "text": block.text})
+                elif isinstance(block, ToolUseBlock):
+                    content.append({
+                        "type": "tool_use", "id": block.id,
+                        "name": block.name, "input": block.input,
+                    })
+                elif isinstance(block, ToolResultBlock):
+                    content.append({
+                        "type": "tool_result",
+                        "tool_use_id": getattr(block, "tool_use_id", "") or getattr(block, "id", ""),
+                        "content": str(getattr(block, "content", "")),
+                        "is_error": getattr(block, "is_error", False),
+                    })
+            if not content:
+                return None
+            event = {"type": "assistant", "message": {"content": content}}
+            if msg.usage:
+                event["message"]["usage"] = msg.usage
+            if msg.parent_tool_use_id:
+                event["parent_tool_use_id"] = msg.parent_tool_use_id
+            if msg.session_id and session_state is not None:
+                session_state["claude_session_id"] = msg.session_id
+            return event
 
-    # Store client ref so caller can disconnect after generator closes
-    _run = kwargs.get("_run")
-    if _run is not None:
-        _run["_sdk_client"] = client
+        elif isinstance(msg, UserMessage):
+            content = []
+            for block in msg.content:
+                if isinstance(block, ToolResultBlock):
+                    content.append({
+                        "type": "tool_result",
+                        "tool_use_id": getattr(block, "tool_use_id", "") or getattr(block, "id", ""),
+                        "content": str(getattr(block, "content", "")),
+                        "is_error": getattr(block, "is_error", False),
+                    })
+                elif isinstance(block, TextBlock):
+                    content.append({"type": "text", "text": block.text})
+            if content:
+                return {"type": "user", "message": {"content": content}}
 
-    # Queue for broadcast events that the background poller discovered
-    # and injected via client.query(). We yield these in the main loop
-    # so the webapp can display them.
-    broadcast_events: asyncio.Queue[dict] = asyncio.Queue()
-    poll_task: asyncio.Task | None = None
+        elif isinstance(msg, SystemMessage):
+            subtype = getattr(msg, "subtype", "")
+            data = getattr(msg, "data", {}) or {}
+            if subtype == "init":
+                if session_state is not None and data.get("session_id"):
+                    session_state["claude_session_id"] = data["session_id"]
+                return None
+            # Extract display text from data or subtype
+            text = data.get("message", "") or subtype
+            if text:
+                return {"type": "system", "message": text}
 
-    async def _poll_broadcasts() -> None:
-        """Poll for teammate broadcasts and inject them mid-session."""
-        injecting = False
-        while True:
-            await asyncio.sleep(5)
-            if injecting:
-                continue
-            try:
-                pending = await get_pending_broadcast(
-                    challenge_id, run_id
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                continue
-            if not pending:
-                continue
-            log.info("Injecting teammate broadcast into Claude session")
-            broadcast_events.put_nowait({
+        elif isinstance(msg, ResultMessage):
+            event: dict = {"type": "result", "subtype": msg.subtype}
+            if msg.result:
+                event["result"] = msg.result
+            if msg.total_cost_usd:
+                event["total_cost_usd"] = msg.total_cost_usd
+            if msg.usage:
+                event["usage"] = msg.usage
+            if msg.num_turns:
+                event["num_turns"] = msg.num_turns
+            if msg.session_id and session_state is not None:
+                session_state["claude_session_id"] = msg.session_id
+            return event
+
+        elif isinstance(msg, RateLimitEvent):
+            info = msg.rate_limit_info
+            return {
+                "type": "rate_limit_event",
+                "rate_limit_info": {
+                    "status": getattr(info, "status", ""),
+                    "utilization": getattr(info, "utilization", 0),
+                } if info else {},
+            }
+
+        elif isinstance(msg, TaskStartedMessage):
+            return {
                 "type": "system",
-                "subtype": "teammate_broadcast",
-                "message": f"[Teammate breakthrough]: {pending}",
-            })
-            injecting = True
-            try:
-                await client.interrupt()
-                await client.query(
-                    f"[Teammate breakthrough received]:\n{pending}\n\n"
-                    "Incorporate this into your approach if relevant. "
-                    "Continue working on the challenge."
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("Failed to inject broadcast: %s", exc)
-            finally:
-                injecting = False
+                "message": f"Background task started: {getattr(msg, 'description', '')}",
+            }
+
+        elif isinstance(msg, TaskNotificationMessage):
+            status = getattr(msg, "status", "")
+            summary = getattr(msg, "summary", "")
+            return {
+                "type": "system",
+                "message": f"Background task {status}: {summary}",
+            }
+
+        elif isinstance(msg, TaskProgressMessage):
+            return None
+
+        elif isinstance(msg, StreamEvent):
+            event_data = msg.event or {}
+            event_type = event_data.get("type", "")
+            if event_type == "system" and event_data.get("subtype") == "init":
+                if session_state is not None and event_data.get("session_id"):
+                    session_state["claude_session_id"] = event_data["session_id"]
+                return None
+            return event_data
+
+        return None
 
     try:
-        await client.connect(prompt)
+        async with ClaudeSDKClient(options) as client:
+            # Store ref so caller can kill process if needed
+            _run = kwargs.get("_run")
+            if _run is not None:
+                _run["_sdk_client"] = client
 
-        if challenge_id and run_id:
-            poll_task = asyncio.create_task(_poll_broadcasts())
+            # Send the initial prompt
+            await client.query(prompt)
 
-        async for msg in client.receive_messages():
-            # Drain any pending broadcast events first
-            while not broadcast_events.empty():
-                yield broadcast_events.get_nowait()
+            # Main loop: process turns, check for broadcasts between turns
+            while True:
+                async for msg in client.receive_response():
+                    event = _normalize_msg(msg)
+                    if event:
+                        yield event
 
-            if isinstance(msg, AssistantMessage):
-                content = []
-                for block in msg.content:
-                    if isinstance(block, ThinkingBlock):
-                        content.append({
-                            "type": "thinking",
-                            "thinking": block.thinking,
-                        })
-                    elif isinstance(block, TextBlock):
-                        content.append({
-                            "type": "text",
-                            "text": block.text,
-                        })
-                    elif isinstance(block, ToolUseBlock):
-                        content.append({
-                            "type": "tool_use",
-                            "id": block.id,
-                            "name": block.name,
-                            "input": block.input,
-                        })
-                    elif isinstance(block, ToolResultBlock):
-                        content.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.tool_use_id
-                            if hasattr(block, "tool_use_id")
-                            else block.id
-                            if hasattr(block, "id")
-                            else "",
-                            "content": str(block.content)
-                            if hasattr(block, "content")
-                            else "",
-                            "is_error": getattr(block, "is_error", False),
-                        })
-
-                if not content:
-                    continue
-
-                event = {
-                    "type": "assistant",
-                    "message": {"content": content},
-                }
-                if msg.usage:
-                    event["message"]["usage"] = msg.usage
-                if msg.parent_tool_use_id:
-                    event["parent_tool_use_id"] = msg.parent_tool_use_id
-                if msg.session_id and session_state is not None:
-                    session_state["claude_session_id"] = msg.session_id
-                yield event
-
-            elif isinstance(msg, UserMessage):
-                content = []
-                for block in msg.content:
-                    if isinstance(block, ToolResultBlock):
-                        content.append({
-                            "type": "tool_result",
-                            "tool_use_id": getattr(block, "tool_use_id", "")
-                            or getattr(block, "id", ""),
-                            "content": str(
-                                getattr(block, "content", "")
-                            ),
-                            "is_error": getattr(
-                                block, "is_error", False
-                            ),
-                        })
-                    elif isinstance(block, TextBlock):
-                        content.append({
-                            "type": "text",
-                            "text": block.text,
-                        })
-                if content:
-                    yield {
-                        "type": "user",
-                        "message": {"content": content},
-                    }
-
-            elif isinstance(msg, SystemMessage):
-                text = ""
-                if hasattr(msg, "content"):
-                    if isinstance(msg.content, str):
-                        text = msg.content
-                    elif isinstance(msg.content, list):
-                        text = " ".join(
-                            str(getattr(b, "text", b))
-                            for b in msg.content
+                # Turn finished — check for pending broadcasts
+                if challenge_id and run_id:
+                    try:
+                        pending = await get_pending_broadcast(
+                            challenge_id, run_id
                         )
-                if text:
-                    yield {"type": "system", "message": text}
-
-            elif isinstance(msg, ResultMessage):
-                event = {"type": "result"}
-                if msg.result:
-                    event["result"] = msg.result
-                if msg.total_cost_usd:
-                    event["total_cost_usd"] = msg.total_cost_usd
-                if msg.session_id and session_state is not None:
-                    session_state["claude_session_id"] = msg.session_id
-                yield event
-
-            elif isinstance(msg, RateLimitEvent):
-                info = msg.rate_limit_info
-                yield {
-                    "type": "rate_limit_event",
-                    "rate_limit_info": {
-                        "status": getattr(info, "status", ""),
-                        "utilization": getattr(
-                            info, "utilization", 0
-                        ),
-                    }
-                    if info
-                    else {},
-                }
-
-            elif isinstance(msg, StreamEvent):
-                # Pass through raw stream events for init etc.
-                event_data = msg.event or {}
-                event_type = event_data.get("type", "")
-                if event_type == "system" and event_data.get(
-                    "subtype"
-                ) == "init":
-                    if session_state is not None and event_data.get(
-                        "session_id"
-                    ):
-                        session_state["claude_session_id"] = (
-                            event_data["session_id"]
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pending = None
+                    if pending:
+                        log.info("Injecting broadcast between Claude turns")
+                        yield {
+                            "type": "system",
+                            "subtype": "teammate_broadcast",
+                            "message": f"[Teammate breakthrough]: {pending}",
+                        }
+                        await client.query(
+                            f"[Teammate breakthrough received]:\n{pending}\n\n"
+                            "Incorporate this into your approach if relevant. "
+                            "Continue working on the challenge."
                         )
-                    continue
-                yield event_data
+                        continue
 
+                # No broadcast pending — agent is done
+                break
+
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         log.error("Claude SDK error: %s", exc, exc_info=True)
         err_msg = str(exc)
         if _stderr_lines:
             err_msg += "\nstderr:\n" + "\n".join(_stderr_lines[-20:])
         yield {"type": "error", "message": err_msg}
-    finally:
-        if poll_task and not poll_task.done():
-            poll_task.cancel()
-        # NOTE: client.disconnect() is handled by the caller via
-        # run["_sdk_client"] because async generators cannot await
-        # during GeneratorExit.
 
 
 # ---------------------------------------------------------------------------
