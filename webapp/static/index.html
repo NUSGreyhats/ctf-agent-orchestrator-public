@@ -123,6 +123,31 @@
 
       <!-- VPN -->
       <div class="settings-section">
+        <h2 class="settings-section-title">Discord</h2>
+        <div class="form-group form-group-inline">
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-discord-enabled">
+            <span>Enable Discord notifications</span>
+          </label>
+        </div>
+        <div class="form-group">
+          <label for="settings-discord-token">Bot Token</label>
+          <input type="password" id="settings-discord-token" placeholder="Bot token from Discord Developer Portal">
+        </div>
+        <div class="form-group">
+          <label for="settings-discord-channel">Channel</label>
+          <div style="display:flex;gap:0.4rem;align-items:center">
+            <select id="settings-discord-channel" style="flex:1">
+              <option value="">— Select channel —</option>
+            </select>
+            <button id="btn-discord-fetch-channels" class="btn-ghost btn-sm">Refresh</button>
+          </div>
+        </div>
+        <button id="btn-discord-test" class="btn-ghost btn-sm">Test</button>
+        <span id="discord-test-result" class="text-muted" style="margin-left:0.5rem"></span>
+      </div>
+
+      <div class="settings-section">
         <h2 class="settings-section-title">VPN (WireGuard)</h2>
         <div id="settings-vpn-not-installed" class="hidden">
           <p class="text-muted">WireGuard is not installed. Run <code>012_install-wireguard.sh</code> to install it.</p>
@@ -340,6 +365,11 @@
             <div id="flags-section" class="flags-section hidden">
               <div class="flags-header">Flags Found</div>
               <div id="flags-list"></div>
+            </div>
+            <div class="broadcast-section">
+              <div class="flags-header">Broadcast to Agents</div>
+              <textarea id="broadcast-msg" rows="2" placeholder="Share a breakthrough with all agents..."></textarea>
+              <button id="btn-broadcast" class="btn-ghost btn-sm" style="margin-top:0.3rem">Send</button>
             </div>
           </div>
         </div>

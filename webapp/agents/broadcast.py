@@ -24,6 +24,14 @@ def unregister_run(challenge_id: str, run_id: str) -> None:
         del _queues[challenge_id]
 
 
+_discord_hook = None
+
+
+def set_discord_hook(hook):
+    global _discord_hook
+    _discord_hook = hook
+
+
 async def broadcast_to_teammates(
     challenge_id: str, source_run_id: str, message: str
 ) -> int:
@@ -38,8 +46,13 @@ async def broadcast_to_teammates(
         log.info(
             "[%s/%s] Broadcast to %d teammates: %s",
             challenge_id[:8], source_run_id[:8], count,
-            message[:100],
+            message,
         )
+    if _discord_hook:
+        try:
+            await _discord_hook(challenge_id, source_run_id, message)
+        except Exception as exc:
+            log.warning("Discord breakthrough hook failed: %s", exc)
     return count
 
 

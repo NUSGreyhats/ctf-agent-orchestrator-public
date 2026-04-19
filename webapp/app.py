@@ -34,6 +34,17 @@ from datetime import datetime
 from pathlib import Path
 
 try:
+    from .discord_bot import (
+        get_bot, make_thread_name, make_challenge_embed,
+        make_solve_embed, make_stop_embed, DiscordBot, DiscordGateway,
+    )
+except ImportError:
+    from discord_bot import (
+        get_bot, make_thread_name, make_challenge_embed,
+        make_solve_embed, make_stop_embed, DiscordBot, DiscordGateway,
+    )
+
+try:
     from .agents import (
         DEFAULT_AGENT,
         PARALLEL_AGENT_VALUE,
@@ -550,6 +561,10 @@ def load_settings() -> dict:
         "enabled_agents": [],
         "agent_models": {},
         "agent_efforts": {},
+        "discord_enabled": False,
+        "discord_bot_token": "",
+        "discord_channel_id": "",
+        "discord_guild_id": "",
     }
     if SETTINGS_FILE.exists():
         try:
@@ -561,6 +576,46 @@ def load_settings() -> dict:
         except (json.JSONDecodeError, OSError):
             pass
     return defaults
+
+
+async def discord_create_thread(challenge: dict) -> None:
+    bot = get_bot(load_settings())
+    if not bot:
+        return
+    thread_name = make_thread_name(challenge)
+    embed = make_challenge_embed(challenge)
+    thread_id = await bot.create_thread(thread_name)
+    if thread_id:
+        challenge["_discord_thread_id"] = thread_id
+        save_metadata(challenge)
+        await bot.send_message(thread_id, embed=embed)
+        log.info("Discord thread created: %s -> %s", thread_name, thread_id)
+
+
+async def discord_mark_solved(challenge: dict) -> None:
+    thread_id = challenge.get("_discord_thread_id", "")
+    if not thread_id:
+        return
+    bot = get_bot(load_settings())
+    if not bot:
+        return
+    category = challenge.get("category", "")
+    name = challenge.get("name", "Unknown")
+    if category:
+        new_name = f"[solved][{category}] {name}"
+    else:
+        new_name = f"[solved] {name}"
+    await bot.rename_thread(thread_id, new_name)
+
+
+async def discord_notify(challenge: dict, content: str = "", embed: dict | None = None) -> None:
+    thread_id = challenge.get("_discord_thread_id", "")
+    if not thread_id:
+        return
+    bot = get_bot(load_settings())
+    if not bot:
+        return
+    await bot.send_message(thread_id, content, embed)
 
 
 def save_settings(settings: dict) -> None:
@@ -616,6 +671,7 @@ def save_metadata(challenge: dict) -> None:
         "_instance_info": challenge.get("_instance_info"),
         "_source_url": challenge.get("_source_url", ""),
         "_connection_id": challenge.get("_connection_id", ""),
+        "_discord_thread_id": challenge.get("_discord_thread_id", ""),
         "detected_flags": challenge.get("detected_flags", {}),
     }
     meta_path = ensure_state_dir(challenge["id"]) / METADATA_FILE
@@ -830,6 +886,7 @@ def load_challenges_from_disk() -> None:
             "_instance_info": meta.get("_instance_info"),
             "_source_url": meta.get("_source_url", ""),
             "_connection_id": meta.get("_connection_id", ""),
+            "_discord_thread_id": meta.get("_discord_thread_id", ""),
             "detected_flags": meta.get("detected_flags", {}),
         }
         challenge["status"] = derive_challenge_status(challenge)
@@ -837,6 +894,22 @@ def load_challenges_from_disk() -> None:
 
 
 load_challenges_from_disk()
+
+
+# Register Discord breakthrough hook
+async def _discord_breakthrough_hook(challenge_id: str, source_run_id: str, message: str):
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return
+    run = challenge["runs"].get(source_run_id, {})
+    agent = run.get("agent", "?")
+    await discord_notify(challenge, f"**{agent}** breakthrough: {message}")
+
+try:
+    from .agents.broadcast import set_discord_hook
+except ImportError:
+    from agents.broadcast import set_discord_hook
+set_discord_hook(_discord_breakthrough_hook)
 
 
 # ---------------------------------------------------------------------------
@@ -1186,6 +1259,7 @@ async def create_challenge(request: Request) -> JSONResponse:
     }
     challenges[challenge_id] = challenge
     save_metadata(challenge)
+    asyncio.create_task(discord_create_thread(challenge))
 
     # Start all runs
     def _task_done_cb(t: asyncio.Task, rid: str = "") -> None:
@@ -1635,6 +1709,41 @@ async def stop_challenge(request: Request) -> JSONResponse:
     return JSONResponse({"status": challenge["status"]})
 
 
+async def broadcast_to_agents(request: Request) -> JSONResponse:
+    """Broadcast a user message to all active runs as a breakthrough."""
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    body = await request.json()
+    message = body.get("message", "").strip()
+    if not message:
+        return JSONResponse({"error": "message required"}, status_code=400)
+
+    try:
+        from .agents.broadcast import broadcast_to_teammates, _queues
+    except ImportError:
+        from agents.broadcast import broadcast_to_teammates, _queues
+
+    # Broadcast to all runs (not from any specific run)
+    queues = _queues.get(challenge_id, {})
+    count = 0
+    for run_id, queue in queues.items():
+        await queue.put(f"[User]: {message}")
+        count += 1
+
+    # Also notify via Discord
+    await discord_notify(challenge, f"**User** breakthrough: {message}")
+
+    return JSONResponse({"ok": True, "sent_to": count})
+
+
 async def steer_challenge(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
@@ -1829,6 +1938,13 @@ async def mark_solved(request: Request) -> JSONResponse:
         "type": "challenge_status",
         "status": challenge["status"],
     })
+    if challenge["status"] == "solved":
+        agent = target_runs[0].get("agent", "") if target_runs else ""
+        await discord_notify(
+            challenge,
+            embed=make_solve_embed(challenge, solved_flag or "???", agent),
+        )
+        await discord_mark_solved(challenge)
     return JSONResponse({"status": challenge["status"]})
 
 
@@ -2242,6 +2358,10 @@ def _try_detect_and_submit_flag(
     async def _notify():
         await broadcast(challenge_id, run_id, flag_event)
         await broadcast_global(flag_event)
+        await discord_notify(
+            challenge,
+            f"**{run.get('agent', '?')}** found possible flag: `{flag}`",
+        )
     asyncio.create_task(_notify())
 
     # Auto-submit if enabled
@@ -2342,6 +2462,11 @@ def _try_detect_and_submit_flag(
                             "status": "failed",
                         })
                     save_metadata(challenge)
+                await discord_notify(
+                    challenge,
+                    embed=make_solve_embed(challenge, flag, run.get("agent", "")),
+                )
+                await discord_mark_solved(challenge)
             else:
                 # Allow resubmission of different flags
                 submitted.discard(flag)
@@ -2495,6 +2620,18 @@ async def _run_agent_sdk_path(
 
     challenge["status"] = derive_challenge_status(challenge)
     save_metadata(challenge)
+
+    # Discord: agent stopped notification
+    last_msg = ""
+    for evt in reversed(run.get("output_lines", [])):
+        if evt.get("type") == "assistant":
+            for block in evt.get("message", {}).get("content", []):
+                if block.get("type") == "text" and block.get("text"):
+                    last_msg = block["text"]
+                    break
+            if last_msg:
+                break
+    await discord_notify(challenge, embed=make_stop_embed(challenge, run, last_msg))
 
     await broadcast(challenge_id, run_id, {
         "type": "run_status",
@@ -2960,6 +3097,51 @@ async def get_settings(request: Request) -> JSONResponse:
     return JSONResponse(load_settings())
 
 
+async def discord_test(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    body = await request.json()
+    token = body.get("token", "").strip()
+    channel_id = body.get("channel_id", "").strip()
+    if not token or not channel_id:
+        return JSONResponse({"error": "Token and channel ID are required"})
+    try:
+        from discord_bot import DiscordBot
+    except ImportError:
+        from .discord_bot import DiscordBot
+    bot = DiscordBot(token, channel_id)
+    try:
+        result = await bot.send_channel_message("CTF Solver connected!")
+        if result:
+            return JSONResponse({"ok": True})
+        return JSONResponse({"error": "Failed to send test message"})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)})
+    finally:
+        await bot.close()
+
+
+async def discord_channels(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    body = await request.json()
+    token = body.get("token", "").strip()
+    if not token:
+        return JSONResponse({"error": "Token required"}, status_code=400)
+    try:
+        from discord_bot import DiscordBot
+    except ImportError:
+        from .discord_bot import DiscordBot
+    bot = DiscordBot(token, "")
+    try:
+        channels = await bot.list_guild_channels()
+        return JSONResponse({"channels": channels})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)})
+    finally:
+        await bot.close()
+
+
 def _static_provider_metadata(provider) -> dict:
     """Return provider metadata using static models only (no PTY discovery).
 
@@ -3056,6 +3238,14 @@ async def update_settings(request: Request) -> JSONResponse:
                 k: str(v) for k, v in efforts.items()
                 if k in VALID_AGENTS
             }
+    if "discord_enabled" in body:
+        settings["discord_enabled"] = bool(body["discord_enabled"])
+    if "discord_bot_token" in body:
+        settings["discord_bot_token"] = str(body["discord_bot_token"]).strip()
+    if "discord_channel_id" in body:
+        settings["discord_channel_id"] = str(body["discord_channel_id"]).strip()
+    if "discord_guild_id" in body:
+        settings["discord_guild_id"] = str(body["discord_guild_id"]).strip()
     save_settings(settings)
     return JSONResponse(settings)
 
@@ -3382,6 +3572,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         }
         challenges[challenge_id] = challenge
         save_metadata(challenge)
+        asyncio.create_task(discord_create_thread(challenge))
 
         if challenge_status == "solving":
             for run_id, run in runs.items():
@@ -3497,12 +3688,19 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
 
         # If correct, mark the challenge as solved
         if result.correct:
+            solved_agent = ""
             for run in challenge["runs"].values():
                 if run["status"] in ("solving", "completed"):
                     run["status"] = "solved"
                     run["error"] = None
+                    solved_agent = run.get("agent", "")
                     break
             challenge["status"] = derive_challenge_status(challenge)
+            await discord_notify(
+                challenge,
+                embed=make_solve_embed(challenge, flag, solved_agent),
+            )
+            await discord_mark_solved(challenge)
 
         save_metadata(challenge)
 
@@ -3996,9 +4194,212 @@ async def vpn_toggle(request: Request) -> JSONResponse:
 from contextlib import asynccontextmanager
 
 
+def _thread_to_challenge_id(thread_id: str) -> str | None:
+    for ch_id, ch in challenges.items():
+        if ch.get("_discord_thread_id") == thread_id:
+            return ch_id
+    return None
+
+
+async def _handle_discord_interaction(interaction: dict) -> None:
+    """Handle a Discord slash command interaction."""
+    try:
+        from .agents.broadcast import _queues
+    except ImportError:
+        from agents.broadcast import _queues
+
+    itype = interaction.get("type")
+    if itype != 2:  # APPLICATION_COMMAND
+        return
+
+    data = interaction.get("data", {})
+    cmd = data.get("name", "")
+    options = {o["name"]: o["value"] for o in data.get("options", [])}
+    interaction_id = interaction["id"]
+    interaction_token = interaction["token"]
+    channel_id = interaction.get("channel_id", "")
+    author = interaction.get("member", {}).get("user", {}).get("username", "")
+    if not author:
+        author = interaction.get("user", {}).get("username", "Discord")
+
+    bot = get_bot(load_settings())
+    if not bot:
+        return
+
+    ch_id = _thread_to_challenge_id(channel_id)
+    if not ch_id:
+        await bot.respond_to_interaction(
+            interaction_id, interaction_token,
+            "This command must be used in a challenge thread.",
+            flags=64,  # EPHEMERAL
+        )
+        return
+    challenge = challenges.get(ch_id)
+    if not challenge:
+        await bot.respond_to_interaction(
+            interaction_id, interaction_token, "Challenge not found.", flags=64)
+        return
+
+    if cmd == "broadcast":
+        message = options.get("message", "")
+        if not message:
+            await bot.respond_to_interaction(
+                interaction_id, interaction_token, "Message required.", flags=64)
+            return
+        q = _queues.get(ch_id, {})
+        for queue in q.values():
+            await queue.put(f"[{author} via Discord]: {message}")
+        await bot.respond_to_interaction(
+            interaction_id, interaction_token,
+            f"Broadcast sent to {len(q)} agent(s): {message}")
+
+    elif cmd == "submit":
+        flag = options.get("flag", "")
+        if not flag:
+            await bot.respond_to_interaction(
+                interaction_id, interaction_token, "Flag required.", flags=64)
+            return
+        await bot.defer_interaction(interaction_id, interaction_token)
+        plugin, config = _resolve_plugin_config(challenge)
+        if not plugin or not config:
+            await bot.followup_interaction(
+                interaction_token, "No platform connection for this challenge")
+            return
+        remote_id = challenge.get("_remote_id", "")
+        try:
+            result = await plugin.submit_flag(config, remote_id, flag)
+            if result.correct:
+                for run in challenge["runs"].values():
+                    if run["status"] in ("solving", "completed"):
+                        run["status"] = "solved"
+                        run["error"] = None
+                        break
+                challenge["status"] = derive_challenge_status(challenge)
+                detected = challenge.setdefault("detected_flags", {})
+                detected[flag] = "correct"
+                save_metadata(challenge)
+                await bot.followup_interaction(
+                    interaction_token,
+                    embed=make_solve_embed(challenge, flag, f"{author} (Discord)"))
+                await discord_mark_solved(challenge)
+                for run in challenge["runs"].values():
+                    if run["status"] == "solving":
+                        await stop_run(run, "discord_solved")
+            else:
+                await bot.followup_interaction(
+                    interaction_token, f"Incorrect: {result.message}")
+        except Exception as exc:
+            await bot.followup_interaction(
+                interaction_token, f"Submit error: {exc}")
+
+    elif cmd == "status":
+        lines = [f"**{challenge.get('name', '?')}** — {challenge.get('status', '?')}"]
+        for run in challenge["runs"].values():
+            agent = run.get("agent", "?")
+            model = run.get("model", "")
+            status = run.get("status", "?")
+            emoji = {"solving": "\u25b6", "solved": "\u2705", "failed": "\u274c",
+                     "completed": "\u2714", "pending": "\u23f8"}.get(status, "\u2753")
+            line = f"{emoji} `{agent}` ({model}) — {status}"
+            if run.get("error"):
+                line += f": {run['error']}"
+            lines.append(line)
+        await bot.respond_to_interaction(
+            interaction_id, interaction_token, "\n".join(lines))
+
+    elif cmd == "flags":
+        detected = challenge.get("detected_flags", {})
+        if not detected:
+            await bot.respond_to_interaction(
+                interaction_id, interaction_token, "No flags detected yet")
+            return
+        lines = []
+        for flag, status in detected.items():
+            emoji = {"correct": "\u2705", "wrong": "\u274c",
+                     "pending": "\u23f3"}.get(status, "\u2753")
+            lines.append(f"{emoji} `{flag}` — {status}")
+        await bot.respond_to_interaction(
+            interaction_id, interaction_token, "\n".join(lines))
+
+    elif cmd == "stop":
+        count = 0
+        for run in challenge["runs"].values():
+            if run["status"] == "solving":
+                await stop_run(run, "discord_stop")
+                run["status"] = "failed"
+                count += 1
+        if count:
+            challenge["status"] = derive_challenge_status(challenge)
+            save_metadata(challenge)
+            await bot.respond_to_interaction(
+                interaction_id, interaction_token, f"Stopped {count} agent(s)")
+        else:
+            await bot.respond_to_interaction(
+                interaction_id, interaction_token, "No agents are currently running")
+
+    elif cmd == "resume":
+        count = 0
+        for run_id, run in challenge["runs"].items():
+            if run["status"] in ("failed", "completed"):
+                run["status"] = "solving"
+                run.pop("_stop_reason", None)
+                run["task"] = asyncio.create_task(
+                    run_agent_task(ch_id, run_id, continue_msg="Resume from Discord"))
+                count += 1
+        if count:
+            challenge["status"] = derive_challenge_status(challenge)
+            save_metadata(challenge)
+            await bot.respond_to_interaction(
+                interaction_id, interaction_token, f"Resumed {count} agent(s)")
+        else:
+            await bot.respond_to_interaction(
+                interaction_id, interaction_token, "No agents to resume")
+
+    elif cmd == "solved":
+        flag = options.get("flag", "")
+        if flag:
+            detected = challenge.setdefault("detected_flags", {})
+            detected[flag] = "correct"
+        for run in challenge["runs"].values():
+            if run["status"] in ("solving", "completed", "failed"):
+                run["status"] = "solved"
+                run["error"] = None
+                if run["status"] == "solving":
+                    await stop_run(run, "discord_solved")
+                break
+        challenge["status"] = derive_challenge_status(challenge)
+        save_metadata(challenge)
+        await bot.respond_to_interaction(
+            interaction_id, interaction_token,
+            embed=make_solve_embed(challenge, flag or "—", f"{author} (Discord)"))
+        await discord_mark_solved(challenge)
+
+
+_discord_gateway: DiscordGateway | None = None
+
+
+async def _start_discord_gateway():
+    global _discord_gateway
+    settings = load_settings()
+    bot = get_bot(settings)
+    if not bot:
+        return
+    guild_id = settings.get("discord_guild_id", "").strip()
+    try:
+        await bot.register_slash_commands(guild_id)
+    except Exception as exc:
+        log.error("Failed to register slash commands: %s", exc)
+    _discord_gateway = DiscordGateway(bot, _handle_discord_interaction)
+    asyncio.create_task(_discord_gateway.run_forever())
+    log.info("Discord gateway started")
+
+
 @asynccontextmanager
 async def lifespan(app):
+    asyncio.create_task(_start_discord_gateway())
     yield
+    if _discord_gateway:
+        await _discord_gateway.stop()
     for challenge in challenges.values():
         for run in challenge["runs"].values():
             await stop_run(run, "shutdown")
@@ -4032,6 +4433,8 @@ routes = [
     Route("/api/connections/poll", poll_connections, methods=["GET"]),
     Route("/api/settings", get_settings, methods=["GET"]),
     Route("/api/settings", update_settings, methods=["PUT"]),
+    Route("/api/discord/test", discord_test, methods=["POST"]),
+    Route("/api/discord/channels", discord_channels, methods=["POST"]),
     Route("/api/challenges", list_challenges, methods=["GET"]),
     Route("/api/challenges", create_challenge, methods=["POST"]),
     Route(
@@ -4042,6 +4445,7 @@ routes = [
     Route("/api/challenges/bulk", bulk_upload, methods=["POST"]),
     Route("/api/challenges/{id}/solve", solve_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/stop", stop_challenge, methods=["POST"]),
+    Route("/api/challenges/{id}/broadcast", broadcast_to_agents, methods=["POST"]),
     Route("/api/challenges/{id}/steer", steer_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/unsolve", unsolve_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/mark-solved", mark_solved, methods=["POST"]),

@@ -941,6 +941,15 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 0.5rem;
 }
+.broadcast-section {
+  margin-top: 1rem; padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+.broadcast-section textarea {
+  width: 100%; resize: vertical; font-size: 0.8rem;
+  background: var(--bg-input); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.4rem 0.6rem; font-family: var(--mono);
+}
 .flag-item {
   display: flex; align-items: center; gap: 0.5rem;
   padding: 0.4rem 0.6rem; margin-bottom: 0.35rem;

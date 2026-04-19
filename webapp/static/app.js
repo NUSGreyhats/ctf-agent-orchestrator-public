@@ -2533,6 +2533,24 @@ $("#steer-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendSteer(); }
 });
 
+// === User Broadcast ===
+$("#btn-broadcast").addEventListener("click", sendBroadcast);
+$("#broadcast-msg").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendBroadcast(); }
+});
+async function sendBroadcast() {
+  const msg = $("#broadcast-msg").value.trim();
+  if (!msg || !currentChallengeId) return;
+  const res = await api(`/api/challenges/${currentChallengeId}/broadcast`, {
+    method: "POST",
+    body: JSON.stringify({ message: msg }),
+  });
+  if (res && res.ok) {
+    $("#broadcast-msg").value = "";
+    showToast("Broadcast sent", "success");
+  }
+}
+
 // === Usage Page ===
 $("#btn-usage").addEventListener("click", () => {
   showView("usage");
@@ -2982,6 +3000,23 @@ $("#btn-settings").addEventListener("click", async () => {
     </div>`;
   }).join("");
 
+  // Discord
+  $("#settings-discord-enabled").checked = !!s.discord_enabled;
+  $("#settings-discord-token").value = s.discord_bot_token || "";
+  const discordChannel = $("#settings-discord-channel");
+  if (s.discord_channel_id) {
+    // Preserve saved value; user can hit Refresh to populate the dropdown
+    if (!discordChannel.querySelector(`option[value="${s.discord_channel_id}"]`)) {
+      const opt = document.createElement("option");
+      opt.value = s.discord_channel_id;
+      opt.textContent = `Channel ${s.discord_channel_id}`;
+      opt.selected = true;
+      discordChannel.appendChild(opt);
+    } else {
+      discordChannel.value = s.discord_channel_id;
+    }
+  }
+
   // VPN
   const vpnRes = await api("/api/vpn");
   if (vpnRes) {
@@ -3024,6 +3059,9 @@ $("#btn-settings-save").addEventListener("click", async () => {
     agent_models: models,
     agent_efforts: efforts,
     default_agent: selectedAgents[0] || defaultAgent,
+    discord_enabled: $("#settings-discord-enabled").checked,
+    discord_bot_token: $("#settings-discord-token").value.trim(),
+    discord_channel_id: $("#settings-discord-channel").value.trim(),
   };
   const res = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
   if (res && res.ok) {
@@ -3039,6 +3077,35 @@ $("#btn-settings-save").addEventListener("click", async () => {
     applyTheme(currentTheme);
     showToast("Settings saved", "success");
   }
+});
+
+// Discord channel fetch
+$("#btn-discord-fetch-channels").addEventListener("click", async () => {
+  const token = $("#settings-discord-token").value.trim();
+  if (!token) { showToast("Enter bot token first", "error"); return; }
+  const sel = $("#settings-discord-channel");
+  const saved = sel.value;
+  sel.innerHTML = '<option value="">Loading...</option>';
+  const res = await api("/api/discord/channels", { method: "POST", body: JSON.stringify({ token }) });
+  if (!res) { sel.innerHTML = '<option value="">Failed</option>'; return; }
+  const data = await res.json();
+  const channels = data.channels || [];
+  sel.innerHTML = '<option value="">— Select channel —</option>' +
+    channels.map((c) => `<option value="${esc(c.id)}" ${c.id === saved ? "selected" : ""}>${esc(c.guild)} / ${esc(c.name)}</option>`).join("");
+  if (saved && !sel.value) sel.value = saved;
+});
+
+// Discord test button
+$("#btn-discord-test").addEventListener("click", async () => {
+  const result = $("#discord-test-result");
+  result.textContent = "Testing...";
+  const res = await api("/api/discord/test", { method: "POST", body: JSON.stringify({
+    token: $("#settings-discord-token").value.trim(),
+    channel_id: $("#settings-discord-channel").value.trim(),
+  })});
+  if (!res) { result.textContent = "Request failed"; return; }
+  const data = await res.json();
+  result.textContent = data.ok ? "Connected!" : (data.error || "Failed");
 });
 
 // VPN controls within settings
