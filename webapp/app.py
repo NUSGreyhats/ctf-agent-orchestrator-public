@@ -2658,7 +2658,7 @@ async def _run_agent_sdk_path(
                     break
             if last_msg:
                 break
-    await discord_notify(challenge, embed=make_stop_embed(challenge, run, last_msg))
+    asyncio.create_task(discord_notify(challenge, embed=make_stop_embed(challenge, run, last_msg)))
 
     await broadcast(challenge_id, run_id, {
         "type": "run_status",
