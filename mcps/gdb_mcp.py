@@ -2,11 +2,13 @@
 """GDB MCP Server — persistent GDB passthrough for Claude Code."""
 
 import asyncio
+import re
 import signal
 
 from mcp.server.fastmcp import FastMCP
 
 PROMPT = "(gdb-mcp) "
+_ANSI_RE = re.compile(rb"\x1b\[[0-9;]*m|\x01[^\x02]*\x02")
 
 mcp = FastMCP("gdb")
 
@@ -90,6 +92,22 @@ class GDBSession:
                 return buf[:idx].decode(errors="replace")
         return buf.decode(errors="replace")
 
+    async def _read_until_any(self, markers: list[str]) -> tuple[str, str]:
+        """Read until any of the markers is found. Returns (output, matched_marker)."""
+        buf = b""
+        encoded_markers = [(m, m.encode()) for m in markers]
+        while True:
+            chunk = await self.proc.stdout.read(4096)
+            if not chunk:
+                break
+            buf += chunk
+            stripped = _ANSI_RE.sub(b"", buf)
+            for marker_str, marker_bytes in encoded_markers:
+                if marker_bytes in stripped:
+                    idx = stripped.index(marker_bytes)
+                    return stripped[:idx].decode(errors="replace"), marker_str
+        return buf.decode(errors="replace"), ""
+
     async def stop(self):
         if not self.alive:
             return
@@ -134,17 +152,46 @@ async def gdb_start(
 
     # Load init script (e.g. GEF) before connecting to remote
     if init_script:
-        out = await session.execute(
-            f"source {init_script}", timeout=180
-        )
-        parts.append(out)
-        # Suppress noisy output for MCP use
-        for gef_setup in [
-            "gef config gef.disable_color True",
-            "gef config context.enable False",
-        ]:
-            await session.execute(gef_setup, timeout=5)
+        # GEF overrides GDB's prompt via gdb.prompt_hook (to "gef> "),
+        # so we must look for both our prompt and GEF's prompt.
+        await session._send(f"source {init_script}")
+        try:
+            out, matched = await asyncio.wait_for(
+                session._read_until_any([PROMPT, "gef> "]),
+                timeout=180,
+            )
+        except asyncio.TimeoutError:
+            out = "[Timed out loading init script]"
+            matched = ""
+        parts.append(out.strip())
 
+        if matched == "gef> ":
+            # GEF took over the prompt. Reclaim it:
+            # 1) Remove GEF's prompt hook so it stops overriding
+            # 2) Restore our custom prompt
+            # 3) Disable color and context for MCP use
+            reclaim_cmds = [
+                "python gdb.prompt_hook = None",
+                f"set prompt {PROMPT}",
+                "gef config gef.disable_color True",
+                "gef config context.enable False",
+            ]
+            for cmd_str in reclaim_cmds:
+                await session._send(cmd_str)
+                try:
+                    await asyncio.wait_for(
+                        session._read_until_any([PROMPT, "gef> "]),
+                        timeout=10,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+        else:
+            # Init script didn't change the prompt — apply GEF config anyway
+            for gef_setup in [
+                "gef config gef.disable_color True",
+                "gef config context.enable False",
+            ]:
+                await session.execute(gef_setup, timeout=5)
 
     if remote:
         out = await session.execute(
