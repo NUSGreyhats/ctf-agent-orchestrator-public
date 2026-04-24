@@ -1064,6 +1064,14 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
             }]},
         }
 
+    if item_type == "contextCompaction":
+        if item_event_type == "started":
+            return {"type": "system", "message": "Context compaction in progress..."}
+        return {"type": "system", "message": "Context compacted"}
+
+    if item_type == "userMessage":
+        return None
+
     log.debug("Unrecognized item type: %s (%s): %s", item_type, item_event_type, json.dumps(item, default=str)[:300])
     return None
 
@@ -1530,6 +1538,16 @@ async def _run_agent_sdk(
                         "message": f"Codex turn error: "
                                    f"{json.dumps(error_info)}",
                     }
+                usage = params.get("usage") or turn.get("usage")
+                if isinstance(usage, dict):
+                    yield {
+                        "type": "codex_usage",
+                        "usage": {
+                            "input_tokens": usage.get("input_tokens", 0),
+                            "output_tokens": usage.get("output_tokens", 0),
+                            "cached_input_tokens": usage.get("cached_input_tokens", 0),
+                        },
+                    }
                 log.info(
                     "Turn completed (status=%s)", status
                 )
@@ -1545,6 +1563,23 @@ async def _run_agent_sdk(
                 if status_type == "idle":
                     log.info("Turn completed (thread idle)")
                     turn_done = True
+
+            if method == "thread/tokenUsage/updated":
+                usage = params.get("usage") or params
+                if isinstance(usage, dict) and any(
+                    usage.get(k) for k in ("input_tokens", "output_tokens")
+                ):
+                    yield {
+                        "type": "codex_usage",
+                        "usage": {
+                            "input_tokens": usage.get("input_tokens", 0),
+                            "output_tokens": usage.get("output_tokens", 0),
+                            "cached_input_tokens": usage.get("cached_input_tokens", 0),
+                        },
+                    }
+                if turn_done:
+                    break
+                continue
 
             if turn_done:
                 break
@@ -1647,6 +1682,18 @@ async def _run_agent_sdk(
                 continue
 
             if method == "thread/tokenUsage/updated":
+                usage = params.get("usage") or params
+                if isinstance(usage, dict) and any(
+                    usage.get(k) for k in ("input_tokens", "output_tokens")
+                ):
+                    yield {
+                        "type": "codex_usage",
+                        "usage": {
+                            "input_tokens": usage.get("input_tokens", 0),
+                            "output_tokens": usage.get("output_tokens", 0),
+                            "cached_input_tokens": usage.get("cached_input_tokens", 0),
+                        },
+                    }
                 continue
 
             if method == "thread/name/updated":

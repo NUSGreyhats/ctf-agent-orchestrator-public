@@ -310,7 +310,6 @@
         <span id="detail-mode" class="badge badge-mode"></span>
         <span id="detail-model" class="badge badge-model"></span>
         <span id="detail-timer" class="header-stat"></span>
-        <span id="detail-cost" class="header-stat"></span>
       </div>
       <div class="header-actions">
         <button id="btn-start" class="btn-primary hidden">Start</button>
@@ -352,7 +351,7 @@
         <!-- Tabs -->
         <div class="sidebar-tabs">
           <button class="sidebar-tab active" data-tab="tab-info">Info</button>
-          <button class="sidebar-tab" data-tab="tab-tools">Tools <span id="tool-counter" class="tab-badge">0</span></button>
+          <button class="sidebar-tab" data-tab="tab-stats">Stats</button>
           <button class="sidebar-tab" data-tab="tab-files">Files <span id="file-counter" class="tab-badge">0</span></button>
         </div>
 
@@ -374,9 +373,9 @@
           </div>
         </div>
 
-        <!-- Tools tab -->
-        <div id="tab-tools" class="sidebar-content">
-          <div id="tool-log" class="panel-body panel-body-scroll"></div>
+        <!-- Stats tab -->
+        <div id="tab-stats" class="sidebar-content">
+          <div id="stats-panel" class="panel-body panel-body-scroll"></div>
         </div>
 
         <!-- Files tab -->

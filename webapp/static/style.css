@@ -498,9 +498,12 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   letter-spacing: 0.04em; margin-bottom: 0.2rem; opacity: 0.6;
 }
 .chat-body { white-space: pre-wrap; }
-.chat-timestamp {
+.chat-bubble .msg-ts {
   position: absolute; top: 0.35rem; right: 0.5rem;
-  font-size: 0.55rem; color: var(--text-dim); font-family: var(--mono);
+}
+.system-msg .msg-ts, .error-msg .msg-ts, .rate-limit-msg .msg-ts,
+.teammate-broadcast-msg .msg-ts, .raw-msg .msg-ts {
+  margin-left: 0.5rem;
 }
 .chat-thinking-bubble { background: var(--purple-dim); border-color: rgba(199,146,234,0.25); }
 
@@ -613,28 +616,44 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 .tool-output-error { color: var(--red); }
 
-/* === Tool Log Sidebar === */
-.tool-log-item {
-  display: flex; align-items: center; gap: 0.35rem;
-  padding: 0.3rem 0.5rem; font-size: 0.7rem;
-  border-bottom: 1px solid var(--border);
-  cursor: pointer; transition: background 0.1s;
+/* === Stats Sidebar === */
+.stats-run-section {
+  padding: 0.5rem; border-bottom: 1px solid var(--border);
 }
-.tool-log-item:hover { background: var(--bg-hover); }
-.tool-log-item:last-child { border-bottom: none; }
+.stats-run-section:last-child { border-bottom: none; }
+.stats-run-header {
+  font-size: 0.75rem; font-weight: 600; color: var(--text);
+  margin-bottom: 0.4rem; display: flex; align-items: center; gap: 0.35rem;
+}
+.stats-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 0.25rem 0.75rem;
+}
+.stat-item {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 0.7rem; padding: 0.15rem 0;
+}
+.stat-label { color: var(--text-dim); }
+.stat-value { font-family: var(--mono); font-weight: 600; color: var(--text); }
+.stats-model-section {
+  margin-top: 0.4rem; padding-top: 0.3rem;
+  border-top: 1px solid var(--border);
+}
+.stats-model-header {
+  font-size: 0.65rem; font-weight: 600; color: var(--text-dim);
+  margin-bottom: 0.2rem; text-transform: uppercase; letter-spacing: 0.03em;
+}
+.stat-item-wide {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 0.7rem; padding: 0.15rem 0;
+  grid-column: 1 / -1;
+}
+/* === Message Timestamps === */
+.msg-ts {
+  font-size: 0.6rem; color: var(--text-dim); font-family: var(--mono);
+  opacity: 0.7; margin-left: auto; flex-shrink: 0; white-space: nowrap;
+}
 
-.tool-log-name {
-  font-family: var(--mono); font-weight: 600; font-size: 0.65rem;
-  color: var(--text);
-}
-.tool-log-desc {
-  flex: 1; color: var(--text-dim); font-size: 0.65rem;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-family: var(--mono);
-}
-.tool-log-status {
-  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
-}
 .dot-running { background: var(--yellow); animation: pulse 1s infinite; }
 .dot-done { background: var(--green); }
 .dot-solved { background: var(--green); }

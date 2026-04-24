@@ -9,7 +9,6 @@ const $ = (sel) => document.querySelector(sel);
 // === Global State ===
 let currentChallengeId = null;
 let autoScroll = true;
-let toolCount = 0;
 let stepCount = 0;
 let defaultAgent = null;
 let defaultFlagFormat = "";
@@ -28,15 +27,16 @@ let currentChallengeMode = "single";
 let wsConnections = new Map();      // run_id -> WebSocket
 let globalWs = null;
 
-// Per-run counters (future use for per-tab badges)
+// Per-run counters
 let runToolCounts = new Map();
 let runStepCounts = new Map();
+
+// Per-run statistics
+let runStats = new Map();
 
 // Timer & cost
 let timerStart = null;
 let timerInterval = null;
-let totalCostUsd = 0;
-let totalTokens = 0;
 let challengeFlagFormat = "";
 let lastThinkingEl = null;
 
@@ -875,12 +875,12 @@ $("#btn-bulk-submit").addEventListener("click", async () => {
 async function openChallenge(id) {
   history.replaceState(null, "", `#/challenge/${id}`);
   currentChallengeId = id;
-  toolCount = 0;
   stepCount = 0;
   pendingTools.clear();
   foundFlags.clear();
   runToolCounts.clear();
   runStepCounts.clear();
+  runStats.clear();
   $("#flags-list").innerHTML = "";
   $("#flags-section").classList.add("hidden");
 
@@ -933,11 +933,8 @@ async function openChallenge(id) {
   }
 
   // Reset timer / cost
-  totalCostUsd = 0;
-  totalTokens = 0;
   lastThinkingEl = null;
   $("#detail-timer").textContent = "";
-  $("#detail-cost").textContent = "";
   foundFlags.clear(); $("#flags-list").innerHTML = ""; $("#flags-section").classList.add("hidden");
 
   // Restore persisted flags
@@ -952,7 +949,7 @@ async function openChallenge(id) {
 
   updateButtons(c.status);
   initRunTabs(currentRuns);
-  $("#tool-log").innerHTML = "";
+  $("#stats-panel").innerHTML = "";
   $("#files-tree").innerHTML = "";
   updateCounters();
   showView("detail");
@@ -981,7 +978,6 @@ function updateButtons(status) {
 
 function updateCounters() {
   $("#step-counter").textContent = stepCount ? `${stepCount} steps` : "";
-  $("#tool-counter").textContent = toolCount;
 }
 
 // === Detail Buttons ===
@@ -1002,13 +998,11 @@ $("#btn-start").addEventListener("click", async () => {
 $("#btn-retry").addEventListener("click", async () => {
   if (!currentChallengeId) return;
   initRunTabs([]);
-  $("#tool-log").innerHTML = "";
   $("#error-banner").classList.add("hidden");
   foundFlags.clear(); $("#flags-list").innerHTML = ""; $("#flags-section").classList.add("hidden");
-  toolCount = 0; stepCount = 0; totalCostUsd = 0; totalTokens = 0;
+  stepCount = 0;
   lastThinkingEl = null;
-  $("#detail-cost").textContent = "";
-  pendingTools.clear(); runToolCounts.clear(); runStepCounts.clear(); updateCounters();
+  pendingTools.clear(); runToolCounts.clear(); runStepCounts.clear(); runStats.clear(); updateCounters();
   const res = await api(`/api/challenges/${currentChallengeId}/solve`, { method: "POST" });
   if (res && res.ok) {
     updateStatusBadge("solving"); updateButtons("solving"); startTimer();
@@ -1112,22 +1106,24 @@ function connectRunWS(challengeId, runId, agentLabel) {
   };
   ws.onmessage = (e) => renderRunEvent(runId, JSON.parse(e.data));
   ws.onclose = () => {
-    if (currentChallengeId === challengeId) {
-      // Check if any other connection is still open
-      let anyOpen = false;
-      for (const [rid, conn] of wsConnections) {
-        if (rid !== runId && conn.readyState === WebSocket.OPEN) {
-          anyOpen = true;
-          break;
-        }
+    if (currentChallengeId !== challengeId) return;
+    // Don't reconnect if the run is in a terminal state
+    const run = currentRuns.find(r => r.id === runId);
+    if (run && ["solved", "completed", "failed"].includes(run.status)) return;
+    // Check if any other connection is still open
+    let anyOpen = false;
+    for (const [rid, conn] of wsConnections) {
+      if (rid !== runId && conn.readyState === WebSocket.OPEN) {
+        anyOpen = true;
+        break;
       }
-      if (!anyOpen) setWsStatus("reconnecting");
-      setTimeout(() => {
-        if (currentChallengeId === challengeId) {
-          connectRunWS(challengeId, runId, agentLabel);
-        }
-      }, 2000);
     }
+    if (!anyOpen) setWsStatus("reconnecting");
+    setTimeout(() => {
+      if (currentChallengeId === challengeId) {
+        connectRunWS(challengeId, runId, agentLabel);
+      }
+    }, 2000);
   };
   wsConnections.set(runId, ws);
 }
@@ -1615,18 +1611,6 @@ function updateTimer() {
   $("#detail-timer").textContent = display;
 }
 
-function updateCost() {
-  if (totalCostUsd > 0) {
-    $("#detail-cost").textContent = `$${totalCostUsd.toFixed(4)}`;
-  }
-  if (totalTokens > 0) {
-    const k = (totalTokens / 1000).toFixed(1);
-    const costText = totalCostUsd > 0
-      ? `$${totalCostUsd.toFixed(4)} / ${k}k tok`
-      : `${k}k tok`;
-    $("#detail-cost").textContent = costText;
-  }
-}
 
 // === Toasts ===
 function showToast(message, type = "info") {
@@ -1674,7 +1658,10 @@ function renderRunEvent(runId, event) {
   if (event.type === "flag_found") return;
 
   if (event.type === "run_status") {
-    updateRunTabDot(event.run_id || runId, event.status);
+    const rid = event.run_id || runId;
+    updateRunTabDot(rid, event.status);
+    const run = currentRuns.find(r => r.id === rid);
+    if (run) run.status = event.status;
     if (event.error) {
       $("#error-banner").textContent = event.error;
       $("#error-banner").classList.remove("hidden");
@@ -1731,19 +1718,19 @@ function renderRunEvent(runId, event) {
 
   // --- Subagent lifecycle (within a single run) ---
   if (event.type === "system" && event.subtype === "task_started") {
-    appendMsg(feed, `Subagent started: ${event.description || "task"}`, "system-msg");
+    appendMsg(feed, `Subagent started: ${event.description || "task"}`, "system-msg", event.ts);
     scrollBottomIfActive(runId);
     return;
   }
   if (event.type === "system" && event.subtype === "task_notification") {
-    appendMsg(feed, `Subagent ${event.status || "finished"}: ${event.description || "task"}`, "system-msg");
+    appendMsg(feed, `Subagent ${event.status || "finished"}: ${event.description || "task"}`, "system-msg", event.ts);
     scrollBottomIfActive(runId);
     return;
   }
 
   // --- Error ---
   if (event.type === "error") {
-    appendMsg(feed, event.message, "error-msg");
+    appendMsg(feed, event.message, "error-msg", event.ts);
     scrollBottomIfActive(runId); return;
   }
 
@@ -1751,20 +1738,26 @@ function renderRunEvent(runId, event) {
   if (event.type === "system") {
     if (event.subtype === "init") return;
     if (event.subtype === "teammate_broadcast" && event.message) {
-      appendMsg(feed, event.message, "teammate-broadcast-msg");
+      appendMsg(feed, event.message, "teammate-broadcast-msg", event.ts);
       scrollBottomIfActive(runId); return;
     }
-    if (event.message) appendMsg(feed, event.message, "system-msg");
+    if (event.message) appendMsg(feed, event.message, "system-msg", event.ts);
     scrollBottomIfActive(runId); return;
   }
 
   // --- User steer ---
-  if (event.type === "user_steer") {
+  if (event.type === "user_steer" || event.type === "user_prompt") {
     const bubble = document.createElement("div");
     bubble.className = "chat-bubble chat-user";
+    if (event.ts != null) {
+      const ts = document.createElement("span");
+      ts.className = "msg-ts";
+      ts.textContent = fmtElapsed(event.ts);
+      bubble.appendChild(ts);
+    }
     const label = document.createElement("div");
     label.className = "chat-label";
-    label.textContent = "You";
+    label.textContent = event.type === "user_steer" ? "You" : "Prompt";
     const body = document.createElement("div");
     body.className = "chat-body";
     body.textContent = event.message;
@@ -1777,7 +1770,7 @@ function renderRunEvent(runId, event) {
   if (event.type === "rate_limit_event") {
     const info = event.rate_limit_info;
     if (info && info.utilization > 0.5) {
-      appendMsg(feed, `Rate limit: ${Math.round(info.utilization * 100)}% used`, "rate-limit-msg");
+      appendMsg(feed, `Rate limit: ${Math.round(info.utilization * 100)}% used`, "rate-limit-msg", event.ts);
       scrollBottomIfActive(runId);
     }
     return;
@@ -1785,7 +1778,8 @@ function renderRunEvent(runId, event) {
 
   // --- Assistant message ---
   if (event.type === "assistant" && event.message) {
-    renderAssistant(feed, event.message, runId);
+    if (event.message.usage) updateRunStats(runId, event);
+    renderAssistant(feed, event.message, runId, event.ts);
     scrollBottomIfActive(runId); return;
   }
 
@@ -1797,15 +1791,21 @@ function renderRunEvent(runId, event) {
 
   // --- Raw text ---
   if (event.type === "raw" && event.text) {
-    appendMsg(feed, event.text, "raw-msg");
+    appendMsg(feed, event.text, "raw-msg", event.ts);
     const flag = checkForFlag(event.text);
     if (flag) showFlagBanner(flag);
     scrollBottomIfActive(runId); return;
   }
 
+  // --- Codex usage ---
+  if (event.type === "codex_usage") {
+    updateRunStats(runId, event);
+    return;
+  }
+
   // --- Result ---
   if (event.type === "result") {
-    if (event.total_cost_usd) { totalCostUsd = event.total_cost_usd; updateCost(); }
+    updateRunStats(runId, event);
     if (event.result) {
       const block = document.createElement("div");
       block.className = "result-block";
@@ -1856,13 +1856,8 @@ function _flushToolGroup(feed) {
   _pendingToolEls = [];
 }
 
-function renderAssistant(feed, msg, runId) {
+function renderAssistant(feed, msg, runId, eventTs) {
   if (!msg.content || !msg.content.length) return;
-
-  if (msg.usage) {
-    totalTokens += (msg.usage.input_tokens || 0) + (msg.usage.output_tokens || 0);
-    updateCost();
-  }
 
   for (const block of msg.content) {
     if (block.type === "thinking" && block.thinking) {
@@ -1882,7 +1877,14 @@ function renderAssistant(feed, msg, runId) {
       const preview = document.createElement("span");
       preview.className = "thinking-preview";
       preview.textContent = " " + truncate(block.thinking, 100);
-      summary.append(label, preview);
+      if (eventTs != null) {
+        const tsEl = document.createElement("span");
+        tsEl.className = "msg-ts";
+        tsEl.textContent = fmtElapsed(eventTs);
+        summary.append(label, preview, tsEl);
+      } else {
+        summary.append(label, preview);
+      }
       details.appendChild(summary);
       const body = document.createElement("div");
       body.className = "thinking-body";
@@ -1901,13 +1903,10 @@ function renderAssistant(feed, msg, runId) {
       const bubble = document.createElement("div");
       bubble.className = "chat-bubble chat-assistant";
 
-      if (timerStart) {
-        const elapsed = Math.floor((Date.now() - timerStart) / 1000);
+      if (eventTs != null) {
         const ts = document.createElement("span");
-        ts.className = "chat-timestamp";
-        const m = Math.floor(elapsed / 60);
-        const s = elapsed % 60;
-        ts.textContent = `${m}:${String(s).padStart(2, "0")}`;
+        ts.className = "msg-ts";
+        ts.textContent = fmtElapsed(eventTs);
         bubble.appendChild(ts);
       }
 
@@ -1931,9 +1930,7 @@ function renderAssistant(feed, msg, runId) {
       const toolEl = buildToolUse(block);
       _pendingToolEls.push(toolEl);
       pendingTools.set(block.id, toolEl);
-      addToolLogEntry(block);
-      toolCount++;
-      updateCounters();
+      if (runId) getRunStats(runId).toolCalls++;
     }
   }
 
@@ -2011,9 +2008,6 @@ function renderToolResults(event, feed) {
       };
       toolEl = buildToolUse(synthetic);
       feed.appendChild(toolEl);
-      addToolLogEntry(synthetic);
-      toolCount++;
-      updateCounters();
       pendingTools.set(synthetic.id, toolEl);
     }
 
@@ -2046,51 +2040,197 @@ function renderToolResults(event, feed) {
       toolEl._outputEl.appendChild(copyBtn);
     }
 
-    updateToolLogStatus(block.tool_use_id, isError);
     pendingTools.delete(block.tool_use_id);
   }
 }
 
-// === Tool Log Sidebar ===
-function addToolLogEntry(block) {
-  const log = $("#tool-log");
-  const item = document.createElement("div");
-  item.className = "tool-log-item";
-  item.id = `tlog-${block.id}`;
-
-  const dot = document.createElement("span");
-  dot.className = "tool-log-status dot-running";
-
-  const nameEl = document.createElement("span");
-  nameEl.className = "tool-log-name";
-  nameEl.textContent = block.name;
-
-  const descEl = document.createElement("span");
-  descEl.className = "tool-log-desc";
-  descEl.textContent = toolSummary(block.name, block.input);
-
-  item.append(dot, nameEl, descEl);
-
-  // Click to scroll to tool in main feed
-  item.addEventListener("click", () => {
-    const el = document.getElementById(`tool-${block.id}`);
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-      el.querySelector(".tool-detail")?.classList.add("open");
-      el.style.outline = "1px solid var(--accent)";
-      setTimeout(() => el.style.outline = "", 1500);
-    }
-  });
-
-  log.appendChild(item);
-  log.scrollTop = log.scrollHeight;
+// === Stats Sidebar ===
+function getRunStats(runId) {
+  if (!runStats.has(runId)) {
+    runStats.set(runId, {
+      inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0,
+      toolCalls: 0, turns: 0,
+      costUsd: 0, durationMs: 0, durationApiMs: 0,
+      modelUsage: null,
+    });
+  }
+  return runStats.get(runId);
 }
 
-function updateToolLogStatus(toolId, isError) {
-  const item = document.getElementById(`tlog-${toolId}`);
-  if (!item) return;
-  const dot = item.querySelector(".tool-log-status");
-  dot.className = `tool-log-status ${isError ? "dot-error" : "dot-done"}`;
+function updateRunStats(runId, event) {
+  const s = getRunStats(runId);
+  if (event.type === "result") {
+    if (event.usage) {
+      s.inputTokens = event.usage.input_tokens || 0;
+      s.outputTokens = event.usage.output_tokens || 0;
+      s.cacheReadTokens = event.usage.cache_read_input_tokens || 0;
+      s.cacheCreationTokens = event.usage.cache_creation_input_tokens || 0;
+    }
+    if (event.total_cost_usd) s.costUsd = event.total_cost_usd;
+    if (event.num_turns) s.turns = event.num_turns;
+    if (event.duration_ms) s.durationMs = event.duration_ms;
+    if (event.duration_api_ms) s.durationApiMs = event.duration_api_ms;
+    if (event.model_usage) s.modelUsage = event.model_usage;
+  } else if (event.type === "codex_usage" && event.usage) {
+    s.inputTokens += event.usage.input_tokens || 0;
+    s.outputTokens += event.usage.output_tokens || 0;
+    s.cacheReadTokens += event.usage.cached_input_tokens || 0;
+  } else if (event.type === "assistant" && event.message?.usage) {
+    const u = event.message.usage;
+    s.inputTokens += u.input_tokens || 0;
+    s.outputTokens += u.output_tokens || 0;
+    s.cacheReadTokens += u.cache_read_input_tokens || 0;
+    s.cacheCreationTokens += u.cache_creation_input_tokens || 0;
+  }
+  renderStats();
+}
+
+function fmtTokens(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
+  return String(n);
+}
+
+function fmtDuration(ms) {
+  if (!ms) return "-";
+  if (ms < 60_000) return (ms / 1000).toFixed(1) + "s";
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return `${m}m ${s}s`;
+}
+
+function fmtCost(usd) {
+  if (!usd) return "-";
+  return "$" + usd.toFixed(4);
+}
+
+function renderStats() {
+  const panel = $("#stats-panel");
+  if (!panel) return;
+  panel.innerHTML = "";
+
+  if (!runStats.size) {
+    panel.innerHTML = '<div style="padding:1rem;color:var(--text-dim);font-size:0.8rem">No statistics yet</div>';
+    return;
+  }
+
+  // --- Total section ---
+  {
+    const tot = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, tools: 0, turns: 0 };
+    for (const s of runStats.values()) {
+      tot.input += s.inputTokens;
+      tot.output += s.outputTokens;
+      tot.cacheRead += s.cacheReadTokens;
+      tot.cacheWrite += s.cacheCreationTokens;
+      tot.cost += s.costUsd;
+      tot.tools += s.toolCalls;
+      tot.turns += s.turns;
+    }
+    const section = document.createElement("div");
+    section.className = "stats-run-section";
+    const header = document.createElement("div");
+    header.className = "stats-run-header";
+    header.textContent = "Total";
+    section.appendChild(header);
+    const grid = document.createElement("div");
+    grid.className = "stats-grid";
+    const rows = [
+      ["Input", fmtTokens(tot.input)],
+      ["Output", fmtTokens(tot.output)],
+    ];
+    if (tot.cacheRead) rows.push(["Cache read", fmtTokens(tot.cacheRead)]);
+    if (tot.cacheWrite) rows.push(["Cache write", fmtTokens(tot.cacheWrite)]);
+    rows.push(["Total tokens", fmtTokens(tot.input + tot.output)]);
+    if (tot.tools) rows.push(["Tool calls", String(tot.tools)]);
+    if (tot.turns) rows.push(["Turns", String(tot.turns)]);
+    if (tot.cost) rows.push(["Cost", fmtCost(tot.cost)]);
+    for (const [lbl, val] of rows) {
+      const item = document.createElement("div");
+      item.className = "stat-item";
+      item.innerHTML = `<span class="stat-label">${esc(lbl)}</span><span class="stat-value">${esc(val)}</span>`;
+      grid.appendChild(item);
+    }
+    section.appendChild(grid);
+    panel.appendChild(section);
+  }
+
+  for (const [runId, s] of runStats) {
+    const run = currentRuns.find(r => r.id === runId);
+    const agent = run ? run.agent : "unknown";
+    const agentMeta = getAgentMeta(agent);
+    const label = run ? (agentMeta.label || agent) : runId.slice(0, 8);
+
+    const section = document.createElement("div");
+    section.className = "stats-run-section";
+
+    const header = document.createElement("div");
+    header.className = "stats-run-header";
+    const dot = document.createElement("span");
+    dot.className = `run-tab-dot dot-${run?.status === "solving" ? "running" : run?.status === "solved" ? "solved" : "pending"}`;
+    header.append(dot);
+    header.append(document.createTextNode(label));
+    if (run?.model) {
+      const modelSpan = document.createElement("span");
+      modelSpan.style.cssText = "font-weight:400;color:var(--text-dim);font-size:0.65rem";
+      modelSpan.textContent = ` (${run.model})`;
+      header.appendChild(modelSpan);
+    }
+    section.appendChild(header);
+
+    const grid = document.createElement("div");
+    grid.className = "stats-grid";
+
+    const totalTokens = s.inputTokens + s.outputTokens;
+    const stats = [
+      ["Input", fmtTokens(s.inputTokens)],
+      ["Output", fmtTokens(s.outputTokens)],
+    ];
+    if (s.cacheReadTokens) stats.push(["Cache read", fmtTokens(s.cacheReadTokens)]);
+    if (s.cacheCreationTokens) stats.push(["Cache write", fmtTokens(s.cacheCreationTokens)]);
+    stats.push(["Total tokens", fmtTokens(totalTokens)]);
+    if (s.toolCalls) stats.push(["Tool calls", String(s.toolCalls)]);
+    if (s.turns) stats.push(["Turns", String(s.turns)]);
+    if (s.costUsd) stats.push(["Cost", fmtCost(s.costUsd)]);
+    if (s.durationMs) stats.push(["Duration", fmtDuration(s.durationMs)]);
+    if (s.durationApiMs) stats.push(["API time", fmtDuration(s.durationApiMs)]);
+
+    for (const [lbl, val] of stats) {
+      const item = document.createElement("div");
+      item.className = "stat-item";
+      item.innerHTML = `<span class="stat-label">${esc(lbl)}</span><span class="stat-value">${esc(val)}</span>`;
+      grid.appendChild(item);
+    }
+    section.appendChild(grid);
+
+    if (s.modelUsage) {
+      for (const [model, mu] of Object.entries(s.modelUsage)) {
+        const msec = document.createElement("div");
+        msec.className = "stats-model-section";
+        const mh = document.createElement("div");
+        mh.className = "stats-model-header";
+        mh.textContent = model;
+        msec.appendChild(mh);
+        const mg = document.createElement("div");
+        mg.className = "stats-grid";
+        const mstats = [];
+        if (mu.inputTokens) mstats.push(["Input", fmtTokens(mu.inputTokens)]);
+        if (mu.outputTokens) mstats.push(["Output", fmtTokens(mu.outputTokens)]);
+        if (mu.cacheReadInputTokens) mstats.push(["Cache read", fmtTokens(mu.cacheReadInputTokens)]);
+        if (mu.costUSD != null) mstats.push(["Cost", fmtCost(mu.costUSD)]);
+        for (const [lbl, val] of mstats) {
+          const item = document.createElement("div");
+          item.className = "stat-item";
+          item.innerHTML = `<span class="stat-label">${esc(lbl)}</span><span class="stat-value">${esc(val)}</span>`;
+          mg.appendChild(item);
+        }
+        msec.appendChild(mg);
+        section.appendChild(msec);
+      }
+    }
+
+    panel.appendChild(section);
+  }
 }
 
 // === Helpers ===
@@ -2156,10 +2296,16 @@ function formatDuration(ms) {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-function appendMsg(container, text, cls) {
+function appendMsg(container, text, cls, ts) {
   const div = document.createElement("div");
   div.className = cls;
   div.textContent = text;
+  if (ts != null) {
+    const tsEl = document.createElement("span");
+    tsEl.className = "msg-ts";
+    tsEl.textContent = fmtElapsed(ts);
+    div.appendChild(tsEl);
+  }
   container.appendChild(div);
 }
 
@@ -2167,6 +2313,25 @@ function esc(str) {
   const d = document.createElement("div");
   d.textContent = str;
   return d.innerHTML;
+}
+
+function fmtElapsed(seconds) {
+  if (seconds == null) return "";
+  const s = Math.floor(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  if (m < 60) return `${m}m${rem ? ` ${rem}s` : ""}`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+function makeTimestamp(event) {
+  if (event.ts == null) return null;
+  const el = document.createElement("span");
+  el.className = "msg-ts";
+  el.textContent = fmtElapsed(event.ts);
+  return el;
 }
 
 // === Sidebar Tabs ===
@@ -2395,9 +2560,9 @@ document.addEventListener("keydown", (e) => {
     $("#steer-input").focus();
     e.preventDefault();
   }
-  // Sidebar tabs: 1-4
+  // Sidebar tabs: 1-3
   if (e.key === "1") switchTab("tab-info");
-  if (e.key === "2") switchTab("tab-tools");
+  if (e.key === "2") switchTab("tab-stats");
   if (e.key === "3") switchTab("tab-files");
 
   // Left/Right arrows to switch run tabs

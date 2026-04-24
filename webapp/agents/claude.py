@@ -187,6 +187,12 @@ async def _run_agent_sdk(
                 event["usage"] = msg.usage
             if msg.num_turns:
                 event["num_turns"] = msg.num_turns
+            if msg.duration_ms:
+                event["duration_ms"] = msg.duration_ms
+            if msg.duration_api_ms:
+                event["duration_api_ms"] = msg.duration_api_ms
+            if msg.model_usage:
+                event["model_usage"] = msg.model_usage
             if msg.session_id and session_state is not None:
                 session_state["claude_session_id"] = msg.session_id
             return event
