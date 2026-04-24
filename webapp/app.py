@@ -2205,8 +2205,8 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
         "",
         "Key tool rules:",
         "- For ANY binary (ELF/PE): use IDA Pro for static analysis "
-        "(load the analyze-with-ida-domain-api skill). Do NOT use objdump "
-        "or readelf as primary analysis — IDA is installed and licensed.",
+        "via the ida MCP tools (ida_open_idb, ida_list_functions, ida_decompile, etc.). "
+        "Do NOT use objdump or readelf as primary analysis — IDA is installed and licensed.",
         "- For runtime debugging: use libdebug (load the libdebug-debugging skill), not raw GDB.",
         "- For kernel challenges: use GDB+GEF via MCP (load the kernel-gef-debugging skill).",
         "- Run ctfgrep first for a quick flag search across encodings.",
@@ -2569,6 +2569,9 @@ async def _run_agent_sdk_path(
             if etype == "error":
                 last_error = event.get("message", "")
 
+            if "ts" not in event and run.get("solve_start"):
+                event["ts"] = round(_time.monotonic() - run["solve_start"], 1)
+
             run["output_lines"].append(event)
             append_output_event(challenge_id, run_id, event)
             await broadcast(challenge_id, run_id, event)
@@ -2609,56 +2612,72 @@ async def _run_agent_sdk_path(
             unregister_run(challenge_id, run_id)
 
     # --- Finalization ---
-    stop_reason = run.pop("_stop_reason", None)
+    try:
+        stop_reason = run.pop("_stop_reason", None)
 
-    log.info(
-        "[%s/%s] SDK finalization: stop_reason=%s, saw_msg=%s, status=%s",
-        challenge_id[:8], run_id[:8], stop_reason, saw_message,
-        run["status"],
-    )
+        log.info(
+            "[%s/%s] SDK finalization: stop_reason=%s, saw_msg=%s, status=%s",
+            challenge_id[:8], run_id[:8], stop_reason, saw_message,
+            run["status"],
+        )
 
-    if stop_reason:
-        # Externally stopped (steer, delete, sibling solved)
-        pass
-    elif run["status"] == "solved":
-        # Auto-submit marked it solved — stop siblings in parallel mode
-        if challenge.get("mode") == "parallel":
-            for other_id, other_run in challenge["runs"].items():
-                if other_id == run_id:
-                    continue
-                if other_run["status"] in ("solving", "pending"):
-                    await stop_run(other_run, "sibling_solved")
-                    other_run["status"] = "failed"
-    elif saw_message and not last_error:
-        run["status"] = "completed"
-        run["error"] = None
-    else:
-        run["status"] = "failed"
-        run["error"] = last_error or "Agent produced no output"
-        if last_error:
-            err_event = {"type": "error", "message": last_error}
-            run["output_lines"].append(err_event)
-            append_output_event(challenge_id, run_id, err_event)
-            await broadcast(challenge_id, run_id, err_event)
+        if stop_reason:
+            # Externally stopped (steer, delete, sibling solved)
+            pass
+        elif run["status"] == "solved":
+            # Auto-submit marked it solved — stop siblings in parallel mode
+            if challenge.get("mode") == "parallel":
+                for other_id, other_run in challenge["runs"].items():
+                    if other_id == run_id:
+                        continue
+                    if other_run["status"] in ("solving", "pending"):
+                        await stop_run(other_run, "sibling_solved")
+                        other_run["status"] = "failed"
+        elif saw_message and not last_error:
+            run["status"] = "completed"
+            run["error"] = None
+        else:
+            run["status"] = "failed"
+            run["error"] = last_error or "Agent produced no output"
+            if last_error:
+                err_event = {"type": "error", "message": last_error}
+                run["output_lines"].append(err_event)
+                append_output_event(challenge_id, run_id, err_event)
+                await broadcast(challenge_id, run_id, err_event)
 
-    if run.get("solve_start"):
-        elapsed = _time.monotonic() - run["solve_start"]
-        run["duration_ms"] = int(elapsed * 1000)
+        if run.get("solve_start"):
+            elapsed = _time.monotonic() - run["solve_start"]
+            run["duration_ms"] = int(elapsed * 1000)
 
-    challenge["status"] = derive_challenge_status(challenge)
-    save_metadata(challenge)
+        challenge["status"] = derive_challenge_status(challenge)
+        save_metadata(challenge)
 
-    # Discord: agent stopped notification
-    last_msg = ""
-    for evt in reversed(run.get("output_lines", [])):
-        if evt.get("type") == "assistant":
-            for block in evt.get("message", {}).get("content", []):
-                if block.get("type") == "text" and block.get("text"):
-                    last_msg = block["text"]
+        # Discord: agent stopped notification
+        last_msg = ""
+        for evt in reversed(run.get("output_lines", [])):
+            if evt.get("type") == "assistant":
+                for block in evt.get("message", {}).get("content", []):
+                    if block.get("type") == "text" and block.get("text"):
+                        last_msg = block["text"]
+                        break
+                if last_msg:
                     break
-            if last_msg:
-                break
-    asyncio.create_task(discord_notify(challenge, embed=make_stop_embed(challenge, run, last_msg)))
+        asyncio.create_task(discord_notify(challenge, embed=make_stop_embed(challenge, run, last_msg)))
+
+    except Exception as exc:
+        log.error(
+            "[%s/%s] Finalization error: %s",
+            challenge_id[:8], run_id[:8], exc, exc_info=True,
+        )
+        if run["status"] == "solving":
+            run["status"] = "failed"
+            run["error"] = f"Finalization error: {exc}"
+        challenge["status"] = derive_challenge_status(challenge)
+        save_metadata(challenge)
+        err_event = {"type": "error", "message": f"Finalization error: {exc}"}
+        run["output_lines"].append(err_event)
+        append_output_event(challenge_id, run_id, err_event)
+        await broadcast(challenge_id, run_id, err_event)
 
     await broadcast(challenge_id, run_id, {
         "type": "run_status",
@@ -2779,6 +2798,13 @@ async def run_agent_task(
         model_info += f", {run['effort']}"
     await discord_notify(challenge, f"**{run['agent']}** ({model_info}) — {sys_event['message']}")
 
+    prompt_event = {"type": "user_prompt", "message": prompt}
+    if run.get("solve_start"):
+        prompt_event["ts"] = round(_time.monotonic() - run["solve_start"], 1)
+    run["output_lines"].append(prompt_event)
+    append_output_event(challenge_id, run_id, prompt_event)
+    await broadcast(challenge_id, run_id, prompt_event)
+
     # --- SDK path: use provider's run_agent if available ---
     if provider.supports_sdk:
         log.info("[%s/%s] Entering SDK path for %s", challenge_id[:8], run_id[:8], run["agent"])
@@ -2789,7 +2815,23 @@ async def run_agent_task(
             )
         except Exception as exc:
             log.error("[%s/%s] SDK path CRASHED: %s", challenge_id[:8], run_id[:8], exc, exc_info=True)
-            raise
+            if run["status"] == "solving":
+                run["status"] = "failed"
+                run["error"] = str(exc)
+            challenge["status"] = derive_challenge_status(challenge)
+            save_metadata(challenge)
+            err_event = {"type": "error", "message": f"SDK error: {exc}"}
+            run["output_lines"].append(err_event)
+            append_output_event(challenge_id, run_id, err_event)
+            await broadcast(challenge_id, run_id, err_event)
+            await broadcast(challenge_id, run_id, {
+                "type": "run_status", "run_id": run_id,
+                "status": run["status"], "error": run.get("error"),
+            })
+            await broadcast_challenge(challenge_id, {
+                "type": "challenge_status",
+                "status": challenge["status"],
+            })
         log.info("[%s/%s] SDK path completed for %s", challenge_id[:8], run_id[:8], run["agent"])
         return
 
