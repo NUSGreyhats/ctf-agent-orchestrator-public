@@ -17,7 +17,8 @@ curl -fsSL https://claude.ai/install.sh | bash
 # Install GDB MCP server dependency
 python3 -m pip install --break-system-packages --ignore-installed 'mcp[cli]'
 
-# Register GDB MCP server via claude mcp add (stores in ~/.claude.json)
+# Register MCP servers via claude mcp add (stores in ~/.claude.json)
 ~/.local/bin/claude mcp add --transport stdio --scope user gdb -- python3 /root/ctf-agent-wrapper/mcps/gdb_mcp.py
+~/.local/bin/claude mcp add --transport stdio --scope user ida -e IDADIR=/opt/ida-pro-9.3 -- ida-mcp
 
 echo "alias yolo='IS_SANDBOX=1 claude --dangerously-skip-permissions'" >> ~/.bashrc

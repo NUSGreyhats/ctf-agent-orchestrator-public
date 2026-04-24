@@ -34,8 +34,17 @@ wget -O /opt/gef/gef.py https://raw.githubusercontent.com/bata24/gef/master/gef.
 python3 -m pip install keystone-engine ropper
 
 #
-# Python packages for skills: ida-domain, libdebug
+# install ida-mcp-rs (IDA Pro MCP server)
+#
+
+IDA_MCP_TAG=$(curl -sI https://github.com/blacktop/ida-mcp-rs/releases/latest | grep -i '^location:' | grep -oP 'v[\d.]+')
+curl -sL "https://github.com/blacktop/ida-mcp-rs/releases/download/${IDA_MCP_TAG}/ida-mcp_${IDA_MCP_TAG#v}_Linux_x86_64.tar.gz" \
+  | tar xz -C /usr/local/bin ida-mcp ida-mcp-bin
+chmod +x /usr/local/bin/ida-mcp /usr/local/bin/ida-mcp-bin
+
+#
+# Python packages for skills: libdebug
 #
 
 python3 -m pip install --ignore-installed typing-extensions
-python3 -m pip install ida-domain libdebug
+python3 -m pip install libdebug

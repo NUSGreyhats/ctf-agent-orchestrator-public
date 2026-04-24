@@ -41,6 +41,12 @@ mcp["gdb"] = {
     "command": ["python3", "/root/ctf-agent-wrapper/mcps/gdb_mcp.py"],
     "enabled": True,
 }
+mcp["ida"] = {
+    "type": "local",
+    "command": ["ida-mcp"],
+    "env": {"IDADIR": "/opt/ida-pro-9.3"},
+    "enabled": True,
+}
 
 config_path.write_text(json.dumps(config, indent=2) + "\n")
 PY

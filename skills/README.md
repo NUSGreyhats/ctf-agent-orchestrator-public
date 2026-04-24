@@ -27,7 +27,6 @@ Skills come from two sources:
 | Skill | Domain | Key Tools |
 |---|---|---|
 | [apk-analysis](tools/apk-analysis/SKILL.md) | Android reverse engineering | jadx, apktool, IDA Pro |
-| [ida](tools/ida/SKILL.md) | Static binary analysis | IDA Pro Domain API (idalib, headless mode) |
 | [kernel-gef](tools/kernel-gef/SKILL.md) | Kernel debugging | GDB + GEF via MCP |
 | [libdebug](tools/libdebug/SKILL.md) | Dynamic binary analysis | libdebug (ptrace-based scriptable debugging) |
 

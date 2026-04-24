@@ -1,6 +1,6 @@
 # IDA Pro Integration Reference
 
-This document describes how the `apk-analysis` skill hands off native library analysis to the `analyze-with-ida-domain-api` skill.
+This document describes how the `apk-analysis` skill hands off native library analysis to the `ida` MCP tools.
 
 ## When to Trigger IDA Analysis
 
@@ -14,7 +14,7 @@ Native library analysis via IDA Pro is warranted when:
 
 ## Pre-IDA Checklist
 
-Before handing off to the IDA skill, ensure you have gathered:
+Before using the IDA MCP tools, ensure you have gathered:
 
 - [ ] The `.so` file path (prefer arm64-v8a architecture)
 - [ ] The `file` command output (ELF type, architecture, linking)
@@ -24,25 +24,16 @@ Before handing off to the IDA skill, ensure you have gathered:
 - [ ] The corresponding Java `native` method declarations from jadx output
 - [ ] User's specific analysis goals (what are they looking for?)
 
-## Handoff Format
+## Using the IDA MCP Tools
 
-When invoking the `analyze-with-ida-domain-api` skill, provide this context:
+Open the binary and analyze it directly via MCP tool calls:
 
 ```
-Binary to analyze: /home/claude/apk-work/<filename>.so
-Architecture: arm64-v8a (or armeabi-v7a, x86, x86_64)
-Source app: <package name from manifest>
-
-Key functions to investigate:
-- <JNI function name> → maps to <Java class.method()>
-- <other exported function>
-
-Context from Java layer:
-- <Brief description of how the native method is called>
-- <What the return value is used for>
-
-Analysis goals:
-- <What the user wants to know>
+1. ida_open_idb("/home/claude/apk-work/<filename>.so")
+2. ida_strings()                              → find interesting strings
+3. ida_list_functions(limit=50)               → enumerate functions
+4. ida_decompile(address=<jni_func_addr>)     → decompile JNI functions
+5. ida_disasm_by_name("Java_com_example_fn")  → get disassembly by name
 ```
 
 ## Correlating IDA Results Back
@@ -57,7 +48,7 @@ After IDA analysis completes, correlate findings back to the Java layer:
 
 ## Fallback (No IDA Available)
 
-If the `analyze-with-ida-domain-api` skill is not available, the following information can still be extracted with basic tools:
+If the `ida` MCP tools are not available, the following information can still be extracted with basic tools:
 
 | Tool | What it reveals |
 |---|---|
