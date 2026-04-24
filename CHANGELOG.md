@@ -2,6 +2,74 @@
 
 ## Unreleased
 
+### IDA Pro via MCP Server
+
+Replaced the IDA Domain API skill with [ida-mcp-rs](https://github.com/blacktop/ida-mcp-rs),
+a headless IDA Pro MCP server. Agents now call IDA tools directly
+(`ida_open_idb`, `ida_list_functions`, `ida_decompile`, etc.) instead of
+writing Python scripts against the Domain API. The `ida` MCP server is
+registered for Claude, Codex, and OpenCode.
+
+The `analyze-with-ida-domain-api` skill has been removed — no skill is
+needed, agents use the MCP tools directly.
+
+### Per-Challenge Statistics
+
+Replaced the Tools sidebar tab with a Statistics tab showing per-run and
+aggregate metrics:
+
+- Token counts (input, output, cache read/write) for Claude and Codex
+- Total cost (Claude), duration, API time, turns, tool calls
+- Per-model breakdown from Claude's `model_usage` data
+- Aggregate "Total" section summing across all runs
+
+The cost/token display previously in the header bar has been removed in
+favor of the stats panel.
+
+### Challenge Status Fix
+
+Fixed a bug where challenges stayed "solving" after the agent finished.
+The finalization code that derives challenge status and broadcasts it to
+the frontend was not protected against exceptions — if anything threw
+(Discord notification, metadata save, etc.), the status broadcasts were
+skipped and the challenge was stuck forever. Now wrapped in try/except
+with the error surfaced in the chat feed.
+
+Also fixed the SDK crash handler in `run_agent_task` which previously
+re-raised the exception, skipping status updates entirely.
+
+### Elapsed Timestamps
+
+Each event from the agent is stamped with `ts` (seconds elapsed since
+solve start). Timestamps display on text messages, thinking blocks, and
+system messages in the chat feed.
+
+### User Prompts in Chat
+
+The initial prompt and resume/steer messages now appear as right-aligned
+chat bubbles (labeled "Prompt" or "You"), making the conversation flow
+visible. Codex `userMessage` and `contextCompaction` item types are now
+handled instead of logged as unrecognized.
+
+### WebSocket Reconnect Fix
+
+Fixed a bug where the frontend reconnected to the WebSocket every 2
+seconds unconditionally, even after the run finished. Each reconnection
+replayed the full conversation history, causing the chat to duplicate.
+Now skips reconnection when the run is in a terminal state.
+
+### Documentation Update
+
+Updated README.md and DESIGN.md to reflect current state:
+- Added GCP as third cloud provider
+- Added HTB CTF platform plugin
+- Added Discord integration section
+- Added per-challenge statistics
+- Fixed state persistence paths
+- Updated Supported Agents table (Copilot has session resume and effort
+  levels, Codex/OpenCode don't have subagent tabs)
+- Updated project structure and settings table
+
 ### Four Solving Modes
 
 The challenge model has been rebuilt around four solving modes, replacing the

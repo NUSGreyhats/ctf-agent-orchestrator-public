@@ -17,9 +17,9 @@ Skills live in `skills/` and are read by agents directly from `/root/ctf-agent-w
 | Agent | Models | Effort levels | Session resume | Subagent tabs | Steering |
 |-------|--------|---------------|----------------|---------------|----------|
 | Claude Code | Opus 4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Low, Medium, High, Max | Yes | Yes | Yes |
-| Codex | Discovered from local cache/config | Per-model (discovered) | Yes | Partial | Yes |
-| GitHub Copilot CLI | Curated GPT/Claude/Gemini list | Low, Medium, High, XHigh | No | Yes | Yes |
-| OpenCode | Discovered from `opencode models` | Provider default | Yes | Partial | Yes |
+| Codex | Discovered from local cache/config | Per-model (discovered) | Yes | No | Yes |
+| GitHub Copilot CLI | Curated GPT/Claude/Gemini list | Low, Medium, High, XHigh | Yes | Yes | Yes |
+| OpenCode | Discovered from `opencode models` | Provider default | Yes | No | Yes |
 
 All four agents run via their respective SDKs. Multiple agents can race the same challenge simultaneously using **All (parallel)** mode.
 
@@ -31,9 +31,10 @@ All four agents run via their respective SDKs. Multiple agents can race the same
 - **Subagent tabs** — When an agent spawns parallel workers, each gets its own tab with independent output and status badges.
 - **Flag detection** — Flags matching known patterns (`flag{...}`, `CTF{...}`, `HTB{...}`, `picoCTF{...}`, or custom formats) are automatically detected and surfaced in the sidebar. Flags show as neutral until submitted — green for correct, red for rejected. State persists across page navigations.
 - **Steering** — Send guidance to a running agent mid-solve. The agent receives your message and adjusts its approach without restarting.
-- **Resume & Retry** — Resume continues from the last session (preserving conversation history and session state for true context continuity). Retry starts fresh.
+- **Resume & Retry** — Resume continues from the last session (preserving conversation history and session state for true context continuity). Retry starts fresh. Mark Solved and Unsolve let you manually override challenge status.
+- **Chat view modes** — Split view (agents side-by-side) or tabbed view (click to switch). Configurable in settings.
 - **File browser** — Browse and view challenge files inline (images, text with syntax highlighting, hex view for binaries).
-- **Usage tracking** — Per-agent usage dashboards with OAuth-based API data (5h/weekly utilization, per-model breakdowns, extra usage credits) shown as progress bars.
+- **Usage tracking** — Per-agent usage dashboards with OAuth-based API data (5h/weekly utilization, per-model breakdowns, extra usage credits) shown as progress bars. Per-challenge statistics sidebar with token counts, cost, duration, turns, and per-model breakdowns.
 - **Toast notifications** — Flag discoveries and status changes broadcast globally via a dedicated WebSocket, so you get notified even when viewing a different challenge.
 - **Export** — Export challenge reports as markdown with full activity logs.
 
@@ -41,7 +42,7 @@ All four agents run via their respective SDKs. Multiple agents can race the same
 
 - **Single challenges** — Create with name, description, flag format, and file uploads.
 - **Bulk upload** — Upload `.zip` or `.7z` archives with one folder per challenge. Preview and edit metadata before importing.
-- **Platform import** — Fetch challenges directly from CTFd or rCTF instances. Saves connections for future syncs with automatic points/solves updates.
+- **Platform import** — Fetch challenges directly from CTFd, rCTF, or Hack The Box CTF instances. Saves connections for future syncs with automatic points/solves updates. HTB challenges with on-demand instances are started automatically at solve time.
 - **Auto-submit** — Detected flags can be automatically submitted to the connected CTF platform.
 
 ### Parallel Mode & Collaboration
@@ -50,30 +51,40 @@ When multiple agents solve the same challenge, each gets an isolated working dir
 
 - **Working notes** — Each agent maintains `WORKING_NOTES_{agent}.md`. Cross-symlinks let every agent read its teammates' notes.
 - **Teammate notifications** — Agents can call the `notify_teammates` MCP tool to broadcast breakthroughs. A background poller injects these messages into teammates' sessions every 5 seconds.
+- **User broadcast** — Send a message to all running agents simultaneously from the web UI or Discord.
 - **Auto-stop on solve** — When one agent finds the flag, all other agents are automatically stopped.
+
+### Discord Integration
+
+Optional Discord bot for team coordination:
+
+- **Per-challenge threads** — A thread is created for each imported challenge and renamed to `[solved]` on completion.
+- **Real-time notifications** — Solve events, flag detections, breakthroughs, and agent stops are posted to Discord.
+- **Slash commands** — `/broadcast`, `/submit`, `/status`, `/flags`, `/stop`, `/resume`, `/solved`, `/ctf`, `/files` for controlling agents and viewing challenge state from Discord.
 
 ### Infrastructure
 
 - **GDB MCP server** — Persistent GDB session for kernel/binary debugging, registered for Claude, Codex, and OpenCode.
+- **IDA MCP server** — Headless IDA Pro analysis via [ida-mcp-rs](https://github.com/blacktop/ida-mcp-rs). Provides function listing, disassembly, decompilation, string extraction, and IDAPython scripting through MCP tools.
 - **WireGuard VPN** — Built-in VPN management for challenges that require network access to a CTF infrastructure. Configure, start/stop, and generate client configs from the web UI.
-- **Skills library** — Methodology, forensics (disk/file/memory/network), tool-specific (IDA, APK, kernel-GEF, libdebug), and community skills (crypto, pwn, reverse, web, misc, osint, malware).
+- **Skills library** — Methodology, forensics (disk/file/memory/network), tool-specific (APK, kernel-GEF, libdebug), and community skills (crypto, pwn, reverse, web, misc, osint, malware).
 
 ### Persistence
 
 All state survives server restarts:
-- Challenge metadata, run history, and detected flags persist to `/root/.ctf-solver-state/`.
+- Challenge metadata, run history, and detected flags persist to `state/` within the project directory.
 - Output logs persist as JSONL files per run.
 - Stale "solving" runs are automatically reset to "failed" on server restart.
-- Platform connections and settings persist to disk.
+- Platform connections persist to `state/connections.json`. Settings persist to `challenges/settings.json`.
 
 ## How to Use
 
 ### 1. Deploy the VM
 
-Two cloud providers are supported (Hetzner and DigitalOcean). Pick one — see [infra/README.md](infra/README.md) for details.
+Three cloud providers are supported (Hetzner, DigitalOcean, and GCP). Pick one — see [infra/README.md](infra/README.md) for details.
 
 ```bash
-cd infra/hetzner   # or infra/digitalocean
+cd infra/hetzner   # or infra/digitalocean or infra/gcp
 cp terraform.tfvars.example terraform.tfvars
 ```
 
@@ -149,19 +160,20 @@ cd /root/challenges && opencode
 ### Teardown
 
 ```bash
-cd infra/hetzner   # or infra/digitalocean
+cd infra/hetzner   # or infra/digitalocean or infra/gcp
 terraform destroy
 ```
 
 ## Project Structure
 
 ```
-infra/          Terraform configs (Hetzner Cloud and DigitalOcean)
+infra/          Terraform configs (Hetzner Cloud, DigitalOcean, GCP)
 environment/    Setup scripts (tools, CLIs, dependencies)
 webapp/         Web app (Starlette/ASGI) for challenge management and agent streaming
   agents/       Agent provider implementations (Claude, Codex, Copilot, OpenCode)
-  plugins/      CTF platform integrations (CTFd, rCTF)
+  plugins/      CTF platform integrations (CTFd, rCTF, HTB)
   static/       Frontend (vanilla JS, CSS)
 skills/         Agent skills (methodology, forensics, tool-specific, community)
-mcps/           MCP servers (GDB debugger)
+mcps/           MCP servers (GDB debugger, IDA Pro via ida-mcp-rs)
+state/          Persisted challenge metadata, output logs, connections
 ```

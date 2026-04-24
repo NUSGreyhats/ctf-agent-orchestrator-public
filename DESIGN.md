@@ -93,7 +93,43 @@ All 4 providers use their respective SDKs instead of CLI subprocesses:
 | Copilot | `github-copilot-sdk` | Python SDK with event callbacks |
 | OpenCode | `opencode-sdk` | REST API to `opencode serve` |
 
+## User Broadcast
+
+Users can send messages to all running agents simultaneously via the
+web UI broadcast input or the Discord `/broadcast` slash command. The
+message is injected into each agent's session as a breakthrough from
+`[User]`.
+
+## CTF Platform Plugins
+
+Three platform plugins are supported:
+
+| Plugin | Auth | Features |
+|--------|------|----------|
+| CTFd | API token or username/password | Fetch challenges, download files, submit flags |
+| rCTF | API token | Fetch challenges, download files, submit flags |
+| HTB CTF | JWT Bearer token | Fetch challenges, download files, submit flags, on-demand instance management |
+
+HTB challenges with Docker/machine instances are started at solve time
+(not import) to respect concurrent instance limits. Connection info
+(URL, host, port) is injected into the agent prompt.
+
+Connections are persisted to `state/connections.json` and can be synced
+to fetch new challenges from already-imported platforms.
+
+## Discord Integration
+
+Optional Discord bot for team coordination. When enabled, the bot
+connects via the Discord gateway WebSocket and registers slash commands.
+
+Features:
+- Per-challenge threads created on import, renamed to `[solved]` on completion
+- Real-time notifications for solves, flag detections, breakthroughs, and stops
+- Slash commands: `/broadcast`, `/submit`, `/status`, `/flags`, `/stop`, `/resume`, `/solved`, `/ctf`, `/files`
+
 ## Settings
+
+Settings persist to `challenges/settings.json`.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -101,3 +137,11 @@ All 4 providers use their respective SDKs instead of CLI subprocesses:
 | `default_flag_format` | | Default flag format |
 | `theme` | dark | UI theme |
 | `auto_submit_flags` | false | Auto-submit detected flags to CTF platform |
+| `chat_view_mode` | split | Agent view layout: `split` (side-by-side) or `tabbed` |
+| `enabled_agents` | all | Which agents appear in the agent selector |
+| `agent_models` | {} | Per-agent default model overrides |
+| `agent_efforts` | {} | Per-agent default effort level overrides |
+| `discord_enabled` | false | Enable Discord bot integration |
+| `discord_bot_token` | | Discord bot token |
+| `discord_channel_id` | | Discord channel for challenge threads |
+| `discord_guild_id` | | Discord guild for slash command registration |
