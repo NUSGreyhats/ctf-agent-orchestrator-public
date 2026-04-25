@@ -1,87 +1,123 @@
 # ctf-agent-wrapper
 
-An AI-powered CTF solving workstation. Provisions a cloud VM pre-loaded with forensics, reverse engineering, and analysis tools, then lets you throw CTF challenges at multiple AI agents via a web UI. Supports Claude Code, Codex, GitHub Copilot CLI, and OpenCode — individually or racing in parallel.
+An AI-powered CTF solving workstation. It provisions a cloud VM pre-loaded with forensics, reverse engineering, debugging, and analysis tools, then lets you throw CTF challenges at one or more AI agents via a web UI. Supports Claude Code, Codex, GitHub Copilot CLI, and OpenCode — individually or racing in parallel.
 
 ## Methodology
 
-Modern AI agents can solve many CTF challenges autonomously — given the right tools and enough room to work. The bottleneck is usually environment, not intelligence: the agent needs binutils, forensics suites, disassemblers, and network tools installed and working, in a sandbox where it can run freely without risk.
+Modern AI agents can solve many CTF challenges autonomously — given the right tools and enough room to work. The bottleneck is usually environment, not intelligence: the agent needs binutils, forensics suites, disassemblers, debuggers, network tools, and a sandbox where it can run freely.
 
-This project streamlines that setup. It provisions an isolated cloud VM with all the tooling pre-installed, then exposes it to one or more AI agents that can execute commands, read and write files, and iterate until they find the flag.
+This project streamlines that setup. It provisions an isolated cloud VM with the tooling pre-installed, then exposes challenges to agents that can execute commands, read and write files, collaborate, and iterate until they find the flag.
 
-Out of the box, agents are already effective. But we can do better by providing **skills** — structured workflows that guide how the agent should approach different challenge types (forensics, reversing, crypto, etc.). Skills act as a feedback loop: when you notice the agent going down a rabbithole or missing an obvious technique, you encode that knowledge into a skill so it doesn't repeat the mistake. Over time, the skill library compounds and the solve rate improves.
+Out of the box, agents are already effective. But we can do better by providing **skills** — structured workflows that guide how the agent should approach different challenge types (forensics, reversing, crypto, pwn, web, etc.). Skills act as a feedback loop: when you notice an agent going down a rabbithole or missing an obvious technique, you encode that knowledge into a skill so it does not repeat the mistake. Over time, the skill library compounds and the solve rate improves.
 
-Skills live in `skills/` and are read by agents directly from `/root/ctf-agent-wrapper/skills/` on the VM.
+Skills live in `skills/`. During environment setup they are installed into agent-specific skill directories where supported, and the runtime deploy copies `skills/` to the VM alongside the app.
 
 ## Supported Agents
 
-| Agent | Models | Effort levels | Session resume | Subagent tabs | Steering |
+| Agent | Models | Effort levels | Session resume | Collaboration | Steering |
 |-------|--------|---------------|----------------|---------------|----------|
-| Claude Code | Opus 4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Low, Medium, High, Max | Yes | Yes | Yes |
-| Codex | Discovered from local cache/config | Per-model (discovered) | Yes | No | Yes |
-| GitHub Copilot CLI | Curated GPT/Claude/Gemini list | Low, Medium, High, XHigh | Yes | Yes | Yes |
-| OpenCode | Discovered from `opencode models` | Provider default | Yes | No | Yes |
+| Claude Code | Provider default, Opus 4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Provider default, Low, Medium, High, Max | Yes | `notify_teammates`, working notes | Yes |
+| Codex | Discovered from local cache/config | Per-model, discovered from local cache | Yes | Dynamic `notify_teammates`, working notes | Yes |
+| GitHub Copilot CLI | Provider default, curated GPT/Claude/Gemini list | Provider default, Low, Medium, High, XHigh | Yes | SDK `notify_teammates`, working notes | Yes |
+| OpenCode | Discovered from `opencode models` | Provider default | Yes | TypeScript `notify_teammates`, working notes | Yes |
 
-All four agents run via their respective SDKs. Multiple agents can race the same challenge simultaneously using **All (parallel)** mode.
+All four agents run through their provider integration paths. Multiple agents can race the same challenge by adding multiple agent rows when creating, bulk uploading, or importing challenges; two or more agent rows automatically create a parallel challenge.
 
 ## Features
 
 ### Web UI
 
-- **Live streaming** — Agent output streams in real time over WebSocket. Thinking blocks, tool calls, tool results, and text are rendered with syntax highlighting and collapsible sections.
-- **Subagent tabs** — When an agent spawns parallel workers, each gets its own tab with independent output and status badges.
+- **Live streaming** — Agent output streams in real time over WebSocket. Thinking blocks, tool calls, tool results, raw output, and text are rendered with syntax highlighting and collapsible sections.
+- **Per-run views** — Single challenges have one run. Parallel challenges have one run per agent and can be viewed side-by-side or as tabs.
 - **Flag detection** — Flags matching known patterns (`flag{...}`, `CTF{...}`, `HTB{...}`, `picoCTF{...}`, or custom formats) are automatically detected and surfaced in the sidebar. Flags show as neutral until submitted — green for correct, red for rejected. State persists across page navigations.
-- **Steering** — Send guidance to a running agent mid-solve. The agent receives your message and adjusts its approach without restarting.
-- **Resume & Retry** — Resume continues from the last session (preserving conversation history and session state for true context continuity). Retry starts fresh. Mark Solved and Unsolve let you manually override challenge status.
-- **Chat view modes** — Split view (agents side-by-side) or tabbed view (click to switch). Configurable in settings.
-- **File browser** — Browse and view challenge files inline (images, text with syntax highlighting, hex view for binaries).
-- **Usage tracking** — Per-agent usage dashboards with OAuth-based API data (5h/weekly utilization, per-model breakdowns, extra usage credits) shown as progress bars. Per-challenge statistics sidebar with token counts, cost, duration, turns, and per-model breakdowns.
+- **Steering** — Send guidance to a running agent mid-solve. The agent receives your message and continues from the current session where supported.
+- **Resume & Retry** — Resume continues from saved session state when available. Retry starts fresh. Mark Solved and Unsolve let you manually override challenge status.
+- **Chat view modes** — Split view (agents side-by-side) or tabbed view (click to switch), configurable in settings.
+- **File browser** — Browse challenge files and agent workspaces. Challenge files are stored separately from provider working directories; each run sees them through `./challenge_files/`. The browser can view images, text with syntax highlighting, and binaries as hex.
+- **Usage tracking** — Per-agent usage dashboards with account/usage data where available. Per-challenge statistics show token counts, cost, duration, turns, and per-model breakdowns when providers emit them.
 - **Toast notifications** — Flag discoveries and status changes broadcast globally via a dedicated WebSocket, so you get notified even when viewing a different challenge.
 - **Export** — Export challenge reports as markdown with full activity logs.
 
 ### Challenge Management
 
-- **Single challenges** — Create with name, description, flag format, and file uploads.
+- **Single challenges** — Create with name, description, flag format, agent/model/effort choices, and file uploads.
 - **Bulk upload** — Upload `.zip` or `.7z` archives with one folder per challenge. Preview and edit metadata before importing.
 - **Platform import** — Fetch challenges directly from CTFd, rCTF, or Hack The Box CTF instances. Saves connections for future syncs with automatic points/solves updates. HTB challenges with on-demand instances are started automatically at solve time.
-- **Auto-submit** — Detected flags can be automatically submitted to the connected CTF platform.
+- **Auto-submit** — Detected flags can be automatically submitted to the connected CTF platform. Correct submissions mark the challenge solved and stop other active runs.
+- **TLS verification by default** — CTFd and rCTF verify TLS certificates by default and expose an explicit “Disable TLS certificate verification” checkbox for self-signed/local events. HTB uses normal TLS verification.
+
+### Challenge File and Workspace Layout
+
+Uploaded/imported files are treated as untrusted challenge data and kept out of the provider cwd.
+
+New challenges use this layout for both single and parallel modes:
+
+```text
+/root/ctf-agent-wrapper/challenges/{challenge_id}/
+  _files/                         # original uploaded/imported challenge files
+  _runs/{run_id}/                  # provider working directory
+    challenge_files/               # symlink tree pointing at ../../_files
+    WORKING_NOTES.md               # single mode notes, created by agent/prompt
+```
+
+Parallel challenges additionally use:
+
+```text
+/root/ctf-agent-wrapper/challenges/{challenge_id}/
+  _shared/                         # shared collaboration directory
+  _runs/{run_id}/
+    _shared -> ../../_shared
+    WORKING_NOTES_{agent}.md
+    WORKING_NOTES_{teammate}.md -> ../{teammate_run}/WORKING_NOTES_{teammate}.md
+```
+
+The prompt tells agents to use `./challenge_files/` when challenge files exist. Description-only or remote-instance challenges are explicitly handled as no-file challenges.
 
 ### Parallel Mode & Collaboration
 
-When multiple agents solve the same challenge, each gets an isolated working directory with symlinked challenge files and a shared workspace.
+When multiple agents solve the same challenge, each gets an isolated working directory with a symlinked `challenge_files/` data directory and, in parallel mode, access to shared notes/state.
 
-- **Working notes** — Each agent maintains `WORKING_NOTES_{agent}.md`. Cross-symlinks let every agent read its teammates' notes.
-- **Teammate notifications** — Agents can call the `notify_teammates` MCP tool to broadcast breakthroughs. A background poller injects these messages into teammates' sessions every 5 seconds.
+- **Working notes** — Each parallel agent maintains `WORKING_NOTES_{agent}.md`. Cross-symlinks let every agent read teammates' notes.
+- **Teammate notifications** — Agents can call the `notify_teammates` tool to broadcast validated breakthroughs. A background poller injects these messages into teammates' sessions.
 - **User broadcast** — Send a message to all running agents simultaneously from the web UI or Discord.
-- **Auto-stop on solve** — When one agent finds the flag, all other agents are automatically stopped.
+- **Auto-stop on solve** — When one agent is marked solved or submits a correct flag, sibling runs are automatically stopped.
 
 ### Discord Integration
 
 Optional Discord bot for team coordination:
 
-- **Per-challenge threads** — A thread is created for each imported challenge and renamed to `[solved]` on completion.
-- **Real-time notifications** — Solve events, flag detections, breakthroughs, and agent stops are posted to Discord.
+- **Per-challenge threads** — A thread is created for each challenge when Discord is enabled and renamed to `[solved]` on completion.
+- **Real-time notifications** — Solve events, flag detections, breakthroughs, starts, completions, and stops are posted to Discord.
 - **Slash commands** — `/broadcast`, `/submit`, `/status`, `/flags`, `/stop`, `/resume`, `/solved`, `/ctf`, `/files` for controlling agents and viewing challenge state from Discord.
+- **Live settings** — Enabling/disabling Discord or changing token/channel/guild settings starts, stops, or restarts the gateway without requiring a webapp restart.
 
-### Infrastructure
+### Infrastructure and Deployment
 
+- **Cloud providers** — Terraform configs for Hetzner Cloud, DigitalOcean, and GCP.
+- **Runtime allowlist deploy** — Deploys copy only runtime project files (`environment`, `webapp`, `skills`, `mcps`, `hooks`, `README.md`, `DESIGN.md`) instead of the whole repo. Local `.git/`, `infra/`, Terraform state/vars, and local caches are not copied to the VM.
+- **Runtime data preservation** — Deploy sync preserves `/root/ctf-agent-wrapper/challenges` and `/root/ctf-agent-wrapper/state` on the VM.
 - **GDB MCP server** — Persistent GDB session for kernel/binary debugging, registered for Claude, Codex, and OpenCode.
 - **IDA MCP server** — Headless IDA Pro analysis via [ida-mcp-rs](https://github.com/blacktop/ida-mcp-rs). Provides function listing, disassembly, decompilation, string extraction, and IDAPython scripting through MCP tools.
 - **WireGuard VPN** — Built-in VPN management for challenges that require network access to a CTF infrastructure. Configure, start/stop, and generate client configs from the web UI.
-- **Skills library** — Methodology, forensics (disk/file/memory/network), tool-specific (APK, kernel-GEF, libdebug), and community skills (crypto, pwn, reverse, web, misc, osint, malware).
+- **uv-based Python installs** — Environment scripts install most Python dependencies with `uv pip install --system` for faster provisioning while keeping `pip` available for vendor-local wheels.
+- **Provisioning validation** — `environment/990_validate.sh` checks critical commands and Python imports at the end of setup.
+- **OpenCode server binding** — `opencode serve` is started explicitly on `127.0.0.1` for SDK access.
 
 ### Persistence
 
-All state survives server restarts:
-- Challenge metadata, run history, and detected flags persist to `state/` within the project directory.
+Runtime state survives server restarts and deploy syncs:
+
+- Challenge metadata, run history, and detected flags persist under `/root/ctf-agent-wrapper/state/`.
 - Output logs persist as JSONL files per run.
-- Stale "solving" runs are automatically reset to "failed" on server restart.
-- Platform connections persist to `state/connections.json`. Settings persist to `challenges/settings.json`.
+- Stale `solving` runs are automatically reset to `failed` on server restart.
+- Platform connections persist to `/root/ctf-agent-wrapper/state/connections.json`.
+- Settings persist to `/root/ctf-agent-wrapper/challenges/settings.json`.
 
 ## How to Use
 
 ### 1. Deploy the VM
 
-Three cloud providers are supported (Hetzner, DigitalOcean, and GCP). Pick one — see [infra/README.md](infra/README.md) for details.
+Three cloud providers are supported: Hetzner, DigitalOcean, and GCP. Pick one — see [infra/README.md](infra/README.md) for details.
 
 ```bash
 cd infra/hetzner   # or infra/digitalocean or infra/gcp
@@ -96,7 +132,7 @@ terraform plan
 terraform apply
 ```
 
-This creates a VM and runs all setup scripts. When it finishes, Terraform prints the web app URL and password.
+This creates a VM, copies runtime files, runs setup scripts, validates the environment, installs/starts the webapp service, and prints the web app URL and password.
 
 Retrieve the password later with:
 
@@ -130,11 +166,12 @@ opencode auth login    # OpenCode
 
 Open `https://<VM_IP>` in your browser and log in.
 
-1. Click **+ New Challenge** (or **Bulk Upload**, or import from a CTF platform)
-2. Fill in the name, description, flag format, and upload challenge files
-3. Select an agent or choose **All (parallel)** to race multiple agents
-4. Click **Create & Solve** and watch the agent work in real time
-5. Steer the agent if it gets stuck, or Resume/Retry if it finishes without solving
+1. Click **+ Add Challenge** and choose **Add Single Challenge**, **Bulk Upload**, or **Import from Platform**.
+2. Fill in the name, description, flag format, and upload/import challenge files.
+3. Pick an agent/model/effort. Add more agent rows to run in parallel.
+4. Click **Create & Solve** and watch the run output stream in real time.
+5. Steer the agent if it gets stuck, or Resume/Retry if it finishes without solving.
+6. Use the Files tab to inspect original challenge files or per-run workspaces.
 
 #### Option B: Terminal
 
@@ -166,14 +203,16 @@ terraform destroy
 
 ## Project Structure
 
-```
+```text
 infra/          Terraform configs (Hetzner Cloud, DigitalOcean, GCP)
 environment/    Setup scripts (tools, CLIs, dependencies)
-webapp/         Web app (Starlette/ASGI) for challenge management and agent streaming
+  lib/          Shared shell helpers used by setup scripts
+webapp/         Starlette/ASGI app for challenge management and agent streaming
   agents/       Agent provider implementations (Claude, Codex, Copilot, OpenCode)
-  plugins/      CTF platform integrations (CTFd, rCTF, HTB)
+  plugins/      CTF platform integrations (CTFd, rCTF, HTB CTF)
   static/       Frontend (vanilla JS, CSS)
 skills/         Agent skills (methodology, forensics, tool-specific, community)
+hooks/          Agent hook/tool files, including OpenCode collaboration tool
 mcps/           MCP servers (GDB debugger, IDA Pro via ida-mcp-rs)
-state/          Persisted challenge metadata, output logs, connections
+state/          Runtime state on the VM: metadata, output logs, connections
 ```

@@ -1,39 +1,30 @@
 #!/bin/bash
 
+set -euo pipefail
 set -x
-set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=environment/lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 
 #
 # Disk forensics tools for disk image analysis
 #
 
-# Core analysis: The Sleuth Kit, filesystem utilities
-apt install -y \
-    sleuthkit \
-    ewf-tools \
-    afflib-tools \
-    kpartx \
-    xmount
+apt_install \
+  sleuthkit \
+  ewf-tools \
+  afflib-tools \
+  kpartx \
+  xmount \
+  foremost \
+  scalpel \
+  testdisk \
+  binwalk \
+  qemu-utils \
+  sqlite3
 
-# File carving and data extraction
-apt install -y \
-    foremost \
-    scalpel \
-    testdisk \
-    binwalk
-
-# bulk_extractor (pre-built static binary)
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$SCRIPT_DIR/artefacts/bulk_extractor" /usr/local/bin/bulk_extractor
 chmod +x /usr/local/bin/bulk_extractor
 
-# Image format conversion
-apt install -y \
-    qemu-utils
-
-# SQLite for artifact analysis (browser history, etc.)
-apt install -y \
-    sqlite3
-
-# Python bindings for TSK
-python3 -m pip install pytsk3
+uv_pip_install pytsk3

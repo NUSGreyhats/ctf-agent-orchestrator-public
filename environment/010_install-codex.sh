@@ -3,7 +3,11 @@
 set -euo pipefail
 set -x
 
-npm install -g @openai/codex@latest
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=environment/lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
+
+npm_install_global @openai/codex@latest
 
 # Register local MCP servers for Codex.
 codex mcp remove gdb || true

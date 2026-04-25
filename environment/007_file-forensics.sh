@@ -1,50 +1,51 @@
 #!/bin/bash
 
+set -euo pipefail
 set -x
-set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=environment/lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 
 #
 # File forensics tools: steganography, PDF/OLE analysis, media tools
 #
 
-# Metadata and image analysis
-apt install -y \
-    libimage-exiftool-perl \
-    pngcheck \
-    imagemagick
+apt_install \
+  libimage-exiftool-perl \
+  pngcheck \
+  imagemagick \
+  steghide \
+  stegseek \
+  zbar-tools \
+  ruby-dev \
+  sox \
+  ffmpeg
 
-# Steganography
-apt install -y \
-    steghide \
-    stegseek \
-    zbar-tools
+if ! have_cmd zsteg; then
+  gem install zsteg
+fi
 
-# Ruby + zsteg (LSB steganography for PNG/BMP)
-apt install -y ruby-dev
-gem install zsteg
-
-# Audio/video analysis
-apt install -y \
-    sox \
-    ffmpeg
-
-# DidierStevens tools (pdf-parser, pdfid, oledump)
-wget -qO /usr/local/bin/pdf-parser.py \
-    https://github.com/DidierStevens/DidierStevensSuite/raw/master/pdf-parser.py
-wget -qO /usr/local/bin/pdfid.py \
-    https://github.com/DidierStevens/DidierStevensSuite/raw/master/pdfid.py
-wget -qO /usr/local/bin/oledump.py \
-    https://github.com/DidierStevens/DidierStevensSuite/raw/master/oledump.py
+download_file \
+  https://github.com/DidierStevens/DidierStevensSuite/raw/master/pdf-parser.py \
+  /usr/local/bin/pdf-parser.py
+download_file \
+  https://github.com/DidierStevens/DidierStevensSuite/raw/master/pdfid.py \
+  /usr/local/bin/pdfid.py
+download_file \
+  https://github.com/DidierStevens/DidierStevensSuite/raw/master/oledump.py \
+  /usr/local/bin/oledump.py
 chmod +x /usr/local/bin/pdf-parser.py /usr/local/bin/pdfid.py /usr/local/bin/oledump.py
 
-# OLE/Office document analysis
-python3 -m pip install 'oletools[full]' pcode2code
+uv_pip_install 'oletools[full]' pcode2code
 
-# cpdf (Coherent PDF command-line tools)
-CPDF_VERSION="2.7.1"
-wget -qO /tmp/cpdf.tar.gz \
-    "https://github.com/coherentgraphics/cpdf-binaries/archive/refs/tags/v${CPDF_VERSION}.tar.gz"
-tar -xzf /tmp/cpdf.tar.gz -C /tmp
-cp "/tmp/cpdf-binaries-${CPDF_VERSION}/Linux-Intel-64bit/cpdf" /usr/local/bin/cpdf
-chmod +x /usr/local/bin/cpdf
-rm -rf /tmp/cpdf.tar.gz /tmp/cpdf-binaries-*
+if ! have_cmd cpdf; then
+  CPDF_VERSION="2.7.1"
+  download_file \
+    "https://github.com/coherentgraphics/cpdf-binaries/archive/refs/tags/v${CPDF_VERSION}.tar.gz" \
+    /tmp/cpdf.tar.gz
+  tar -xzf /tmp/cpdf.tar.gz -C /tmp
+  cp "/tmp/cpdf-binaries-${CPDF_VERSION}/Linux-Intel-64bit/cpdf" /usr/local/bin/cpdf
+  chmod +x /usr/local/bin/cpdf
+  rm -rf /tmp/cpdf.tar.gz /tmp/cpdf-binaries-*
+fi

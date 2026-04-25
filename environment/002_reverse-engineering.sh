@@ -1,24 +1,37 @@
 #!/bin/bash
 
+set -euo pipefail
 set -x
-set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=environment/lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 
 #
-# install JADX 1.5.5
+# JADX 1.5.5
 #
 
-wget "https://github.com/skylot/jadx/releases/download/v1.5.5/jadx-1.5.5.zip"
-rm -rf /opt/jadx-1.5.5
-unzip -oq jadx-1.5.5.zip -d /opt/jadx-1.5.5/
-rm -f jadx-1.5.5.zip
-chmod +x /opt/jadx-1.5.5/bin/jadx
-printf '%s\n' "export PATH=\$PATH:/opt/jadx-1.5.5/bin" >> ~/.bashrc
+if [ ! -x /opt/jadx-1.5.5/bin/jadx ]; then
+  log "Installing JADX 1.5.5"
+  download_file \
+    https://github.com/skylot/jadx/releases/download/v1.5.5/jadx-1.5.5.zip \
+    /tmp/jadx-1.5.5.zip
+  rm -rf /opt/jadx-1.5.5
+  unzip -oq /tmp/jadx-1.5.5.zip -d /opt/jadx-1.5.5/
+  rm -f /tmp/jadx-1.5.5.zip
+  chmod +x /opt/jadx-1.5.5/bin/jadx
+fi
+append_bashrc_line "export PATH=\$PATH:/opt/jadx-1.5.5/bin"
 
 #
-# install APKtool 3.0.1
+# APKTool 3.0.1
 #
 
-wget "https://github.com/iBotPeaches/Apktool/releases/download/v3.0.1/apktool_3.0.1.jar" -O /opt/apktool_3.0.1.jar
+if [ ! -f /opt/apktool_3.0.1.jar ]; then
+  download_file \
+    https://github.com/iBotPeaches/Apktool/releases/download/v3.0.1/apktool_3.0.1.jar \
+    /opt/apktool_3.0.1.jar
+fi
 cat > /usr/bin/apktool << 'EOF'
 #!/usr/bin/bash
 exec java -jar /opt/apktool_3.0.1.jar "$@"
@@ -26,25 +39,29 @@ EOF
 chmod +x /usr/bin/apktool
 
 #
-# install bata24/gef (GDB Enhanced Features)
+# bata24/gef (GDB Enhanced Features)
 #
 
 mkdir -p /opt/gef
-wget -O /opt/gef/gef.py https://raw.githubusercontent.com/bata24/gef/master/gef.py
-python3 -m pip install keystone-engine ropper
+if [ ! -f /opt/gef/gef.py ]; then
+  download_file https://raw.githubusercontent.com/bata24/gef/master/gef.py /opt/gef/gef.py
+fi
+uv_pip_install keystone-engine ropper
 
 #
-# install ida-mcp-rs (IDA Pro MCP server)
+# ida-mcp-rs (IDA Pro MCP server)
 #
 
-IDA_MCP_TAG=$(curl -sI https://github.com/blacktop/ida-mcp-rs/releases/latest | grep -i '^location:' | grep -oP 'v[\d.]+')
-curl -sL "https://github.com/blacktop/ida-mcp-rs/releases/download/${IDA_MCP_TAG}/ida-mcp_${IDA_MCP_TAG#v}_Linux_x86_64.tar.gz" \
-  | tar xz -C /usr/local/bin ida-mcp ida-mcp-bin
-chmod +x /usr/local/bin/ida-mcp /usr/local/bin/ida-mcp-bin
+if ! have_cmd ida-mcp || ! have_cmd ida-mcp-bin; then
+  IDA_MCP_TAG=$(curl -fsI https://github.com/blacktop/ida-mcp-rs/releases/latest | grep -i '^location:' | grep -oP 'v[0-9.]+' | head -n1)
+  curl -fsSL "https://github.com/blacktop/ida-mcp-rs/releases/download/${IDA_MCP_TAG}/ida-mcp_${IDA_MCP_TAG#v}_Linux_x86_64.tar.gz" \
+    | tar xz -C /usr/local/bin ida-mcp ida-mcp-bin
+  chmod +x /usr/local/bin/ida-mcp /usr/local/bin/ida-mcp-bin
+fi
 
 #
 # Python packages for skills: libdebug
 #
 
-python3 -m pip install --ignore-installed typing-extensions
-python3 -m pip install libdebug
+uv_pip_install --reinstall typing-extensions
+uv_pip_install libdebug

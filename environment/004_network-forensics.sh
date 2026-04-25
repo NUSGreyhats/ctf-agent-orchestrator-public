@@ -1,25 +1,27 @@
 #!/bin/bash
 
+set -euo pipefail
 set -x
-set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=environment/lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 
 #
 # Network forensics tools for pcap/pcapng analysis
 #
 
-# Pre-answer tshark debconf prompt (allow non-root packet capture)
-echo "wireshark-common wireshark-common/install-setuid boolean true" | debconf-set-selections
+# Pre-answer tshark debconf prompt (allow non-root packet capture).
+printf '%s\n' "wireshark-common wireshark-common/install-setuid boolean true" | debconf-set-selections
 
-# Core analysis tools
-DEBIAN_FRONTEND=noninteractive apt install -y \
-    tshark \
-    tcpdump \
-    ngrep \
-    tcpflow \
-    chaosreader \
-    foremost \
-    dsniff \
-    ssldump
+apt_install \
+  tshark \
+  tcpdump \
+  ngrep \
+  tcpflow \
+  chaosreader \
+  foremost \
+  dsniff \
+  ssldump
 
-# Python libraries for programmatic packet analysis
-python3 -m pip install scapy pyshark dpkt
+uv_pip_install scapy pyshark dpkt

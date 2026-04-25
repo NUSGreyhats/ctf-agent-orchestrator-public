@@ -3,10 +3,14 @@
 set -euo pipefail
 set -x
 
-npm install -g opencode-ai@latest
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=environment/lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
+
+npm_install_global opencode-ai@latest
 opencode --version
 
-# Register local GDB MCP server for OpenCode in global config.
+# Register local GDB/IDA MCP servers for OpenCode in global config.
 python3 - <<'PY'
 import json
 from pathlib import Path
@@ -21,7 +25,7 @@ if config_path.exists():
     except json.JSONDecodeError:
         print(
             f"Warning: {config_path} is not strict JSON; "
-            "skipping automatic GDB MCP registration."
+            "skipping automatic MCP registration."
         )
         raise SystemExit(0)
 else:

@@ -1,7 +1,11 @@
 #!/bin/bash
 
+set -euo pipefail
 set -x
-set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=environment/lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 
 #
 # GitHub Copilot CLI: pin version and patch interaction headers to agent mode
@@ -10,7 +14,7 @@ set -e
 COPILOT_VERSION="0.0.421"
 
 npm uninstall -g @github/copilot || true
-npm install -g "@github/copilot@${COPILOT_VERSION}"
+npm_install_global "@github/copilot@${COPILOT_VERSION}"
 copilot --version
 
 COPILOT_NPM_ROOT="$(npm root -g)"
