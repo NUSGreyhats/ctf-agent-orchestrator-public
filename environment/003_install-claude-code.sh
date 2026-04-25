@@ -3,8 +3,6 @@
 set -e
 set -x
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
 curl -fsSL https://claude.ai/install.sh | bash
 
 ~/.local/bin/claude plugin marketplace add trailofbits/skills

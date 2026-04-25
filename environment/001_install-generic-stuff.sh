@@ -10,7 +10,7 @@ cat > ~/.config/pip/pip.conf << 'EOF'
 break-system-packages = true
 EOF
 
-echo 'export PATH="$PATH:$HOME/.local/bin"' >> ~/.bashrc
+printf '%s\n' "export PATH=\"\$PATH:\$HOME/.local/bin\"" >> ~/.bashrc
 export PATH="$PATH:$HOME/.local/bin"
 
 apt update
@@ -24,7 +24,7 @@ apt install -y \
     ca-certificates
 
 apt remove -y \
-	python3-jsonshema python3-rich python3-typing-extensions
+	python3-jsonschema python3-rich python3-typing-extensions || true
 
 python3 -m pip install pwntools ipython pycryptodome sympy z3-solver gmpy2 angr unicorn uv zizmor \
     starlette uvicorn python-multipart itsdangerous websockets httpx \
@@ -36,6 +36,7 @@ uv tool install pip-audit
 
 # install rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+# shellcheck source=/dev/null
 source "$HOME/.cargo/env"
 
 # cargo-binstall downloads pre-built binaries instead of compiling from source

@@ -954,11 +954,10 @@ async function openChallenge(id) {
   updateCounters();
   showView("detail");
   switchTab("tab-info");
-  connectAllRuns(id, currentRuns);
-  loadFiles();
-
   updateSteerRunSelect();
   updateFilesRunSelect();
+  connectAllRuns(id, currentRuns);
+  loadFiles();
 }
 
 function updateStatusBadge(status) {
@@ -1030,7 +1029,16 @@ $("#btn-unsolve").addEventListener("click", async () => {
 
 $("#btn-stop").addEventListener("click", async () => {
   if (!currentChallengeId) return;
-  await api(`/api/challenges/${currentChallengeId}/stop`, { method: "POST" });
+  const res = await api(`/api/challenges/${currentChallengeId}/stop`, { method: "POST" });
+  if (res && res.ok) {
+    const data = await res.json().catch(() => ({}));
+    if (data.status) {
+      updateStatusBadge(data.status);
+      updateButtons(data.status);
+      if (["solved", "failed", "completed"].includes(data.status)) stopTimer();
+    }
+    openChallenge(currentChallengeId);
+  }
 });
 
 
@@ -1395,13 +1403,17 @@ function updateSteerRunSelect() {
 // === Files Run Select ===
 function updateFilesRunSelect() {
   const sel = $("#files-run-select");
-  if (isParallelMode(currentChallengeMode) && currentRuns.length > 1) {
+  if (currentRuns.length > 0) {
     sel.classList.remove("hidden");
-    sel.innerHTML = '<option value="">All files</option>' +
+    sel.innerHTML = '<option value="">Challenge files</option>' +
       currentRuns.map((r) => {
         const meta = getAgentMeta(r.agent);
-        return `<option value="${esc(r.id)}">${esc(meta.label || r.agent)}</option>`;
+        const label = `${meta.label || r.agent} workspace`;
+        return `<option value="${esc(r.id)}">${esc(label)}</option>`;
       }).join("");
+    if (!isParallelMode(currentChallengeMode) && currentRuns.length === 1) {
+      sel.value = currentRuns[0].id;
+    }
   } else {
     sel.classList.add("hidden");
     sel.innerHTML = "";
@@ -2358,6 +2370,11 @@ async function loadFiles() {
   }
   const res = await api(url);
   if (!res) return;
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showToast(err.error || "Failed to load files", "error");
+    return;
+  }
   const files = await res.json();
 
   $("#file-counter").textContent = files.length;
@@ -2426,15 +2443,25 @@ function formatSize(bytes) {
 }
 
 // === File Viewer ===
+function encodeFilePath(path) {
+  return String(path).split("/").map(encodeURIComponent).join("/");
+}
+
 async function viewFile(path) {
   if (!currentChallengeId) return;
-  let url = `/api/challenges/${currentChallengeId}/files/${path}`;
+  const encodedPath = encodeFilePath(path);
+  let url = `/api/challenges/${currentChallengeId}/files/${encodedPath}`;
   const runSelect = $("#files-run-select");
   if (runSelect && runSelect.value) {
     url += `?run_id=${encodeURIComponent(runSelect.value)}`;
   }
   const res = await api(url);
   if (!res) return;
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showToast(err.error || "Failed to open file", "error");
+    return;
+  }
   const data = await res.json();
 
   $("#file-viewer-name").textContent = data.name;
@@ -2465,7 +2492,7 @@ async function viewFile(path) {
 
   // Set download link (include run_id if selected)
   const dlBtn = $("#file-viewer-download");
-  let dlUrl = `/api/challenges/${currentChallengeId}/download/${path}`;
+  let dlUrl = `/api/challenges/${currentChallengeId}/download/${encodedPath}`;
   const dlRunSelect = $("#files-run-select");
   if (dlRunSelect && dlRunSelect.value) {
     dlUrl += `?run_id=${encodeURIComponent(dlRunSelect.value)}`;
@@ -2832,15 +2859,25 @@ async function loadPlugins() {
 
 function renderImportConfigFields(plugin) {
   const container = $("#import-config-fields");
-  container.innerHTML = (plugin.config_schema || []).map((f) => `
+  container.innerHTML = (plugin.config_schema || []).map((f) => {
+    if (f.type === "checkbox") {
+      return `
+    <div class="form-group">
+      <label class="checkbox-label" for="import-cfg-${esc(f.name)}">
+        <input type="checkbox" id="import-cfg-${esc(f.name)}" ${f.default ? "checked" : ""}>
+        <span>${esc(f.label)}</span>
+      </label>
+    </div>`;
+    }
+    return `
     <div class="form-group">
       <label for="import-cfg-${esc(f.name)}">${esc(f.label)}</label>
       <input type="${esc(f.type)}" id="import-cfg-${esc(f.name)}"
         placeholder="${esc(f.placeholder || "")}"
         value="${esc(f.default || "")}"
         ${f.required ? "required" : ""}>
-    </div>
-  `).join("");
+    </div>`;
+  }).join("");
 }
 
 function getImportConfig() {
@@ -2849,7 +2886,8 @@ function getImportConfig() {
   const config = {};
   for (const f of plugin.config_schema || []) {
     const el = document.getElementById(`import-cfg-${f.name}`);
-    if (el) config[f.name] = el.value;
+    if (!el) continue;
+    config[f.name] = f.type === "checkbox" ? el.checked : el.value;
   }
   return config;
 }

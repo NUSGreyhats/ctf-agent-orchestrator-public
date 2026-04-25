@@ -97,7 +97,7 @@ def _client(config: dict) -> httpx.AsyncClient:
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
         },
-        verify=False,
+        verify=True,
         follow_redirects=True,
         timeout=30,
     )
@@ -290,6 +290,25 @@ class HTBCTFPlugin(CTFPlatformPlugin):
             data = resp.json()
             message = data.get("message", "")
 
-            if resp.status_code == 200 and "wrong" not in message.lower():
+            message_l = message.lower()
+            success_value = data.get("success", data.get("status"))
+            if isinstance(success_value, bool):
+                correct = success_value
+            elif isinstance(success_value, (int, float)):
+                correct = success_value == 1
+            elif isinstance(success_value, str):
+                correct = success_value.strip().lower() in {
+                    "1", "true", "ok", "success", "correct", "solved",
+                }
+            else:
+                bad_terms = ("wrong", "incorrect", "invalid", "rate limit", "already")
+                good_terms = ("correct", "solved", "success", "congrat")
+                correct = (
+                    resp.status_code == 200
+                    and any(term in message_l for term in good_terms)
+                    and not any(term in message_l for term in bad_terms)
+                )
+
+            if correct:
                 return SubmitResult(correct=True, message=message or "Correct!")
             return SubmitResult(correct=False, message=message or "Incorrect flag")

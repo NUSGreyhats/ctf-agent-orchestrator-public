@@ -12,7 +12,7 @@ rm -rf /opt/jadx-1.5.5
 unzip -oq jadx-1.5.5.zip -d /opt/jadx-1.5.5/
 rm -f jadx-1.5.5.zip
 chmod +x /opt/jadx-1.5.5/bin/jadx
-echo 'export PATH=$PATH:/opt/jadx-1.5.5/bin' >> ~/.bashrc
+printf '%s\n' "export PATH=\$PATH:/opt/jadx-1.5.5/bin" >> ~/.bashrc
 
 #
 # install APKtool 3.0.1

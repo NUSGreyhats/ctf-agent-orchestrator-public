@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urljoin
+from urllib.parse import urlparse
 
 from .base import (
     CTFPlatformPlugin,
@@ -31,7 +31,17 @@ def _base_url(config: dict) -> str:
     url = config.get("url", "").strip().rstrip("/")
     if not url:
         raise ValueError("CTFd URL is required")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("CTFd URL must be an absolute http(s) URL")
     return url
+
+
+def _verify_tls(config: dict) -> bool:
+    value = config.get("insecure_tls", False)
+    if isinstance(value, str):
+        value = value.strip().lower() in {"1", "true", "yes", "on"}
+    return not bool(value)
 
 
 def _headers(config: dict) -> dict:
@@ -52,7 +62,7 @@ async def _get_session_cookie(config: dict) -> dict:
 
     _require_httpx()
     async with httpx.AsyncClient(
-        verify=False, follow_redirects=True, timeout=15
+        verify=_verify_tls(config), follow_redirects=True, timeout=15
     ) as client:
         # Get nonce from login page
         resp = await client.get(f"{base}/login")
@@ -93,7 +103,7 @@ async def _client(config: dict) -> httpx.AsyncClient:
         base_url=_base_url(config),
         headers=headers,
         cookies=cookies,
-        verify=False,
+        verify=_verify_tls(config),
         follow_redirects=True,
         timeout=30,
     )
@@ -131,6 +141,13 @@ class CTFdPlugin(CTFPlatformPlugin):
                 field_type="password",
                 required=False,
                 placeholder="Optional — used if no API token",
+            ),
+            ConfigField(
+                name="insecure_tls",
+                label="Disable TLS certificate verification",
+                field_type="checkbox",
+                required=False,
+                default=False,
             ),
         ]
 

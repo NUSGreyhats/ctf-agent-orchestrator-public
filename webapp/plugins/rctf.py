@@ -30,7 +30,17 @@ def _base_url(config: dict) -> str:
     url = config.get("url", "").strip().rstrip("/")
     if not url:
         raise ValueError("rCTF URL is required")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("rCTF URL must be an absolute http(s) URL")
     return url
+
+
+def _verify_tls(config: dict) -> bool:
+    value = config.get("insecure_tls", False)
+    if isinstance(value, str):
+        value = value.strip().lower() in {"1", "true", "yes", "on"}
+    return not bool(value)
 
 
 async def _get_auth_token(config: dict) -> str:
@@ -52,7 +62,7 @@ async def _get_auth_token(config: dict) -> str:
     _require_httpx()
     base = _base_url(config)
     async with httpx.AsyncClient(
-        verify=False, timeout=15
+        verify=_verify_tls(config), timeout=15
     ) as client:
         resp = await client.post(
             f"{base}/api/v1/auth/login",
@@ -79,7 +89,7 @@ async def _client(config: dict) -> tuple:
             "Authorization": f"Bearer {auth_token}",
             "Content-Type": "application/json",
         },
-        verify=False,
+        verify=_verify_tls(config),
         follow_redirects=True,
         timeout=30,
     )
@@ -111,6 +121,13 @@ class RCTFPlugin(CTFPlatformPlugin):
                 field_type="password",
                 required=False,
                 placeholder="Team invite token (used to login)",
+            ),
+            ConfigField(
+                name="insecure_tls",
+                label="Disable TLS certificate verification",
+                field_type="checkbox",
+                required=False,
+                default=False,
             ),
         ]
 
@@ -182,11 +199,18 @@ class RCTFPlugin(CTFPlatformPlugin):
         self, config: dict, file: RemoteFile
     ) -> bytes:
         base = _base_url(config)
-        is_external = file.url.startswith("http") and not file.url.startswith(base)
+        file_url = urlparse(file.url)
+        base_url = urlparse(base)
+        is_http_url = file_url.scheme in {"http", "https"} and bool(file_url.netloc)
+        same_origin = (
+            file_url.scheme == base_url.scheme
+            and file_url.netloc.lower() == base_url.netloc.lower()
+        )
+        is_external = is_http_url and not same_origin
         if is_external:
             _require_httpx()
             async with httpx.AsyncClient(
-                verify=False, follow_redirects=True, timeout=30
+                verify=_verify_tls(config), follow_redirects=True, timeout=30
             ) as plain_client:
                 resp = await plain_client.get(file.url)
                 resp.raise_for_status()

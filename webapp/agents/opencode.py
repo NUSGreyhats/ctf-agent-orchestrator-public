@@ -368,11 +368,12 @@ def _get_usage_data() -> dict | None:
 # SDK-based agent runner
 # ---------------------------------------------------------------------------
 
+_OPENCODE_SERVE_HOST = "127.0.0.1"
 _OPENCODE_SERVE_PORT = 4096
 _OPENCODE_SERVE_PROC: subprocess.Popen | None = None
 
 
-def _is_port_open(port: int, host: str = "127.0.0.1") -> bool:
+def _is_port_open(port: int, host: str = _OPENCODE_SERVE_HOST) -> bool:
     """Check if a TCP port is accepting connections."""
     try:
         with socket.create_connection((host, port), timeout=1):
@@ -385,7 +386,7 @@ def _ensure_opencode_serve() -> None:
     """Start ``opencode serve`` if not already running on the expected port."""
     global _OPENCODE_SERVE_PROC
 
-    if _is_port_open(_OPENCODE_SERVE_PORT):
+    if _is_port_open(_OPENCODE_SERVE_PORT, _OPENCODE_SERVE_HOST):
         return
 
     # Previous process may have died — clean up handle
@@ -399,14 +400,21 @@ def _ensure_opencode_serve() -> None:
 
     log.info("Starting opencode serve on port %d", _OPENCODE_SERVE_PORT)
     _OPENCODE_SERVE_PROC = subprocess.Popen(
-        ["opencode", "serve", "--port", str(_OPENCODE_SERVE_PORT)],
+        [
+            "opencode",
+            "serve",
+            "--hostname",
+            _OPENCODE_SERVE_HOST,
+            "--port",
+            str(_OPENCODE_SERVE_PORT),
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
     # Wait for the server to become ready (up to 15 seconds)
     for _ in range(30):
-        if _is_port_open(_OPENCODE_SERVE_PORT):
+        if _is_port_open(_OPENCODE_SERVE_PORT, _OPENCODE_SERVE_HOST):
             log.info("opencode serve is ready")
             return
         import time
@@ -562,7 +570,7 @@ async def _run_agent_sdk(
         return
 
     # 2. Create SDK client
-    base_url = f"http://127.0.0.1:{_OPENCODE_SERVE_PORT}"
+    base_url = f"http://{_OPENCODE_SERVE_HOST}:{_OPENCODE_SERVE_PORT}"
     try:
         client = OpencodeClient(base_url=base_url)
     except Exception as exc:

@@ -38,7 +38,7 @@ wget -qO /usr/local/bin/oledump.py \
 chmod +x /usr/local/bin/pdf-parser.py /usr/local/bin/pdfid.py /usr/local/bin/oledump.py
 
 # OLE/Office document analysis
-python3 -m pip install oletools[full] pcode2code
+python3 -m pip install 'oletools[full]' pcode2code
 
 # cpdf (Coherent PDF command-line tools)
 CPDF_VERSION="2.7.1"

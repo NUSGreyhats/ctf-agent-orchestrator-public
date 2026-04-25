@@ -23,19 +23,29 @@ locals {
   repo_root = abspath("${path.module}/../..")
 
   environment_files = sort(fileset(local.repo_root, "environment/**"))
-  mcp_files         = sort(fileset(local.repo_root, "mcps/**"))
-  webapp_files      = sort(fileset(local.repo_root, "webapp/**"))
-  skill_files       = sort(fileset(local.repo_root, "skills/**"))
+  hook_files        = sort(fileset(local.repo_root, "hooks/**"))
+  mcp_files = sort([
+    for f in fileset(local.repo_root, "mcps/**") : f
+    if !can(regex("(^|/)__pycache__/", f)) && !can(regex("\\.py[co]$", f))
+  ])
+  webapp_files = sort([
+    for f in fileset(local.repo_root, "webapp/**") : f
+    if !can(regex("(^|/)__pycache__/", f)) && !can(regex("\\.py[co]$", f))
+  ])
+  skill_files = sort(fileset(local.repo_root, "skills/**"))
+  doc_files   = ["README.md", "DESIGN.md"]
 
   sync_files = distinct(concat(
     local.environment_files,
+    local.hook_files,
     local.mcp_files,
     local.webapp_files,
     local.skill_files,
+    local.doc_files,
   ))
 
   environment_hash = sha256(join("", [
-    for f in local.environment_files : "${f}:${filesha256("${local.repo_root}/${f}")}"
+    for f in concat(local.environment_files, local.hook_files, local.skill_files) : "${f}:${filesha256("${local.repo_root}/${f}")}"
   ]))
 
   webapp_hash = sha256(join("", [
@@ -129,8 +139,12 @@ resource "null_resource" "sync_repo" {
         sleep 5
       done
 
-      step "Copying repository to the VM"
-      tar -C "$SRC_PATH" -cf - . | ssh $SSH_OPTS root@"$IP" "TMP_DIR=\$(mktemp -d /root/ctf-agent-wrapper.sync.XXXXXX) && trap 'rm -rf \"\$TMP_DIR\"' EXIT && mkdir -p /root/ctf-agent-wrapper /root/ctf-agent-wrapper/challenges && tar -C \"\$TMP_DIR\" -xf - && rm -rf \"\$TMP_DIR/challenges\" && find /root/ctf-agent-wrapper -mindepth 1 -maxdepth 1 -not -name challenges -exec rm -rf {} + && cp -a \"\$TMP_DIR\"/. /root/ctf-agent-wrapper/"
+      step "Copying runtime files to the VM"
+      tar -C "$SRC_PATH" --exclude-vcs \
+        --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
+        --exclude='.DS_Store' -cf - \
+        environment webapp skills mcps hooks README.md DESIGN.md \
+        | ssh $SSH_OPTS root@"$IP" "TMP_DIR=\$(mktemp -d /root/ctf-agent-wrapper.sync.XXXXXX) && trap 'rm -rf \"\$TMP_DIR\"' EXIT && mkdir -p /root/ctf-agent-wrapper /root/ctf-agent-wrapper/challenges /root/ctf-agent-wrapper/state && tar -C \"\$TMP_DIR\" -xf - && find /root/ctf-agent-wrapper -mindepth 1 -maxdepth 1 -not -name challenges -not -name state -exec rm -rf {} + && cp -a \"\$TMP_DIR\"/. /root/ctf-agent-wrapper/"
     EOT
   }
 }

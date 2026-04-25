@@ -31,7 +31,8 @@ import uuid
 import time as _time
 from collections import defaultdict
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 
 try:
     from .discord_bot import (
@@ -84,6 +85,11 @@ if len(SESSION_SECRET) < 32:
         "Generate one with: python3 -c \"import secrets; print(secrets.token_hex(32))\""
     )
 TLS_ENABLED = bool(os.environ.get("TLS_CERTFILE"))
+ALLOWED_ORIGINS = {
+    origin.strip()
+    for origin in os.environ.get("ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+}
 APP_ROOT_DIR = Path("/root/ctf-agent-wrapper")
 CHALLENGES_DIR = APP_ROOT_DIR / "challenges"
 CHALLENGES_DIR.mkdir(parents=True, exist_ok=True)
@@ -244,6 +250,84 @@ async def stop_run(run: dict, reason: str = "user_stop") -> None:
             pass
 
 
+async def apply_solved_status(
+    challenge_id: str,
+    challenge: dict,
+    flag: str = "",
+    run_id: str = "",
+    stop_reason: str = "solved",
+) -> tuple[str | None, dict | None]:
+    """Mark a challenge solved, stop active runs, and broadcast status.
+
+    This is shared by the web UI, platform submit endpoints, and Discord
+    commands so all solve paths persist and notify consistently.
+    """
+    runs = challenge.get("runs", {})
+    if not runs:
+        return None, None
+
+    target_run_id = run_id if run_id in runs else ""
+    if not target_run_id:
+        for status in ("solving", "completed", "failed", "pending", "solved"):
+            target_run_id = next(
+                (rid for rid, run in runs.items() if run.get("status") == status),
+                "",
+            )
+            if target_run_id:
+                break
+    if not target_run_id:
+        target_run_id = next(iter(runs), "")
+    if not target_run_id:
+        return None, None
+
+    target_run = runs[target_run_id]
+    if flag:
+        challenge.setdefault("detected_flags", {})[flag] = "correct"
+
+    target_run["status"] = "solved"
+    target_run["error"] = None
+    await stop_run(target_run, stop_reason)
+
+    changed_run_ids = {target_run_id}
+    if challenge.get("mode") == "parallel":
+        for other_id, other_run in runs.items():
+            if other_id == target_run_id:
+                continue
+            if other_run.get("status") not in ("solving", "pending"):
+                continue
+            other_run["status"] = "failed"
+            other_run["error"] = None
+            stop_event = {
+                "type": "system",
+                "message": (
+                    f"Stopped: {target_run.get('agent', '?')} solved "
+                    "the challenge."
+                ),
+            }
+            other_run["output_lines"].append(stop_event)
+            append_output_event(challenge_id, other_id, stop_event)
+            await broadcast(challenge_id, other_id, stop_event)
+            await stop_run(other_run, "sibling_solved")
+            changed_run_ids.add(other_id)
+
+    challenge["status"] = derive_challenge_status(challenge)
+    save_metadata(challenge)
+
+    for changed_id in changed_run_ids:
+        changed_run = runs[changed_id]
+        await broadcast(challenge_id, changed_id, {
+            "type": "run_status",
+            "run_id": changed_id,
+            "status": changed_run["status"],
+            "error": changed_run.get("error"),
+        })
+    await broadcast_challenge(challenge_id, {
+        "type": "challenge_status",
+        "status": challenge["status"],
+    })
+    return target_run_id, target_run
+
+
 def make_run(
     run_id: str,
     agent: str,
@@ -275,10 +359,16 @@ def make_run(
 
 
 def get_run_cwd(challenge_id: str, run: dict) -> Path:
-    """Return the working directory for a run."""
+    """Return the working directory for a run.
+
+    New challenges use clean per-run workspaces for all modes. Legacy
+    single-run challenges may not have _runs/{run_id}; keep those working
+    by falling back to the challenge root.
+    """
     challenge = challenges[challenge_id]
-    if challenge["mode"] == "parallel":
-        return CHALLENGES_DIR / challenge_id / "_runs" / run["id"]
+    run_dir = CHALLENGES_DIR / challenge_id / "_runs" / run["id"]
+    if run_dir.exists() or challenge["mode"] == "parallel":
+        return run_dir
     return CHALLENGES_DIR / challenge_id
 
 
@@ -289,27 +379,50 @@ def setup_parallel_shared_dir(challenge_id: str) -> Path:
     return shared_dir
 
 
-def setup_parallel_run_dir(challenge_id: str, run_id: str) -> Path:
-    """Create run directory with symlinks to challenge files and shared dir."""
+def _symlink_challenge_files(files_dir: Path, challenge_files_dir: Path) -> None:
+    """Populate challenge_files/ with symlinks to files under _files/.
+
+    The provider cwd stays clean while agents can still browse challenge
+    files through a dedicated data directory.
+    """
+    challenge_files_dir.mkdir(parents=True, exist_ok=True)
+    if not files_dir.exists():
+        return
+
+    for item in files_dir.rglob("*"):
+        rel = item.relative_to(files_dir)
+        dest = challenge_files_dir / rel
+        if item.is_dir():
+            dest.mkdir(parents=True, exist_ok=True)
+            continue
+        if not item.is_file():
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists() or dest.is_symlink():
+            continue
+        dest.symlink_to(item)
+
+
+def setup_run_dir(challenge_id: str, run_id: str) -> Path:
+    """Create a clean provider working directory for a run."""
     challenge_dir = CHALLENGES_DIR / challenge_id
     files_dir = challenge_dir / "_files"
     shared_dir = challenge_dir / "_shared"
     run_dir = challenge_dir / "_runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Symlink challenge files
-    if files_dir.exists():
-        for item in files_dir.iterdir():
-            link = run_dir / item.name
-            if not link.exists():
-                link.symlink_to(item)
+    _symlink_challenge_files(files_dir, run_dir / "challenge_files")
 
-    # Symlink shared directory
     shared_link = run_dir / "_shared"
     if shared_dir.exists() and not shared_link.exists():
         shared_link.symlink_to(shared_dir)
 
     return run_dir
+
+
+def setup_parallel_run_dir(challenge_id: str, run_id: str) -> Path:
+    """Compatibility wrapper for existing parallel-mode call sites."""
+    return setup_run_dir(challenge_id, run_id)
 
 
 def setup_parallel_cross_notes(challenge_id: str, runs: dict | None = None) -> None:
@@ -715,9 +828,9 @@ def parse_agents_field(agents_str: str) -> list[dict]:
             if isinstance(parsed, list):
                 return [
                     {
-                        "agent": entry.get("agent", "") if isinstance(entry, dict) else str(entry),
-                        "model": entry.get("model", "") if isinstance(entry, dict) else "",
-                        "effort": entry.get("effort", "") if isinstance(entry, dict) else "",
+                        "agent": str_field(entry.get("agent", "")) if isinstance(entry, dict) else str_field(entry),
+                        "model": str_field(entry.get("model", "")) if isinstance(entry, dict) else "",
+                        "effort": str_field(entry.get("effort", "")) if isinstance(entry, dict) else "",
                     }
                     for entry in parsed
                 ]
@@ -877,6 +990,14 @@ def load_challenges_from_disk() -> None:
                 run["status"] = "failed"
                 run["error"] = "Server restarted while solving"
 
+        if (d / "_files").exists():
+            if mode == "parallel":
+                setup_parallel_shared_dir(challenge_id)
+            for run_id in runs:
+                setup_run_dir(challenge_id, run_id)
+            if mode == "parallel":
+                setup_parallel_cross_notes(challenge_id, runs)
+
         challenge = {
             "id": challenge_id,
             "name": meta.get("name", f"Challenge {challenge_id}"),
@@ -972,6 +1093,26 @@ def require_csrf(request: Request) -> JSONResponse | None:
     return None
 
 
+async def read_json_object(request: Request) -> tuple[dict, JSONResponse | None]:
+    """Read a JSON request body and require a top-level object."""
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return {}, JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    except Exception:
+        return {}, JSONResponse({"error": "invalid request body"}, status_code=400)
+    if not isinstance(body, dict):
+        return {}, JSONResponse({"error": "expected JSON object"}, status_code=400)
+    return body, None
+
+
+def str_field(value: object, default: str = "") -> str:
+    """Normalize optional JSON/form scalar values to strings."""
+    if value is None:
+        return default
+    return str(value)
+
+
 def _check_rate_limit(client_ip: str) -> JSONResponse | None:
     """Block login if too many recent failures from this IP."""
     now = _time.monotonic()
@@ -986,6 +1127,22 @@ def _check_rate_limit(client_ip: str) -> JSONResponse | None:
             status_code=429,
         )
     return None
+
+
+def websocket_origin_allowed(websocket: WebSocket) -> bool:
+    """Allow browser WebSockets only from same-origin or configured origins."""
+    origin = websocket.headers.get("origin", "")
+    if not origin:
+        return False
+    if origin in ALLOWED_ORIGINS:
+        return True
+
+    host = websocket.headers.get("host", "")
+    if not host:
+        return False
+    parsed = urlparse(origin)
+    expected_scheme = "https" if TLS_ENABLED else "http"
+    return parsed.scheme == expected_scheme and parsed.netloc == host
 
 
 # ---------------------------------------------------------------------------
@@ -1013,7 +1170,9 @@ async def login(request: Request) -> JSONResponse:
     if err := _check_rate_limit(client_ip):
         return err
 
-    body = await request.json()
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
     if body.get("password") == APP_PASSWORD:
         _login_attempts.pop(client_ip, None)
         csrf_token = secrets.token_hex(32)
@@ -1220,19 +1379,14 @@ async def create_challenge(request: Request) -> JSONResponse:
 
     if is_parallel:
         setup_parallel_shared_dir(challenge_id)
-        # Files go to _files/ subdirectory
-        files_dir = challenge_dir / "_files"
-        files_dir.mkdir(parents=True, exist_ok=True)
-        for rel_path, fdata in file_data.items():
-            dest = files_dir / rel_path
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(fdata)
-    else:
-        # Files go directly to challenge root
-        for rel_path, fdata in file_data.items():
-            dest = challenge_dir / rel_path
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(fdata)
+
+    # Store all untrusted challenge files away from the provider cwd.
+    files_dir = challenge_dir / "_files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    for rel_path, fdata in file_data.items():
+        dest = files_dir / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(fdata)
 
     # Create runs
     runs: dict[str, dict] = {}
@@ -1249,9 +1403,7 @@ async def create_challenge(request: Request) -> JSONResponse:
             status="solving",
         )
         runs[run_id] = run
-
-        if is_parallel:
-            setup_parallel_run_dir(challenge_id, run_id)
+        setup_run_dir(challenge_id, run_id)
 
     # Set up cross-agent note visibility for parallel mode
     if is_parallel:
@@ -1458,14 +1610,10 @@ async def bulk_upload(request: Request) -> JSONResponse:
     if err := require_csrf(request):
         return err
 
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        return JSONResponse(
-            {"error": "Expected JSON body with preview_token"},
-            status_code=400,
-        )
-    token = body.get("preview_token", "")
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    token = str_field(body.get("preview_token", ""))
     if not token or token not in _bulk_previews:
         return JSONResponse(
             {"error": "Invalid or expired preview token"},
@@ -1477,8 +1625,8 @@ async def bulk_upload(request: Request) -> JSONResponse:
     preview_folders = preview["folders"]
 
     try:
-        global_flag_format = body.get("flag_format", "").strip()
-        mode = body.get("mode", "single").strip()
+        global_flag_format = str_field(body.get("flag_format", "")).strip()
+        mode = str_field(body.get("mode", "single")).strip()
         if mode not in VALID_MODES:
             mode = "single"
 
@@ -1489,7 +1637,7 @@ async def bulk_upload(request: Request) -> JSONResponse:
         agents_str = str(agents_str).strip()
         agent_entries = parse_agents_field(agents_str)
         if not agent_entries:
-            single_agent = body.get("agent", "").strip() or DEFAULT_AGENT
+            single_agent = str_field(body.get("agent", "")).strip() or DEFAULT_AGENT
             agent_entries = [{"agent": single_agent, "model": ""}]
 
         # Validate agents
@@ -1505,29 +1653,33 @@ async def bulk_upload(request: Request) -> JSONResponse:
             seen_a: set[str] = set()
             agent_entries = [e for e in agent_entries if not (e["agent"] in seen_a or seen_a.add(e["agent"]))]
 
-        model = body.get("model", "").strip()
-        effort = body.get("effort", "").strip()
+        model = str_field(body.get("model", "")).strip()
+        effort = str_field(body.get("effort", "")).strip()
         autonomous = bool(body.get("autonomous", False))
         paused = bool(body.get("paused", False))
         challenges_cfg = body.get("challenges", [])
+        if not isinstance(challenges_cfg, list):
+            return JSONResponse({"error": "challenges must be a list"}, status_code=400)
 
         is_parallel = mode == "parallel"
         created = []
 
         for cfg in challenges_cfg:
+            if not isinstance(cfg, dict):
+                continue
             if not cfg.get("enabled", True):
                 continue
-            folder_name = cfg.get("folder_name", "")
+            folder_name = str_field(cfg.get("folder_name", ""))
             folder_info = preview_folders.get(folder_name)
             if not folder_info:
                 continue
             folder_dir = Path(folder_info["dir"])
             file_names = folder_info["files"]
 
-            ch_name = cfg.get("name", "").strip() or folder_name
-            ch_description = cfg.get("description", "").strip()
+            ch_name = str_field(cfg.get("name", "")).strip() or folder_name
+            ch_description = str_field(cfg.get("description", "")).strip()
             ch_flag_format = (
-                cfg.get("flag_format", "").strip()
+                str_field(cfg.get("flag_format", "")).strip()
                 or global_flag_format
             )
 
@@ -1537,8 +1689,6 @@ async def bulk_upload(request: Request) -> JSONResponse:
 
             if is_parallel:
                 setup_parallel_shared_dir(challenge_id)
-                files_dest = challenge_dir / "_files"
-                files_dest.mkdir(parents=True, exist_ok=True)
                 # Filter reserved names that survived preview
                 filtered = [
                     f for f in file_names
@@ -1552,8 +1702,9 @@ async def bulk_upload(request: Request) -> JSONResponse:
                         "challenge %s: %s", ch_name, dropped
                     )
                 file_names = filtered
-            else:
-                files_dest = challenge_dir
+
+            files_dest = challenge_dir / "_files"
+            files_dest.mkdir(parents=True, exist_ok=True)
 
             for fname in file_names:
                 src = folder_dir / fname
@@ -1578,8 +1729,7 @@ async def bulk_upload(request: Request) -> JSONResponse:
                     status=challenge_status,
                 )
                 runs[run_id] = run
-                if is_parallel:
-                    setup_parallel_run_dir(challenge_id, run_id)
+                setup_run_dir(challenge_id, run_id)
 
             if is_parallel:
                 setup_parallel_cross_notes(challenge_id, runs)
@@ -1703,13 +1853,14 @@ async def stop_challenge(request: Request) -> JSONResponse:
     else:
         runs_to_stop = dict(challenge["runs"])
 
+    changed_run_ids = []
     for run_id, run in runs_to_stop.items():
         if not run:
             continue
         if run["status"] not in ("solving", "pending"):
             continue
-        await stop_run(run, "user_stop")
         run["status"] = "failed"
+        run["error"] = None
         stop_event = {
             "type": "system",
             "message": "Agent stopped by user.",
@@ -1717,9 +1868,23 @@ async def stop_challenge(request: Request) -> JSONResponse:
         run["output_lines"].append(stop_event)
         append_output_event(challenge_id, run_id, stop_event)
         await broadcast(challenge_id, run_id, stop_event)
+        await stop_run(run, "user_stop")
+        changed_run_ids.append(run_id)
 
     challenge["status"] = derive_challenge_status(challenge)
     save_metadata(challenge)
+    for run_id in changed_run_ids:
+        run = challenge["runs"][run_id]
+        await broadcast(challenge_id, run_id, {
+            "type": "run_status",
+            "run_id": run_id,
+            "status": run["status"],
+            "error": run.get("error"),
+        })
+    await broadcast_challenge(challenge_id, {
+        "type": "challenge_status",
+        "status": challenge["status"],
+    })
     return JSONResponse({"status": challenge["status"]})
 
 
@@ -1735,8 +1900,10 @@ async def broadcast_to_agents(request: Request) -> JSONResponse:
     if not challenge:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    body = await request.json()
-    message = body.get("message", "").strip()
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    message = str_field(body.get("message", "")).strip()
     if not message:
         return JSONResponse({"error": "message required"}, status_code=400)
 
@@ -1769,14 +1936,16 @@ async def steer_challenge(request: Request) -> JSONResponse:
     if not challenge:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    body = await request.json()
-    message = body.get("message", "").strip()
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    message = str_field(body.get("message", "")).strip()
     if not message:
         return JSONResponse(
             {"error": "message required"}, status_code=400
         )
 
-    target_run_id = body.get("run_id")
+    target_run_id = str_field(body.get("run_id", ""))
 
     if target_run_id:
         run = challenge["runs"].get(target_run_id)
@@ -1879,87 +2048,32 @@ async def mark_solved(request: Request) -> JSONResponse:
     if not challenge:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    body = await request.json()
-    run_id = body.get("run_id", "")
-    solved_flag = body.get("flag", "").strip()
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    run_id = str_field(body.get("run_id", ""))
+    solved_flag = str_field(body.get("flag", "")).strip()
 
-    # Persist flag as correct if provided
-    if solved_flag:
-        detected = challenge.setdefault("detected_flags", {})
-        detected[solved_flag] = "correct"
-
-    if run_id and run_id in challenge["runs"]:
-        target_runs = [challenge["runs"][run_id]]
-    else:
-        # Mark the first completed/solving run
-        target_runs = [
-            r for r in challenge["runs"].values()
-            if r["status"] in ("completed", "solving", "failed")
-        ][:1]
-
-    if not target_runs:
+    solved_run_id, solved_run = await apply_solved_status(
+        challenge_id,
+        challenge,
+        flag=solved_flag,
+        run_id=run_id,
+        stop_reason="manual_solved",
+    )
+    if not solved_run:
         return JSONResponse(
             {"error": "no eligible run to mark as solved"},
             status_code=409,
         )
 
-    # Collect run IDs for the solved run(s)
-    solved_run_ids = []
-    for run_id, run in challenge["runs"].items():
-        if run in target_runs:
-            run["status"] = "solved"
-            run["error"] = None
-            solved_run_ids.append(run_id)
-
-    # Auto-stop other runs in parallel mode
-    if challenge["mode"] == "parallel":
-        solved_run = target_runs[0]
-        for other_id, other_run in challenge["runs"].items():
-            if other_run is solved_run:
-                continue
-            await stop_run(other_run, "sibling_solved")
-            if other_run["status"] in ("solving", "pending"):
-                other_run["status"] = "failed"
-                stop_event = {
-                    "type": "system",
-                    "message": (
-                        f"Stopped: {solved_run['agent']} solved "
-                        "the challenge."
-                    ),
-                }
-                other_run["output_lines"].append(stop_event)
-                append_output_event(
-                    challenge_id, other_id, stop_event
-                )
-                await broadcast(
-                    challenge_id, other_id, stop_event
-                )
-                await broadcast(challenge_id, other_id, {
-                    "type": "run_status",
-                    "run_id": other_id,
-                    "status": "failed",
-                })
-
-    challenge["status"] = derive_challenge_status(challenge)
-    save_metadata(challenge)
-    for rid in solved_run_ids:
-        await broadcast(challenge_id, rid, {
-            "type": "run_status",
-            "run_id": rid,
-            "status": "solved",
-        })
-    await broadcast_challenge(challenge_id, {
-        "type": "challenge_status",
-        "status": challenge["status"],
-    })
-    if challenge["status"] == "solved":
-        agent = target_runs[0].get("agent", "") if target_runs else ""
-        await discord_notify(
-            challenge,
-            embed=make_solve_embed(challenge, solved_flag or "???", agent),
-        )
-        await discord_mark_solved(challenge, solved_flag or "", agent)
-    return JSONResponse({"status": challenge["status"]})
+    agent = solved_run.get("agent", "")
+    await discord_notify(
+        challenge,
+        embed=make_solve_embed(challenge, solved_flag or "???", agent),
+    )
+    await discord_mark_solved(challenge, solved_flag or "", agent)
+    return JSONResponse({"status": challenge["status"], "run_id": solved_run_id})
 
 
 async def delete_challenge(request: Request) -> JSONResponse:
@@ -2003,6 +2117,44 @@ TEXT_EXTS = {
 }
 MAX_TEXT_SIZE = 512 * 1024
 MAX_HEX_SIZE = 64 * 1024
+MAX_DISCORD_FILE_READ = 64 * 1024
+
+
+def safe_user_path(raw: str) -> str | None:
+    """Return a safe relative POSIX path, or None if unsafe."""
+    p = PurePosixPath(str(raw).replace("\\", "/"))
+    if p.is_absolute():
+        return None
+    if any(part in ("", ".", "..") for part in p.parts):
+        return None
+    if not p.parts:
+        return None
+    return p.as_posix()
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_allowed_path(
+    base: Path, raw: str, allowed_roots: list[Path]
+) -> Path | None:
+    """Resolve a user-supplied path under one of the allowed roots."""
+    safe = safe_user_path(raw)
+    if not safe:
+        return None
+    target = (base / safe).resolve()
+    for root in allowed_roots:
+        try:
+            target.relative_to(root.resolve())
+            return target
+        except ValueError:
+            continue
+    return None
 
 
 def classify_file(path: Path) -> str:
@@ -2025,19 +2177,35 @@ def _resolve_file_dir(challenge_id: str, run_id: str | None) -> Path | None:
     if not challenge:
         return None
     challenge_dir = CHALLENGES_DIR / challenge_id
-    is_parallel = challenge["mode"] == "parallel"
+    if run_id and run_id in challenge["runs"]:
+        run_dir = challenge_dir / "_runs" / run_id
+        if run_dir.exists():
+            return run_dir
+        # Legacy single-run challenges predate _runs/{run_id}.
+        if challenge.get("mode") == "single":
+            return challenge_dir
 
-    if run_id and is_parallel and run_id in challenge["runs"]:
-        return challenge_dir / "_runs" / run_id
-
-    # In parallel mode without a run_id, show the shared _files/ dir
-    # instead of the challenge root (which exposes _files/ and _runs/)
-    if is_parallel:
-        files_dir = challenge_dir / "_files"
-        if files_dir.is_dir():
-            return files_dir
+    # New challenges store untrusted files under _files/ for all modes.
+    # Without a run_id, show raw challenge files instead of exposing _runs/.
+    files_dir = challenge_dir / "_files"
+    if files_dir.is_dir():
+        return files_dir
 
     return challenge_dir
+
+
+def _allowed_file_roots(challenge_id: str, base_dir: Path) -> list[Path]:
+    """Roots that file viewing may follow from a resolved base directory."""
+    challenge_dir = CHALLENGES_DIR / challenge_id
+    roots = [base_dir]
+    runs_dir = challenge_dir / "_runs"
+    try:
+        is_run_dir = _is_relative_to(base_dir.resolve(), runs_dir.resolve())
+    except FileNotFoundError:
+        is_run_dir = False
+    if is_run_dir:
+        roots.extend([challenge_dir / "_files", challenge_dir / "_shared"])
+    return [root for root in roots if root.exists()]
 
 
 async def list_files(request: Request) -> JSONResponse:
@@ -2053,9 +2221,15 @@ async def list_files(request: Request) -> JSONResponse:
     if not challenge_dir or not challenge_dir.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
 
+    allowed_roots = [
+        root.resolve() for root in _allowed_file_roots(challenge_id, challenge_dir)
+    ]
     files = []
     for p in sorted(challenge_dir.rglob("*")):
         if not p.is_file():
+            continue
+        resolved = p.resolve()
+        if not any(_is_relative_to(resolved, root) for root in allowed_roots):
             continue
         rel = str(p.relative_to(challenge_dir))
         files.append({
@@ -2080,11 +2254,12 @@ async def get_file(request: Request) -> Response:
     if not challenge_dir:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    full_path = (challenge_dir / file_path).resolve()
-
-    try:
-        full_path.relative_to(challenge_dir.resolve())
-    except ValueError:
+    full_path = resolve_allowed_path(
+        challenge_dir,
+        file_path,
+        _allowed_file_roots(challenge_id, challenge_dir),
+    )
+    if not full_path:
         return JSONResponse({"error": "forbidden"}, status_code=403)
     if not full_path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -2156,11 +2331,12 @@ async def download_file(request: Request) -> Response:
     if not challenge_dir:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    full_path = (challenge_dir / file_path).resolve()
-
-    try:
-        full_path.relative_to(challenge_dir.resolve())
-    except ValueError:
+    full_path = resolve_allowed_path(
+        challenge_dir,
+        file_path,
+        _allowed_file_roots(challenge_id, challenge_dir),
+    )
+    if not full_path:
         return JSONResponse({"error": "forbidden"}, status_code=403)
     if not full_path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -2298,17 +2474,50 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
         if inst_type:
             parts.append(f"  Type: {inst_type}")
 
-    parts.extend([
-        "",
-        "The challenge files are in the current directory (some may be symlinks).",
-        "Use `ls -la` to list files, not `find . -type f` which misses symlinks.",
-        "Do not inspect parent directories, repository root files, .git metadata, "
-        "or unrelated system paths.",
-        "If the current directory has no challenge files, report that clearly and stop. "
-        "Do not search elsewhere for surrogate targets.",
-        "Keep command output bounded: avoid unbounded recursive listings, and use "
-        "targeted commands with limits (for example, head/tail).",
-    ])
+    has_declared_files = bool(challenge.get("files"))
+    try:
+        run_cwd = get_run_cwd(challenge["id"], run)
+        has_challenge_files = has_declared_files and (run_cwd / "challenge_files").exists()
+    except Exception:
+        has_challenge_files = False
+
+    if has_challenge_files:
+        parts.extend([
+            "",
+            "The challenge files are in ./challenge_files/ (some may be symlinks).",
+            "Use `ls -la challenge_files` to list files, not `find . -type f` "
+            "which misses symlinks.",
+            "Do not inspect parent directories, repository root files, .git metadata, "
+            "or unrelated system paths.",
+            "If ./challenge_files/ has no challenge files, report that clearly and stop. "
+            "Do not search elsewhere for surrogate targets.",
+            "Keep command output bounded: avoid unbounded recursive listings, and use "
+            "targeted commands with limits (for example, head/tail).",
+        ])
+    elif not has_declared_files:
+        parts.extend([
+            "",
+            "This challenge has no attached files. Solve from the description, "
+            "category, provided flag format, and any remote instance connection "
+            "information above.",
+            "Do not stop merely because ./challenge_files/ is empty or absent.",
+            "Do not inspect parent directories, repository root files, .git metadata, "
+            "or unrelated system paths.",
+            "Keep command output bounded: avoid unbounded recursive listings, and use "
+            "targeted commands with limits (for example, head/tail).",
+        ])
+    else:
+        parts.extend([
+            "",
+            "The challenge files are in the current directory (some may be symlinks).",
+            "Use `ls -la` to list files, not `find . -type f` which misses symlinks.",
+            "Do not inspect parent directories, repository root files, .git metadata, "
+            "or unrelated system paths.",
+            "If the current directory has no challenge files, report that clearly and stop. "
+            "Do not search elsewhere for surrogate targets.",
+            "Keep command output bounded: avoid unbounded recursive listings, and use "
+            "targeted commands with limits (for example, head/tail).",
+        ])
     if challenge.get("autonomous"):
         parts.extend([
             "",
@@ -2438,52 +2647,22 @@ def _try_detect_and_submit_flag(
             })
 
             if result.correct:
-                run["status"] = "solved"
-                run["error"] = None
-                challenge["status"] = derive_challenge_status(challenge)
-                save_metadata(challenge)
-                await broadcast(challenge_id, run_id, {
-                    "type": "run_status",
-                    "run_id": run_id,
-                    "status": "solved",
-                })
-                await broadcast_challenge(challenge_id, {
-                    "type": "challenge_status",
-                    "status": challenge["status"],
-                })
-                # Stop sibling runs in parallel mode
-                if challenge["mode"] == "parallel":
-                    for other_id, other_run in challenge["runs"].items():
-                        if other_id == run_id:
-                            continue
-                        if other_run["status"] not in ("solving", "pending"):
-                            continue
-                        await stop_run(other_run, "sibling_solved")
-                        other_run["status"] = "failed"
-                        stop_evt = {
-                            "type": "system",
-                            "message": (
-                                f"Stopped: {run['agent']} solved "
-                                "the challenge."
-                            ),
-                        }
-                        other_run["output_lines"].append(stop_evt)
-                        append_output_event(challenge_id, other_id, stop_evt)
-                        await broadcast(challenge_id, other_id, stop_evt)
-                        await broadcast(challenge_id, other_id, {
-                            "type": "run_status",
-                            "run_id": other_id,
-                            "status": "failed",
-                        })
-                    save_metadata(challenge)
+                _, solved_run = await apply_solved_status(
+                    challenge_id,
+                    challenge,
+                    flag=flag,
+                    run_id=run_id,
+                    stop_reason="auto_submit_solved",
+                )
+                solved_agent = solved_run.get("agent", "") if solved_run else run.get("agent", "")
                 await discord_notify(
                     challenge,
-                    embed=make_solve_embed(challenge, flag, run.get("agent", "")),
+                    embed=make_solve_embed(challenge, flag, solved_agent),
                 )
-                await discord_mark_solved(challenge, flag, run.get("agent", ""))
+                await discord_mark_solved(challenge, flag, solved_agent)
             else:
-                # Allow resubmission of different flags
-                submitted.discard(flag)
+                # Allow resubmission if the same candidate reappears later
+                seen.discard(flag)
                 wrong_event = {
                     "type": "system",
                     "message": (
@@ -2495,7 +2674,7 @@ def _try_detect_and_submit_flag(
                 append_output_event(challenge_id, run_id, wrong_event)
                 await broadcast(challenge_id, run_id, wrong_event)
         except Exception:
-            submitted.discard(flag)
+            seen.discard(flag)
 
     asyncio.create_task(_submit())
 
@@ -3098,6 +3277,9 @@ async def run_agent_task(
 # ---------------------------------------------------------------------------
 
 async def challenge_ws(websocket: WebSocket):
+    if not websocket_origin_allowed(websocket):
+        await websocket.close(code=4003)
+        return
     if not websocket.session.get("authenticated"):
         auth = websocket.headers.get("authorization", "")
         if not _check_basic_auth(auth):
@@ -3144,6 +3326,9 @@ async def challenge_ws(websocket: WebSocket):
 
 
 async def global_events_ws(websocket: WebSocket):
+    if not websocket_origin_allowed(websocket):
+        await websocket.close(code=4003)
+        return
     if not websocket.session.get("authenticated"):
         auth = websocket.headers.get("authorization", "")
         if not _check_basic_auth(auth):
@@ -3173,9 +3358,13 @@ async def get_settings(request: Request) -> JSONResponse:
 async def discord_test(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
-    body = await request.json()
-    token = body.get("token", "").strip()
-    channel_id = body.get("channel_id", "").strip()
+    if err := require_csrf(request):
+        return err
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    token = str_field(body.get("token", "")).strip()
+    channel_id = str_field(body.get("channel_id", "")).strip()
     if not token or not channel_id:
         return JSONResponse({"error": "Token and channel ID are required"})
     try:
@@ -3197,8 +3386,12 @@ async def discord_test(request: Request) -> JSONResponse:
 async def discord_channels(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
-    body = await request.json()
-    token = body.get("token", "").strip()
+    if err := require_csrf(request):
+        return err
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    token = str_field(body.get("token", "")).strip()
     if not token:
         return JSONResponse({"error": "Token required"}, status_code=400)
     try:
@@ -3267,10 +3460,21 @@ async def update_settings(request: Request) -> JSONResponse:
         return err
     if err := require_csrf(request):
         return err
-    body = await request.json()
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
     settings = load_settings()
+    discord_changed = any(
+        key in body
+        for key in (
+            "discord_enabled",
+            "discord_bot_token",
+            "discord_channel_id",
+            "discord_guild_id",
+        )
+    )
     if "default_agent" in body:
-        agent = body["default_agent"]
+        agent = str_field(body["default_agent"])
         if agent not in VALID_AGENTS:
             return JSONResponse(
                 {"error": f"invalid agent: {agent}"},
@@ -3278,7 +3482,7 @@ async def update_settings(request: Request) -> JSONResponse:
             )
         settings["default_agent"] = agent
     if "default_flag_format" in body:
-        settings["default_flag_format"] = str(
+        settings["default_flag_format"] = str_field(
             body["default_flag_format"]
         )
     if "theme" in body:
@@ -3295,21 +3499,21 @@ async def update_settings(request: Request) -> JSONResponse:
         agents = body["enabled_agents"]
         if isinstance(agents, list):
             settings["enabled_agents"] = [
-                a for a in agents if a in VALID_AGENTS
+                str_field(a) for a in agents if str_field(a) in VALID_AGENTS
             ]
     if "agent_models" in body:
         models = body["agent_models"]
         if isinstance(models, dict):
             settings["agent_models"] = {
-                k: str(v) for k, v in models.items()
-                if k in VALID_AGENTS
+                str_field(k): str_field(v) for k, v in models.items()
+                if str_field(k) in VALID_AGENTS
             }
     if "agent_efforts" in body:
         efforts = body["agent_efforts"]
         if isinstance(efforts, dict):
             settings["agent_efforts"] = {
-                k: str(v) for k, v in efforts.items()
-                if k in VALID_AGENTS
+                str_field(k): str_field(v) for k, v in efforts.items()
+                if str_field(k) in VALID_AGENTS
             }
     if "discord_enabled" in body:
         settings["discord_enabled"] = bool(body["discord_enabled"])
@@ -3320,6 +3524,8 @@ async def update_settings(request: Request) -> JSONResponse:
     if "discord_guild_id" in body:
         settings["discord_guild_id"] = str(body["discord_guild_id"]).strip()
     save_settings(settings)
+    if discord_changed:
+        asyncio.create_task(_reconcile_discord_gateway())
     return JSONResponse(settings)
 
 
@@ -3400,9 +3606,13 @@ async def plugin_test_connection(request: Request) -> JSONResponse:
     if err := require_csrf(request):
         return err
 
-    body = await request.json()
-    plugin_name = body.get("plugin", "")
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    plugin_name = str_field(body.get("plugin", ""))
     config = body.get("config", {})
+    if not isinstance(config, dict):
+        return JSONResponse({"error": "config must be an object"}, status_code=400)
 
     plugin = get_plugin(plugin_name)
     if not plugin:
@@ -3426,9 +3636,13 @@ async def plugin_fetch_challenges(request: Request) -> JSONResponse:
     if err := require_csrf(request):
         return err
 
-    body = await request.json()
-    plugin_name = body.get("plugin", "")
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    plugin_name = str_field(body.get("plugin", ""))
     config = body.get("config", {})
+    if not isinstance(config, dict):
+        return JSONResponse({"error": "config must be an object"}, status_code=400)
 
     plugin = get_plugin(plugin_name)
     if not plugin:
@@ -3469,18 +3683,28 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
     if err := require_csrf(request):
         return err
 
-    body = await request.json()
-    plugin_name = body.get("plugin", "")
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    plugin_name = str_field(body.get("plugin", ""))
     config = body.get("config", {})
+    if not isinstance(config, dict):
+        return JSONResponse({"error": "config must be an object"}, status_code=400)
     selected = body.get("challenges", [])
-    mode = body.get("mode", "single")
+    if not isinstance(selected, list):
+        return JSONResponse({"error": "challenges must be a list"}, status_code=400)
+    mode = str_field(body.get("mode", "single")).strip()
     if mode not in VALID_MODES:
         mode = "single"
-    agents = body.get("agents", "").strip()
-    model = body.get("model", "")
-    effort = body.get("effort", "")
+    agents_value = body.get("agents", "")
+    if isinstance(agents_value, list):
+        agents = json.dumps(agents_value)
+    else:
+        agents = str_field(agents_value).strip()
+    model = str_field(body.get("model", ""))
+    effort = str_field(body.get("effort", ""))
     autonomous = bool(body.get("autonomous", False))
-    flag_format = body.get("flag_format", "").strip()
+    flag_format = str_field(body.get("flag_format", "")).strip()
     paused = bool(body.get("paused", False))
 
     plugin = get_plugin(plugin_name)
@@ -3503,38 +3727,50 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
 
     created = []
     for ch_cfg in selected:
+        if not isinstance(ch_cfg, dict):
+            continue
         if not ch_cfg.get("enabled", True):
             continue
 
-        ch_name = ch_cfg.get("name", "")
-        ch_description = ch_cfg.get("description", "")
-        ch_remote_id = ch_cfg.get("remote_id", "")
-        ch_category = ch_cfg.get("category", "")
+        ch_name = str_field(ch_cfg.get("name", ""))
+        ch_description = str_field(ch_cfg.get("description", ""))
+        ch_remote_id = str_field(ch_cfg.get("remote_id", ""))
+        ch_category = str_field(ch_cfg.get("category", ""))
         if ch_category:
             ch_description = f"Challenge Category: {ch_category}\n\n{ch_description}" if ch_description else f"Challenge Category: {ch_category}"
-        ch_flag_format = ch_cfg.get("flag_format", "") or flag_format
+        ch_flag_format = str_field(ch_cfg.get("flag_format", "")) or flag_format
         remote_files = ch_cfg.get("files", [])
+        if not isinstance(remote_files, list):
+            remote_files = []
 
         # Download files (preserve paths, report failures)
         file_data: dict[str, bytes] = {}
         download_errors: list[str] = []
         for rf in remote_files:
+            if not isinstance(rf, dict):
+                download_errors.append("invalid file entry")
+                continue
+            raw_name = str_field(rf.get("name", ""))
+            raw_url = str_field(rf.get("url", ""))
+            if not raw_name or not raw_url:
+                download_errors.append("file entry missing name or url")
+                continue
             try:
                 data = await plugin.download_file(
                     config,
-                    RemoteFile(name=rf["name"], url=rf["url"]),
+                    RemoteFile(name=raw_name, url=raw_url),
                 )
                 safe_name = normalize_uploaded_path(
-                    rf["name"], parallel=(mode == "parallel")
+                    raw_name, parallel=(mode == "parallel")
                 )
                 if not safe_name:
-                    fallback = rf["name"].split("/")[-1].split("?")[0]
-                    # Re-check reserved names on fallback
-                    _RESERVED = {"_shared", "_runs", "_files", ".last_seen_breakthroughs"}
-                    if fallback in _RESERVED or fallback.startswith("WORKING_NOTES_"):
-                        download_errors.append(f"{rf['name']}: reserved filename")
+                    fallback = raw_name.split("/")[-1].split("?")[0]
+                    safe_name = normalize_uploaded_path(
+                        fallback, parallel=(mode == "parallel")
+                    )
+                    if not safe_name:
+                        download_errors.append(f"{raw_name}: unsafe filename")
                         continue
-                    safe_name = fallback
                 # Avoid collision: if path already used, suffix it
                 if safe_name in file_data:
                     base, ext = (safe_name.rsplit(".", 1) + [""])[:2]
@@ -3546,12 +3782,12 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                             break
                         counter += 1
                     download_errors.append(
-                        f"{rf['name']}: renamed to {safe_name} (path collision)"
+                        f"{raw_name}: renamed to {safe_name} (path collision)"
                     )
                 file_data[safe_name] = data
             except Exception as exc:
                 download_errors.append(
-                    f"{rf['name']}: {exc}"
+                    f"{raw_name}: {exc}"
                 )
 
         if not file_data and download_errors:
@@ -3589,18 +3825,15 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
 
         if mode == "parallel":
             setup_parallel_shared_dir(challenge_id)
-            files_dir = challenge_dir / "_files"
-            files_dir.mkdir(parents=True)
-            for fname, fdata in file_data.items():
-                dest = files_dir / fname
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(fdata)
         else:
             challenge_dir.mkdir(parents=True)
-            for fname, fdata in file_data.items():
-                dest = challenge_dir / fname
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(fdata)
+
+        files_dir = challenge_dir / "_files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+        for fname, fdata in file_data.items():
+            dest = files_dir / fname
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(fdata)
 
         runs = {}
         challenge_status = "pending" if paused else "solving"
@@ -3616,8 +3849,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                 effort=run_effort,
                 status=challenge_status,
             )
-            if mode == "parallel":
-                setup_parallel_run_dir(challenge_id, run_id)
+            setup_run_dir(challenge_id, run_id)
 
         if mode == "parallel":
             setup_parallel_cross_notes(challenge_id, runs)
@@ -3707,9 +3939,13 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
     if err := require_csrf(request):
         return err
 
-    body = await request.json()
-    challenge_id = body.get("challenge_id", "")
-    flag = body.get("flag", "").strip()
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    challenge_id = str_field(body.get("challenge_id", ""))
+    flag = str_field(body.get("flag", "")).strip()
+    if not flag:
+        return JSONResponse({"error": "flag required"}, status_code=400)
 
     challenge = challenges.get(challenge_id)
     if not challenge:
@@ -3759,23 +3995,22 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
         detected = challenge.setdefault("detected_flags", {})
         detected[flag] = "correct" if result.correct else "wrong"
 
-        # If correct, mark the challenge as solved
         if result.correct:
-            solved_agent = ""
-            for run in challenge["runs"].values():
-                if run["status"] in ("solving", "completed"):
-                    run["status"] = "solved"
-                    run["error"] = None
-                    solved_agent = run.get("agent", "")
-                    break
-            challenge["status"] = derive_challenge_status(challenge)
+            _, solved_run = await apply_solved_status(
+                challenge_id,
+                challenge,
+                flag=flag,
+                run_id=str_field(body.get("run_id", "")),
+                stop_reason="manual_submit_solved",
+            )
+            solved_agent = solved_run.get("agent", "") if solved_run else ""
             await discord_notify(
                 challenge,
                 embed=make_solve_embed(challenge, flag, solved_agent),
             )
             await discord_mark_solved(challenge, flag, solved_agent)
-
-        save_metadata(challenge)
+        else:
+            save_metadata(challenge)
 
         return JSONResponse({
             "correct": result.correct,
@@ -3799,8 +4034,10 @@ async def delete_connection(request: Request) -> JSONResponse:
     if err := require_csrf(request):
         return err
 
-    body = await request.json()
-    conn_id = body.get("id", "")
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    conn_id = str_field(body.get("id", ""))
     connections = load_connections()
     connections = [c for c in connections if c.get("id") != conn_id]
     save_connections(connections)
@@ -3814,8 +4051,10 @@ async def sync_connection(request: Request) -> JSONResponse:
     if err := require_csrf(request):
         return err
 
-    body = await request.json()
-    conn_id = body.get("id", "")
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    conn_id = str_field(body.get("id", ""))
 
     connections = load_connections()
     conn = next(
@@ -4154,9 +4393,11 @@ async def vpn_configure(request: Request) -> JSONResponse:
             {"error": "WireGuard not installed"}, status_code=400
         )
 
-    body = await request.json()
-    client_public_key = body.get("client_public_key", "").strip()
-    client_networks = body.get("client_networks", "").strip()
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    client_public_key = str_field(body.get("client_public_key", "")).strip()
+    client_networks = str_field(body.get("client_networks", "")).strip()
     dns_forward = bool(body.get("dns_forward", True))
 
     if not client_public_key:
@@ -4222,8 +4463,10 @@ async def vpn_toggle(request: Request) -> JSONResponse:
             {"error": "WireGuard not installed"}, status_code=400
         )
 
-    body = await request.json()
-    action = body.get("action", "").strip()
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    action = str_field(body.get("action", "")).strip()
 
     if action == "up":
         if not WG_CONF.exists():
@@ -4378,23 +4621,20 @@ async def _handle_discord_interaction(interaction: dict) -> None:
         try:
             result = await plugin.submit_flag(config, remote_id, flag)
             if result.correct:
-                for run in challenge["runs"].values():
-                    if run["status"] in ("solving", "completed"):
-                        run["status"] = "solved"
-                        run["error"] = None
-                        break
-                challenge["status"] = derive_challenge_status(challenge)
-                detected = challenge.setdefault("detected_flags", {})
-                detected[flag] = "correct"
-                save_metadata(challenge)
+                await apply_solved_status(
+                    ch_id,
+                    challenge,
+                    flag=flag,
+                    stop_reason="discord_submit_solved",
+                )
+                solved_by = f"{author} (Discord)"
                 await bot.followup_interaction(
                     interaction_token,
-                    embed=make_solve_embed(challenge, flag, f"{author} (Discord)"))
-                await discord_mark_solved(challenge, flag, f"{author} (Discord)")
-                for run in challenge["runs"].values():
-                    if run["status"] == "solving":
-                        await stop_run(run, "discord_solved")
+                    embed=make_solve_embed(challenge, flag, solved_by))
+                await discord_mark_solved(challenge, flag, solved_by)
             else:
+                challenge.setdefault("detected_flags", {})[flag] = "wrong"
+                save_metadata(challenge)
                 await bot.followup_interaction(
                     interaction_token, f"Incorrect: {result.message}")
         except Exception as exc:
@@ -4431,17 +4671,37 @@ async def _handle_discord_interaction(interaction: dict) -> None:
             interaction_id, interaction_token, "\n".join(lines))
 
     elif cmd == "stop":
-        count = 0
-        for run in challenge["runs"].values():
+        stopped_ids = []
+        for run_id, run in challenge["runs"].items():
             if run["status"] == "solving":
-                await stop_run(run, "discord_stop")
                 run["status"] = "failed"
-                count += 1
-        if count:
+                run["error"] = None
+                stop_event = {
+                    "type": "system",
+                    "message": "Agent stopped from Discord.",
+                }
+                run["output_lines"].append(stop_event)
+                append_output_event(ch_id, run_id, stop_event)
+                await broadcast(ch_id, run_id, stop_event)
+                await stop_run(run, "discord_stop")
+                stopped_ids.append(run_id)
+        if stopped_ids:
             challenge["status"] = derive_challenge_status(challenge)
             save_metadata(challenge)
+            for run_id in stopped_ids:
+                run = challenge["runs"][run_id]
+                await broadcast(ch_id, run_id, {
+                    "type": "run_status",
+                    "run_id": run_id,
+                    "status": run["status"],
+                    "error": run.get("error"),
+                })
+            await broadcast_challenge(ch_id, {
+                "type": "challenge_status",
+                "status": challenge["status"],
+            })
             await bot.respond_to_interaction(
-                interaction_id, interaction_token, f"Stopped {count} agent(s)")
+                interaction_id, interaction_token, f"Stopped {len(stopped_ids)} agent(s)")
         else:
             await bot.respond_to_interaction(
                 interaction_id, interaction_token, "No agents are currently running")
@@ -4466,22 +4726,17 @@ async def _handle_discord_interaction(interaction: dict) -> None:
 
     elif cmd == "solved":
         flag = options.get("flag", "")
-        if flag:
-            detected = challenge.setdefault("detected_flags", {})
-            detected[flag] = "correct"
-        for run in challenge["runs"].values():
-            if run["status"] in ("solving", "completed", "failed"):
-                run["status"] = "solved"
-                run["error"] = None
-                if run["status"] == "solving":
-                    await stop_run(run, "discord_solved")
-                break
-        challenge["status"] = derive_challenge_status(challenge)
-        save_metadata(challenge)
+        solved_by = f"{author} (Discord)"
+        await apply_solved_status(
+            ch_id,
+            challenge,
+            flag=flag,
+            stop_reason="discord_solved",
+        )
         await bot.respond_to_interaction(
             interaction_id, interaction_token,
-            embed=make_solve_embed(challenge, flag or "—", f"{author} (Discord)"))
-        await discord_mark_solved(challenge, flag or "", f"{author} (Discord)")
+            embed=make_solve_embed(challenge, flag or "—", solved_by))
+        await discord_mark_solved(challenge, flag or "", solved_by)
 
     elif cmd == "files":
         file_path = options.get("path", "")
@@ -4497,9 +4752,23 @@ async def _handle_discord_interaction(interaction: dict) -> None:
                 if agent_filter and run.get("agent") != agent_filter:
                     continue
                 run_cwd = get_run_cwd(ch_id, run)
-                target = run_cwd / file_path
-                if target.exists() and target.is_file():
+                allowed_roots = [
+                    run_cwd,
+                    ch_dir / "_files",
+                    ch_dir / "_shared",
+                ]
+                target = resolve_allowed_path(
+                    run_cwd, file_path, allowed_roots
+                )
+                if target and target.exists() and target.is_file():
                     try:
+                        if target.stat().st_size > MAX_DISCORD_FILE_READ:
+                            await bot.followup_interaction(
+                                interaction_token,
+                                f"File too large to display over Discord: `{file_path}`",
+                            )
+                            found = True
+                            break
                         content = target.read_text(errors="replace")
                         agent = run.get("agent", "?")
                         header = f"**{agent}** — `{file_path}`\n"
@@ -4528,8 +4797,22 @@ async def _handle_discord_interaction(interaction: dict) -> None:
                 if not run_cwd.exists():
                     continue
                 files = []
+                allowed_roots = [
+                    run_cwd,
+                    ch_dir / "_files",
+                    ch_dir / "_shared",
+                ]
+                resolved_roots = [
+                    root.resolve() for root in allowed_roots if root.exists()
+                ]
                 for f in sorted(run_cwd.rglob("*")):
                     if f.is_file():
+                        resolved = f.resolve()
+                        if not any(
+                            _is_relative_to(resolved, root)
+                            for root in resolved_roots
+                        ):
+                            continue
                         rel = f.relative_to(run_cwd)
                         # Skip symlinks to shared dirs and working notes
                         if str(rel).startswith("_shared") or str(rel).startswith("WORKING_NOTES_"):
@@ -4558,30 +4841,47 @@ async def _handle_discord_interaction(interaction: dict) -> None:
 
 
 _discord_gateway: DiscordGateway | None = None
+_discord_gateway_key: tuple[str, str, str] | None = None
 
 
-async def _start_discord_gateway():
-    global _discord_gateway
+async def _stop_discord_gateway() -> None:
+    global _discord_gateway, _discord_gateway_key
+    if _discord_gateway:
+        await _discord_gateway.stop()
+    _discord_gateway = None
+    _discord_gateway_key = None
+
+
+async def _reconcile_discord_gateway() -> None:
+    """Start, stop, or restart the Discord gateway to match settings."""
+    global _discord_gateway, _discord_gateway_key
     settings = load_settings()
     bot = get_bot(settings)
     if not bot:
+        await _stop_discord_gateway()
         return
+
     guild_id = settings.get("discord_guild_id", "").strip()
+    key = (bot.token, bot.channel_id, guild_id)
+    if _discord_gateway and _discord_gateway_key == key:
+        return
+
+    await _stop_discord_gateway()
     try:
         await bot.register_slash_commands(guild_id)
     except Exception as exc:
         log.error("Failed to register slash commands: %s", exc)
     _discord_gateway = DiscordGateway(bot, _handle_discord_interaction)
+    _discord_gateway_key = key
     asyncio.create_task(_discord_gateway.run_forever())
     log.info("Discord gateway started")
 
 
 @asynccontextmanager
 async def lifespan(app):
-    asyncio.create_task(_start_discord_gateway())
+    asyncio.create_task(_reconcile_discord_gateway())
     yield
-    if _discord_gateway:
-        await _discord_gateway.stop()
+    await _stop_discord_gateway()
     for challenge in challenges.values():
         for run in challenge["runs"].values():
             await stop_run(run, "shutdown")
@@ -4644,6 +4944,47 @@ routes = [
     ),
 ]
 
+class SecurityHeadersMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                csp = (
+                    "default-src 'self'; "
+                    "script-src 'self'; "
+                    "style-src 'self' 'unsafe-inline'; "
+                    "img-src 'self' data:; "
+                    "connect-src 'self' ws: wss:; "
+                    "object-src 'none'; "
+                    "base-uri 'none'; "
+                    "frame-ancestors 'none'; "
+                    "form-action 'self'"
+                )
+                headers.extend([
+                    (b"content-security-policy", csp.encode()),
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"referrer-policy", b"no-referrer"),
+                    (b"x-frame-options", b"DENY"),
+                    (
+                        b"permissions-policy",
+                        b"camera=(), microphone=(), geolocation=()",
+                    ),
+                    (b"cross-origin-opener-policy", b"same-origin"),
+                ])
+                if TLS_ENABLED:
+                    headers.append((
+                        b"strict-transport-security",
+                        b"max-age=31536000; includeSubDomains",
+                    ))
+                message["headers"] = headers
+            await send(message)
+
+        return await self.app(scope, receive, send_with_headers)
+
+
 class NoCacheStaticMiddleware:
     def __init__(self, app):
         self.app = app
@@ -4672,6 +5013,7 @@ app = Starlette(
         ),
     ],
 )
+app = SecurityHeadersMiddleware(app)
 app = NoCacheStaticMiddleware(app)
 
 if __name__ == "__main__":
