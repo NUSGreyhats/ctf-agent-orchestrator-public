@@ -243,7 +243,7 @@ DigitalOcean and GCP provisioners include a `sync_hash` trigger so runtime chang
 
 ## Environment Setup
 
-Environment scripts remain numbered and executable by `environment/run.sh`, but share common helper functions from `environment/lib/common.sh` for logging, retries, package installs, downloads, and shell-profile updates.
+Environment scripts remain numbered and executable by `environment/run.sh`, but share common helper functions from `environment/lib/common.sh` for logging, retries, package installs, downloads, package-manager locks, and shell-profile updates. By default, `run.sh` uses a dependency-aware parallel plan: the base bootstrap runs first, independent tooling categories run concurrently, agent registration runs after the IDA/MCP tooling is available, and validation runs last. Set `ENVIRONMENT_PARALLEL=0` to force the old sequential order.
 
 Most Python dependencies are installed with:
 

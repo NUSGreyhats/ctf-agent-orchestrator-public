@@ -23,7 +23,7 @@ apt_install \
   ffmpeg
 
 if ! have_cmd zsteg; then
-  gem install zsteg
+  gem_install zsteg
 fi
 
 download_file \

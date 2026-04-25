@@ -2,6 +2,8 @@
 # Shared helpers for environment provisioning scripts.
 # shellcheck shell=bash
 
+LOCK_ROOT="${CTF_AGENT_LOCK_ROOT:-/var/lock/ctf-agent-wrapper}"
+
 log() {
   printf '==> %s\n' "$*"
 }
@@ -27,25 +29,57 @@ retry() {
   done
 }
 
+with_lock() {
+  local lock_name="$1"
+  shift
+  mkdir -p "$LOCK_ROOT"
+  local lock_file="$LOCK_ROOT/${lock_name}.lock"
+  (
+    flock -x 200
+    "$@"
+  ) 200>"$lock_file"
+}
+
 apt_update() {
-  DEBIAN_FRONTEND=noninteractive apt-get update
+  with_lock apt env DEBIAN_FRONTEND=noninteractive apt-get update
 }
 
 apt_update_quiet() {
-  DEBIAN_FRONTEND=noninteractive apt-get update -qq
+  with_lock apt env DEBIAN_FRONTEND=noninteractive apt-get update -qq
 }
 
 apt_install() {
-  DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+  with_lock apt env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+}
+
+apt_remove() {
+  with_lock apt env DEBIAN_FRONTEND=noninteractive apt-get remove -y "$@"
+}
+
+pip_install() {
+  with_lock python python3 -m pip install "$@"
 }
 
 uv_pip_install() {
   install_uv
-  uv pip install --system "$@"
+  with_lock python uv pip install --system "$@"
+}
+
+uv_tool_install() {
+  install_uv
+  with_lock uv-tools uv tool install "$@"
 }
 
 npm_install_global() {
-  npm install -g "$@"
+  with_lock npm npm install -g "$@"
+}
+
+npm_uninstall_global() {
+  with_lock npm npm uninstall -g "$@"
+}
+
+gem_install() {
+  with_lock gem gem install "$@"
 }
 
 download_file() {
@@ -63,6 +97,10 @@ download_file() {
 }
 
 append_bashrc_line() {
+  with_lock bashrc _append_bashrc_line_unlocked "$@"
+}
+
+_append_bashrc_line_unlocked() {
   local line="$1"
   touch "$HOME/.bashrc"
   if ! grep -qxF "$line" "$HOME/.bashrc"; then
@@ -71,6 +109,15 @@ append_bashrc_line() {
 }
 
 install_uv() {
+  export PATH="$HOME/.local/bin:$PATH"
+  if have_cmd uv; then
+    return 0
+  fi
+  with_lock uv-bootstrap _install_uv_unlocked
+  export PATH="$HOME/.local/bin:$PATH"
+}
+
+_install_uv_unlocked() {
   if have_cmd uv; then
     return 0
   fi

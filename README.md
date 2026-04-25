@@ -100,6 +100,7 @@ Optional Discord bot for team coordination:
 - **IDA MCP server** — Headless IDA Pro analysis via [ida-mcp-rs](https://github.com/blacktop/ida-mcp-rs). Provides function listing, disassembly, decompilation, string extraction, and IDAPython scripting through MCP tools.
 - **WireGuard VPN** — Built-in VPN management for challenges that require network access to a CTF infrastructure. Configure, start/stop, and generate client configs from the web UI.
 - **uv-based Python installs** — Environment scripts install most Python dependencies with `uv pip install --system` for faster provisioning while keeping `pip` available for vendor-local wheels.
+- **Parallel environment setup** — `environment/run.sh` runs independent tooling categories concurrently with package-manager locks; set `ENVIRONMENT_PARALLEL=0` for sequential setup.
 - **Provisioning validation** — `environment/990_validate.sh` checks critical commands and Python imports at the end of setup.
 - **OpenCode server binding** — `opencode serve` is started explicitly on `127.0.0.1` for SDK access.
 

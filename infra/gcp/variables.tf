@@ -3,6 +3,12 @@ variable "project_id" {
   type        = string
 }
 
+variable "instance_name" {
+  description = "GCP compute instance name"
+  type        = string
+  default     = "ctf-workstation"
+}
+
 variable "zone" {
   description = "GCP zone"
   type        = string
@@ -15,10 +21,22 @@ variable "machine_type" {
   default     = "e2-standard-4"
 }
 
+variable "image" {
+  description = "GCP boot image"
+  type        = string
+  default     = "ubuntu-os-cloud/ubuntu-2404-lts-amd64"
+}
+
 variable "boot_disk_size_gb" {
   description = "Boot disk size in GB"
   type        = number
   default     = 100
+}
+
+variable "boot_disk_type" {
+  description = "GCP boot disk type"
+  type        = string
+  default     = "pd-ssd"
 }
 
 variable "repo_path" {

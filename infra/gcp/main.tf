@@ -48,15 +48,15 @@ locals {
 }
 
 resource "google_compute_instance" "ctf" {
-  name         = "ctf-workstation"
+  name         = var.instance_name
   machine_type = var.machine_type
   zone         = var.zone
 
   boot_disk {
     initialize_params {
-      image = "ubuntu-os-cloud/ubuntu-2404-lts-amd64"
+      image = var.image
       size  = var.boot_disk_size_gb
-      type  = "pd-ssd"
+      type  = var.boot_disk_type
     }
   }
 
@@ -66,7 +66,7 @@ resource "google_compute_instance" "ctf" {
     access_config {}
   }
 
-  tags = ["ctf-workstation"]
+  tags = [var.instance_name]
 
   metadata = {
     startup-script = file("${path.module}/startup.sh")
@@ -75,7 +75,7 @@ resource "google_compute_instance" "ctf" {
 }
 
 resource "google_compute_firewall" "webapp" {
-  name    = "allow-ctf-webapp"
+  name    = "allow-${var.instance_name}-webapp"
   network = "default"
 
   allow {
@@ -84,11 +84,11 @@ resource "google_compute_firewall" "webapp" {
   }
 
   source_ranges = ["0.0.0.0/0"]
-  target_tags   = ["ctf-workstation"]
+  target_tags   = [var.instance_name]
 }
 
 resource "google_compute_firewall" "wireguard" {
-  name    = "allow-ctf-wireguard"
+  name    = "allow-${var.instance_name}-wireguard"
   network = "default"
 
   allow {
@@ -97,7 +97,7 @@ resource "google_compute_firewall" "wireguard" {
   }
 
   source_ranges = ["0.0.0.0/0"]
-  target_tags   = ["ctf-workstation"]
+  target_tags   = [var.instance_name]
 }
 
 resource "null_resource" "provision" {

@@ -4,6 +4,12 @@ variable "do_token" {
   sensitive   = true
 }
 
+variable "instance_name" {
+  description = "DigitalOcean droplet name"
+  type        = string
+  default     = "ctf-workstation"
+}
+
 variable "region" {
   description = "DigitalOcean region"
   type        = string
@@ -15,6 +21,12 @@ variable "droplet_size" {
   type        = string
   # Basic Shared CPU Premium AMD: 8 vCPU, 32 GB RAM, 400 GB NVMe SSD, 10 TB transfer
   default = "s-8vcpu-32gb-amd"
+}
+
+variable "droplet_image" {
+  description = "DigitalOcean base image slug"
+  type        = string
+  default     = "ubuntu-24-04-x64"
 }
 
 variable "repo_path" {

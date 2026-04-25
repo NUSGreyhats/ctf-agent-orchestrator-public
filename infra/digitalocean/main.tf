@@ -59,7 +59,7 @@ resource "null_resource" "ssh_key_upload" {
       curl -s -X POST \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${var.do_token}" \
-        -d '{"name":"ctf-workstation","public_key":"${trimspace(local.ssh_public_key)}"}' \
+        -d '{"name":"${var.instance_name}-ssh","public_key":"${trimspace(local.ssh_public_key)}"}' \
         "https://api.digitalocean.com/v2/account/keys" \
         -o /dev/null -w "%%{http_code}" | grep -qE "^(201|422)$"
     EOT
@@ -76,16 +76,16 @@ data "external" "ssh_fingerprint" {
 
 resource "digitalocean_droplet" "ctf" {
   depends_on = [null_resource.ssh_key_upload]
-  name       = "ctf-workstation"
+  name       = var.instance_name
   region     = var.region
   size       = var.droplet_size
-  image      = "ubuntu-24-04-x64"
+  image      = var.droplet_image
   ssh_keys   = [data.external.ssh_fingerprint.result.fingerprint]
   user_data  = file("${path.module}/startup.sh")
 }
 
 resource "digitalocean_firewall" "webapp" {
-  name        = "ctf-webapp-${digitalocean_droplet.ctf.id}"
+  name        = "${var.instance_name}-webapp-${digitalocean_droplet.ctf.id}"
   droplet_ids = [digitalocean_droplet.ctf.id]
 
   inbound_rule {

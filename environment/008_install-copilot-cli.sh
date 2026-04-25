@@ -13,7 +13,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 
 COPILOT_VERSION="0.0.421"
 
-npm uninstall -g @github/copilot || true
+npm_uninstall_global @github/copilot || true
 npm_install_global "@github/copilot@${COPILOT_VERSION}"
 copilot --version
 
