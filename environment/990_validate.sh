@@ -9,7 +9,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 
 failures=0
+failure_messages=()
 VALIDATE_TIMEOUT_SECONDS="${VALIDATE_TIMEOUT_SECONDS:-60}"
+
+record_failure() {
+  local msg="$1"
+  warn "$msg"
+  failure_messages+=("$msg")
+  failures=$((failures + 1))
+}
 
 with_validation_timeout() {
   timeout "${VALIDATE_TIMEOUT_SECONDS}s" "$@"
@@ -24,8 +32,7 @@ check_cmd() {
     fi
     log "OK command: $name"
   else
-    warn "Missing command: $name"
-    failures=$((failures + 1))
+    record_failure "Missing command: $name"
   fi
 }
 
@@ -34,8 +41,7 @@ check_path() {
   if [ -e "$path" ]; then
     log "OK path: $path"
   else
-    warn "Missing path: $path"
-    failures=$((failures + 1))
+    record_failure "Missing path: $path"
   fi
 }
 
@@ -44,8 +50,7 @@ check_py_import() {
   if with_validation_timeout python3 -c "import ${module}" >/dev/null 2>&1; then
     log "OK python import: $module"
   else
-    warn "Missing python import: $module"
-    failures=$((failures + 1))
+    record_failure "Missing python import: $module"
   fi
 }
 
@@ -90,7 +95,10 @@ check_py_import oletools
 check_py_import libdebug
 
 if [ "$failures" -ne 0 ]; then
-  warn "Environment validation failed with $failures missing requirement(s)."
+  warn "Environment validation failed with $failures missing requirement(s):"
+  for msg in "${failure_messages[@]}"; do
+    warn "  - $msg"
+  done
   exit 1
 fi
 
