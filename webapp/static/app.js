@@ -957,6 +957,12 @@ async function openChallenge(id) {
   updateSteerRunSelect();
   updateFilesRunSelect();
   connectAllRuns(id, currentRuns);
+  // Seed stats from run metadata so the panel isn't blank for providers
+  // that don't emit usage events (e.g. Codex without codex_usage).
+  for (const run of currentRuns) {
+    const s = getRunStats(run.id);
+    if (run.duration_ms) s.durationMs = run.duration_ms;
+  }
   loadFiles();
 }
 
@@ -1678,6 +1684,7 @@ function renderRunEvent(runId, event) {
       $("#error-banner").textContent = event.error;
       $("#error-banner").classList.remove("hidden");
     }
+    renderStats();
     return;
   }
 
@@ -1942,7 +1949,7 @@ function renderAssistant(feed, msg, runId, eventTs) {
       const toolEl = buildToolUse(block);
       _pendingToolEls.push(toolEl);
       pendingTools.set(block.id, toolEl);
-      if (runId) getRunStats(runId).toolCalls++;
+      if (runId) { getRunStats(runId).toolCalls++; renderStats(); }
     }
   }
 

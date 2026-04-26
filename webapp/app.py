@@ -358,6 +358,24 @@ def make_run(
     }
 
 
+def assign_notes_labels(runs: dict[str, dict]) -> None:
+    """Assign unique notes_label for WORKING_NOTES filenames in parallel mode."""
+    counts: dict[str, int] = {}
+    for r in runs.values():
+        counts[r["agent"]] = counts.get(r["agent"], 0) + 1
+    indices: dict[str, int] = {}
+    for r in runs.values():
+        if r.get("notes_label"):
+            continue
+        a = r["agent"]
+        if counts[a] > 1:
+            idx = indices.get(a, 0) + 1
+            indices[a] = idx
+            r["notes_label"] = f"{a}-{idx}"
+        else:
+            r["notes_label"] = a
+
+
 def get_run_cwd(challenge_id: str, run: dict) -> Path:
     """Return the working directory for a run.
 
@@ -443,10 +461,11 @@ def setup_parallel_cross_notes(challenge_id: str, runs: dict | None = None) -> N
         run_dir = runs_dir / rid
         if not run_dir.exists():
             continue
-        own_notes = run_dir / f"WORKING_NOTES_{run['agent']}.md"
+        label = run.get("notes_label", run["agent"])
+        own_notes = run_dir / f"WORKING_NOTES_{label}.md"
         if not own_notes.exists():
             own_notes.write_text(
-                f"# Working Notes — {run['agent']}\n"
+                f"# Working Notes — {label}\n"
                 "## Challenge Understanding\n"
                 "## Hypotheses\n"
                 "## Key Findings\n"
@@ -463,7 +482,7 @@ def setup_parallel_cross_notes(challenge_id: str, runs: dict | None = None) -> N
         for other_rid, other_run in run_items:
             if other_rid == rid:
                 continue
-            notes_name = f"WORKING_NOTES_{other_run['agent']}.md"
+            notes_name = f"WORKING_NOTES_{other_run.get('notes_label', other_run['agent'])}.md"
             other_notes = runs_dir / other_rid / notes_name
             link = run_dir / notes_name
             if not link.exists():
@@ -767,6 +786,7 @@ def _serialize_runs(challenge: dict) -> dict:
             "error": run.get("error"),
             "duration_ms": run.get("duration_ms"),
             "solve_start": run.get("solve_start"),
+            "notes_label": run.get("notes_label", ""),
             "provider_state": provider_state_for_metadata(run),
             "_session_state": run.get("_session_state", {}),
         }
@@ -915,6 +935,8 @@ def load_challenges_from_disk() -> None:
                 )
                 run["error"] = run_meta.get("error")
                 run["duration_ms"] = run_meta.get("duration_ms")
+                if run_meta.get("notes_label"):
+                    run["notes_label"] = run_meta["notes_label"]
                 run["_codex_thread_id"] = provider_state.get(
                     "codex_thread_id"
                 )
@@ -996,6 +1018,7 @@ def load_challenges_from_disk() -> None:
             for run_id in runs:
                 setup_run_dir(challenge_id, run_id)
             if mode == "parallel":
+                assign_notes_labels(runs)
                 setup_parallel_cross_notes(challenge_id, runs)
 
         challenge = {
@@ -1338,13 +1361,13 @@ async def create_challenge(request: Request) -> JSONResponse:
     if mode == "single":
         agent_entries = agent_entries[:1]
     else:
-        # Deduplicate agents in parallel mode (same agent twice would
-        # corrupt WORKING_NOTES symlinks)
-        seen_agents: set[str] = set()
+        # Deduplicate identical agent+model+effort combos in parallel mode
+        seen: set[tuple] = set()
         deduped = []
         for entry in agent_entries:
-            if entry["agent"] not in seen_agents:
-                seen_agents.add(entry["agent"])
+            key = (entry["agent"], entry.get("model", ""), entry.get("effort", ""))
+            if key not in seen:
+                seen.add(key)
                 deduped.append(entry)
         agent_entries = deduped
 
@@ -1407,6 +1430,7 @@ async def create_challenge(request: Request) -> JSONResponse:
 
     # Set up cross-agent note visibility for parallel mode
     if is_parallel:
+        assign_notes_labels(runs)
         setup_parallel_cross_notes(challenge_id, runs)
 
     challenge = {
@@ -1650,8 +1674,8 @@ async def bulk_upload(request: Request) -> JSONResponse:
         if mode == "single":
             agent_entries = agent_entries[:1]
         else:
-            seen_a: set[str] = set()
-            agent_entries = [e for e in agent_entries if not (e["agent"] in seen_a or seen_a.add(e["agent"]))]
+            seen_a: set[tuple] = set()
+            agent_entries = [e for e in agent_entries if not ((e["agent"], e.get("model", ""), e.get("effort", "")) in seen_a or seen_a.add((e["agent"], e.get("model", ""), e.get("effort", ""))))]
 
         model = str_field(body.get("model", "")).strip()
         effort = str_field(body.get("effort", "")).strip()
@@ -1732,6 +1756,7 @@ async def bulk_upload(request: Request) -> JSONResponse:
                 setup_run_dir(challenge_id, run_id)
 
             if is_parallel:
+                assign_notes_labels(runs)
                 setup_parallel_cross_notes(challenge_id, runs)
 
             challenge = {
@@ -2365,11 +2390,12 @@ async def download_file(request: Request) -> Response:
 def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) -> str:
     """Build the CTF solving prompt."""
     agent_name = run["agent"]
+    notes_label = run.get("notes_label", agent_name)
     is_parallel = challenge["mode"] == "parallel"
 
     # Determine notes filename
     if is_parallel:
-        notes_file = f"WORKING_NOTES_{agent_name}.md"
+        notes_file = f"WORKING_NOTES_{notes_label}.md"
     else:
         notes_file = "WORKING_NOTES.md"
 
@@ -2389,7 +2415,7 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
         "",
         f"Maintain `{notes_file}` with this structure:",
         "```",
-        f"# Working Notes — {agent_name}",
+        f"# Working Notes — {notes_label}",
         "## Challenge Understanding",
         "## Hypotheses",
         "[ ] untested  [x] failed  [>] active",
@@ -2407,8 +2433,8 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
     if is_parallel:
         teammates = []
         for rid, r in challenge["runs"].items():
-            if r["agent"] != agent_name:
-                teammates.append(r["agent"])
+            if rid != run["id"]:
+                teammates.append(r.get("notes_label", r["agent"]))
         if teammates:
             parts.extend([
                 "",
@@ -2801,8 +2827,8 @@ async def _run_agent_sdk_path(
         )
 
         if stop_reason:
-            # Externally stopped (steer, delete, sibling solved)
-            pass
+            if run["status"] not in ("completed", "failed", "solved"):
+                run["status"] = "failed"
         elif run["status"] == "solved":
             # Auto-submit marked it solved — stop siblings in parallel mode
             if challenge.get("mode") == "parallel":
@@ -2857,17 +2883,25 @@ async def _run_agent_sdk_path(
         run["output_lines"].append(err_event)
         append_output_event(challenge_id, run_id, err_event)
         await broadcast(challenge_id, run_id, err_event)
+    finally:
+        if run["status"] == "solving":
+            run["status"] = "failed"
+            challenge["status"] = derive_challenge_status(challenge)
+            save_metadata(challenge)
 
-    await broadcast(challenge_id, run_id, {
-        "type": "run_status",
-        "run_id": run_id,
-        "status": run["status"],
-        "error": run.get("error"),
-    })
-    await broadcast_challenge(challenge_id, {
-        "type": "challenge_status",
-        "status": challenge["status"],
-    })
+    try:
+        await broadcast(challenge_id, run_id, {
+            "type": "run_status",
+            "run_id": run_id,
+            "status": run["status"],
+            "error": run.get("error"),
+        })
+        await broadcast_challenge(challenge_id, {
+            "type": "challenge_status",
+            "status": challenge["status"],
+        })
+    except Exception as exc:
+        log.error("[%s/%s] Broadcast error: %s", challenge_id[:8], run_id[:8], exc)
 
 
 async def run_agent_task(
@@ -2932,13 +2966,7 @@ async def run_agent_task(
                         await broadcast(challenge_id, run_id, sys_event_fail)
 
     if continue_msg:
-        prompt = (
-            f"{continue_msg}\n\n"
-            "Continue working on the CTF challenge. Do not stop after "
-            "addressing the above — keep going until you find the flag "
-            "or exhaust all approaches. Read your WORKING_NOTES if you "
-            "need to recall what was tried."
-        )
+        prompt = continue_msg
         if instance_info:
             conn_parts = []
             if instance_info.get("url"):
@@ -3817,8 +3845,8 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         if mode == "single":
             agent_entries = agent_entries[:1]
         else:
-            seen_a2: set[str] = set()
-            agent_entries = [e for e in agent_entries if not (e["agent"] in seen_a2 or seen_a2.add(e["agent"]))]
+            seen_a2: set[tuple] = set()
+            agent_entries = [e for e in agent_entries if not ((e["agent"], e.get("model", ""), e.get("effort", "")) in seen_a2 or seen_a2.add((e["agent"], e.get("model", ""), e.get("effort", ""))))]
 
         challenge_id = uuid.uuid4().hex[:12]
         challenge_dir = CHALLENGES_DIR / challenge_id
@@ -3852,6 +3880,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             setup_run_dir(challenge_id, run_id)
 
         if mode == "parallel":
+            assign_notes_labels(runs)
             setup_parallel_cross_notes(challenge_id, runs)
 
         challenge = {
