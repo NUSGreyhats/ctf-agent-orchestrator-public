@@ -492,8 +492,8 @@ def get_bot(settings: dict) -> DiscordBot | None:
         if _bot:
             try:
                 asyncio.get_event_loop().create_task(_bot.close())
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Discord bot close error: %s", exc)
         _bot = DiscordBot(token, channel_id)
     return _bot
 

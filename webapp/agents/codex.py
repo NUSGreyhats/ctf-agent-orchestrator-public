@@ -1754,8 +1754,8 @@ async def _run_agent_sdk(
         try:
             if proc.stdin and not proc.stdin.is_closing():
                 proc.stdin.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("stdin close error: %s", exc)
         try:
             proc.terminate()
         except ProcessLookupError:

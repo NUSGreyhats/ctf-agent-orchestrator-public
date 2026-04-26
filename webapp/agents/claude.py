@@ -322,8 +322,8 @@ async def _run_agent_sdk(
         if _poll_task and not _poll_task.done():
             _poll_task.cancel()
         try:
-            await client.disconnect()
-        except (Exception, asyncio.CancelledError):
+            await asyncio.wait_for(client.disconnect(), timeout=10)
+        except (Exception, asyncio.CancelledError, asyncio.TimeoutError):
             pass
 
 

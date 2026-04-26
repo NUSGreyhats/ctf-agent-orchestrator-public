@@ -376,8 +376,8 @@ async def _run_agent_sdk(
         try:
             event_dict = event.to_dict() if hasattr(event, "to_dict") else {}
             loop.call_soon_threadsafe(queue.put_nowait, event_dict)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Copilot event callback error: %s", exc)
 
     def _on_permission(req, ctx):
         return PermissionRequestResult(allow=True)
@@ -529,8 +529,8 @@ async def _run_agent_sdk(
                     client.stop()
                 elif hasattr(client, "__del__"):
                     del client
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Copilot client cleanup error: %s", exc)
 
 
 def _normalize_sdk_event(event_dict: dict) -> dict | None:
