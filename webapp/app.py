@@ -11,9 +11,11 @@ Supports 2 solving modes:
 
 import asyncio
 import base64
+import io
 import json
 import logging
 import re
+import zipfile
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -2381,6 +2383,711 @@ async def download_file(request: Request) -> Response:
         },
     )
 
+_VIEWER_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#212121;--bg-card:#292929;--bg-panel:#303030;--bg-input:#383838;--bg-hover:#3c3c3c;
+  --border:#424242;--border-light:#515151;
+  --text:#eeffff;--text-muted:#b0bec5;--text-dim:#616161;
+  --accent:#89ddff;--accent-dim:rgba(137,221,255,0.12);
+  --green:#c3e88d;--green-dim:rgba(195,232,141,0.12);
+  --yellow:#ffcb6b;--yellow-dim:rgba(255,203,107,0.12);
+  --red:#f07178;--red-dim:rgba(240,113,120,0.12);
+  --orange:#f78c6c;--orange-dim:rgba(247,140,108,0.12);
+  --purple:#c792ea;--purple-dim:rgba(199,146,234,0.12);
+  --mono:"JetBrains Mono","Fira Code","SF Mono","Cascadia Code",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);display:flex;height:100vh;overflow:hidden}
+a{color:var(--accent)}
+
+/* Sidebar */
+.sidebar{width:280px;min-width:280px;background:var(--bg-panel);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+.sidebar h2{padding:14px 16px;font-size:13px;border-bottom:1px solid var(--border);color:var(--text)}
+.sidebar .meta{padding:12px 16px;font-size:0.75rem;color:var(--text-muted);border-bottom:1px solid var(--border);line-height:1.7}
+.sidebar .meta b{color:var(--text)}
+.sidebar .meta code{font-family:var(--mono);font-size:0.72em;background:rgba(0,0,0,0.3);padding:0.1em 0.35em;border-radius:4px;color:var(--red)}
+.file-list{flex:1;overflow-y:auto;padding:8px}
+.file-list .file{padding:6px 12px;font-size:0.72rem;font-family:var(--mono);cursor:pointer;border-radius:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-muted)}
+.file-list .file:hover{background:var(--bg-hover);color:var(--text)}
+.file-list .file.active{background:var(--accent-dim);color:var(--accent)}
+
+/* Main area */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.tab-bar{display:flex;background:var(--bg-panel);border-bottom:1px solid var(--border)}
+.tab-bar button{padding:8px 16px;background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:0.78rem;border-bottom:2px solid transparent;font-family:var(--sans)}
+.tab-bar button.active{color:var(--text);border-bottom-color:var(--accent)}
+.tab-bar button:hover{color:var(--text)}
+.content{flex:1;overflow-y:auto;padding:0.5rem 0.75rem}
+
+/* Run selector */
+.run-select{display:flex;gap:8px;padding:8px 12px;background:var(--bg-panel);border-bottom:1px solid var(--border)}
+.run-select button{padding:4px 12px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-muted);border-radius:4px;cursor:pointer;font-size:0.72rem;font-family:var(--sans)}
+.run-select button.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
+
+/* Chat bubbles */
+.chat-bubble{max-width:80%;margin-bottom:0.5rem;padding:0.55rem 0.75rem;border-radius:12px;font-size:0.82rem;line-height:1.6;word-break:break-word;clear:both}
+.chat-assistant{float:left;background:var(--bg-card);border:1px solid var(--border);border-bottom-left-radius:4px}
+.chat-user{float:right;background:var(--accent-dim);border:1px solid var(--accent);border-bottom-right-radius:4px;color:var(--accent)}
+.chat-label{font-size:0.6rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.2rem;opacity:0.6}
+.chat-body{white-space:pre-wrap}
+.chat-body p{margin:0}.chat-body p+p{margin-top:0.4em}
+.chat-body strong{color:var(--text);font-weight:700}
+.chat-body em{font-style:italic;opacity:0.9}
+.msg-ts{font-size:0.6rem;color:var(--text-dim);font-family:var(--mono);opacity:0.7;float:right;margin-left:8px}
+
+/* Thinking */
+.chat-thinking-bubble{background:var(--purple-dim);border-color:rgba(199,146,234,0.25)}
+.step-thinking{padding:0;color:var(--purple);font-size:0.75rem;font-style:italic}
+.step-thinking summary{cursor:pointer;outline:none;list-style:none;padding:0.4rem 0.5rem;display:flex;align-items:center;gap:0.35rem}
+.step-thinking summary::-webkit-details-marker{display:none}
+.step-thinking summary::before{content:"\25B6";font-size:0.55rem;transition:transform 0.15s;display:inline-block;font-style:normal}
+.step-thinking[open] summary::before{content:"\25BC"}
+.thinking-label{font-weight:600;font-style:normal}
+.thinking-preview{opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.thinking-body{padding:0.4rem 0.5rem;padding-top:0;white-space:pre-wrap;word-break:break-word;line-height:1.5;max-height:400px;overflow-y:auto;border-top:1px solid rgba(199,146,234,0.15)}
+
+/* Tool groups */
+.chat-tool-group{clear:both;width:90%;margin:0.35rem auto;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);overflow:hidden}
+.chat-tool-collapsed{display:none}
+.chat-tool-collapsed.chat-tool-expanded{display:block}
+.chat-tool-expand{display:block;width:100%;text-align:center;padding:0.25rem;font-size:0.7rem;color:var(--text-muted);border:none;border-top:1px solid var(--border);border-bottom:1px solid var(--border);border-radius:0;background:none;cursor:pointer}
+.chat-tool-expand:hover{background:var(--bg-hover)}
+
+/* Individual tool */
+.step-tool{border-bottom:1px solid var(--border)}
+.step-tool:last-child{border-bottom:none}
+.tool-bar{display:flex;align-items:center;gap:0.4rem;padding:0.35rem 0.65rem;cursor:pointer;user-select:none;font-size:0.75rem;transition:background 0.1s}
+.tool-bar:hover{background:var(--bg-hover)}
+.tool-icon{width:20px;height:20px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:0.6rem;font-weight:800;flex-shrink:0;font-family:var(--mono)}
+.tool-icon-bash{background:var(--green);color:#212121}
+.tool-icon-read{background:var(--accent);color:#212121}
+.tool-icon-write{background:var(--orange);color:#212121}
+.tool-icon-edit{background:var(--yellow);color:#212121}
+.tool-icon-other{background:var(--text-dim);color:var(--text)}
+.tool-name{font-weight:700;color:var(--text);font-family:var(--mono);font-size:0.7rem}
+.tool-desc{color:var(--text-muted);font-size:0.7rem;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)}
+.tool-status{font-size:0.6rem;font-weight:700;padding:0.1rem 0.35rem;border-radius:4px;text-transform:uppercase;letter-spacing:0.03em}
+.tool-status-done{color:var(--green);background:var(--green-dim)}
+.tool-status-error{color:var(--red);background:var(--red-dim)}
+.tool-detail{display:none}
+.tool-detail.open{display:block}
+.tool-input-section,.tool-output-section{padding:0.35rem 0.65rem;font-family:var(--mono);font-size:0.7rem;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:250px;overflow-y:auto}
+.tool-input-section{background:rgba(0,0,0,0.15);border-top:1px solid var(--border);color:var(--text-muted)}
+.tool-output-section{background:rgba(0,0,0,0.25);border-top:1px solid var(--border);color:var(--text-muted)}
+.tool-output-error{color:var(--red)}
+
+/* System / error / result messages */
+.system-msg{clear:both;text-align:center;padding:0.25rem 0.75rem;color:var(--yellow);font-style:italic;font-size:0.7rem;background:var(--yellow-dim);border-radius:12px;margin:0.25rem auto;max-width:fit-content}
+.error-msg{clear:both;padding:0.3rem 0.65rem;color:var(--red);font-size:0.75rem;font-family:var(--mono);white-space:pre-wrap}
+.result-block{clear:both;margin:0.5rem 0;border:1px solid var(--green);border-radius:8px;background:var(--green-dim);padding:0.6rem 0.75rem}
+.result-label{font-size:0.65rem;font-weight:700;text-transform:uppercase;color:var(--green);margin-bottom:0.25rem;letter-spacing:0.04em}
+.result-text{font-size:0.82rem;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+
+/* Markdown */
+.md-h1{font-size:1rem;font-weight:700;margin:0.5em 0 0.25em;color:var(--text);border-bottom:1px solid var(--border);padding-bottom:0.2em}
+.md-h2{font-size:0.9rem;font-weight:700;margin:0.4em 0 0.2em;color:var(--text)}
+.md-h3{font-size:0.85rem;font-weight:700;margin:0.3em 0 0.15em;color:var(--text)}
+.md-code{font-family:var(--mono);font-size:0.78em;background:rgba(0,0,0,0.3);padding:0.1em 0.35em;border-radius:4px;color:var(--red)}
+.md-codeblock{background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:6px;padding:0.5rem 0.65rem;margin:0.3em 0;font-family:var(--mono);font-size:0.75rem;line-height:1.5;overflow-x:auto;white-space:pre;color:var(--text)}
+.md-codeblock code{background:none;padding:0;color:inherit}
+.md-list{list-style:disc;padding-left:1.2em;margin:0.2em 0}
+.md-list li{margin:0.15em 0}
+
+/* Status badge */
+.status-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.65rem;font-weight:600}
+.status-badge.solved{background:var(--green-dim);color:var(--green)}
+.status-badge.failed{background:var(--red-dim);color:var(--red)}
+.status-badge.solving{background:var(--accent-dim);color:var(--accent)}
+.status-badge.pending{background:var(--border);color:var(--text-muted)}
+
+/* File viewer */
+.file-viewer{padding:16px}
+.file-viewer h3{font-size:0.85rem;color:var(--text)}
+.file-viewer pre{font-family:var(--mono);font-size:0.75rem;white-space:pre-wrap;word-break:break-word;line-height:1.5;background:rgba(0,0,0,0.35);padding:12px;border-radius:6px;border:1px solid var(--border);color:var(--text)}
+.file-viewer img{max-width:100%;border-radius:6px}
+.file-viewer .binary-note{color:var(--text-muted);font-style:italic;font-size:0.78rem}
+
+.clearfix::after{content:'';display:block;clear:both}
+</style>
+</head>
+<body>
+<div class="sidebar">
+  <h2>{{TITLE_SHORT}}</h2>
+  <div class="meta">
+    <b>Status:</b> <span class="status-badge {{STATUS}}">{{STATUS}}</span><br>
+    <b>Mode:</b> {{MODE}}<br>
+    <b>Created:</b> {{CREATED}}<br>
+    <b>Flag format:</b> <code>{{FLAG_FORMAT}}</code><br>
+    {{DETECTED_FLAGS}}
+  </div>
+  <div class="file-list" id="file-list"></div>
+</div>
+<div class="main">
+  <div class="tab-bar">
+    <button class="active" onclick="showTab('stream')">Stream</button>
+    <button onclick="showTab('files')">Files</button>
+  </div>
+  <div id="tab-stream" class="content"></div>
+  <div id="tab-files" class="content" style="display:none"></div>
+</div>
+<script>
+const DATA = {{DATA_JSON}};
+const challenge = DATA.challenge;
+const streams = DATA.streams;
+const files = DATA.files;
+
+function showTab(name) {
+  document.getElementById('tab-stream').style.display = name === 'stream' ? '' : 'none';
+  document.getElementById('tab-files').style.display = name === 'files' ? '' : 'none';
+  document.querySelectorAll('.tab-bar button').forEach((b, i) => {
+    b.classList.toggle('active', (i === 0 && name === 'stream') || (i === 1 && name === 'files'));
+  });
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function renderMarkdown(text) {
+  let h = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  h = h.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="md-codeblock"><code>$2</code></pre>');
+  h = h.replace(/`([^`\n]+)`/g, '<code class="md-code">$1</code>');
+  h = h.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  h = h.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+  h = h.replace(/^### (.+)$/gm, '<div class="md-h3">$1</div>');
+  h = h.replace(/^## (.+)$/gm, '<div class="md-h2">$1</div>');
+  h = h.replace(/^# (.+)$/gm, '<div class="md-h1">$1</div>');
+  h = h.replace(/^[*-] (.+)$/gm, '<li>$1</li>');
+  h = h.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+  h = h.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul class="md-list">$1</ul>');
+  h = h.replace(/\n\n/g, '</p><p>');
+  h = '<p>' + h + '</p>';
+  h = h.replace(/<p><\/p>/g, '');
+  h = h.replace(/<p>(<(?:pre|ul|div)[^>]*>)/g, '$1');
+  h = h.replace(/(<\/(?:pre|ul|div)>)<\/p>/g, '$1');
+  return h;
+}
+
+function truncate(s, n) { return !s ? '' : s.length > n ? s.slice(0, n) + '...' : s; }
+function shortPath(p) { if (!p) return ''; const parts = p.split('/'); return parts.length <= 3 ? p : '.../' + parts.slice(-2).join('/'); }
+
+function fmtElapsed(seconds) {
+  if (seconds == null) return '';
+  const s = Math.floor(seconds);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60), rem = s % 60;
+  if (m < 60) return m + 'm' + (rem ? ' ' + rem + 's' : '');
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}
+
+function iconClass(n) {
+  const m = {Bash:'tool-icon-bash',Read:'tool-icon-read',Write:'tool-icon-write',Edit:'tool-icon-edit'};
+  return m[n] || 'tool-icon-other';
+}
+function iconLetter(n) {
+  const m = {Bash:'$',Read:'R',Write:'W',Edit:'E',Grep:'?',Glob:'*',Agent:'A',Skill:'S'};
+  return m[n] || n.charAt(0);
+}
+function toolSummaryText(name, input) {
+  if (!input) return '';
+  switch (name) {
+    case 'Bash': return input.description || truncate(input.command || '', 60);
+    case 'Read': return shortPath(input.file_path || '');
+    case 'Write': return shortPath(input.file_path || '');
+    case 'Edit': return shortPath(input.file_path || '');
+    case 'Agent': return input.description || truncate(input.prompt || '', 60);
+    case 'Skill': return input.skill || input.skill_name || '';
+    default: return truncate(JSON.stringify(input), 60);
+  }
+}
+function toolInputDisplay(name, input) {
+  if (!input) return '';
+  switch (name) {
+    case 'Bash': return input.command || '';
+    case 'Read': return input.file_path || '';
+    case 'Write': return (input.file_path || '') + '\n---\n' + truncate(input.content || '', 2000);
+    case 'Edit': return (input.file_path || '') + '\n- ' + (input.old_string || '') + '\n+ ' + (input.new_string || '');
+    case 'Agent': return (input.description || '') + '\n' + (input.prompt || '');
+    default: return JSON.stringify(input, null, 2);
+  }
+}
+
+function renderStreams() {
+  const container = document.getElementById('tab-stream');
+  const runIds = Object.keys(streams);
+  if (runIds.length > 1) {
+    const sel = document.createElement('div');
+    sel.className = 'run-select';
+    runIds.forEach((rid, i) => {
+      const run = challenge.runs[rid];
+      const btn = document.createElement('button');
+      btn.textContent = run ? run.agent + ' (' + run.model + ')' : rid;
+      btn.className = i === 0 ? 'active' : '';
+      btn.onclick = () => {
+        sel.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        showRun(rid);
+      };
+      sel.appendChild(btn);
+    });
+    container.appendChild(sel);
+  }
+  const feed = document.createElement('div');
+  feed.id = 'stream-feed';
+  container.appendChild(feed);
+  if (runIds.length > 0) showRun(runIds[0]);
+}
+
+function showRun(runId) {
+  const feed = document.getElementById('stream-feed');
+  feed.innerHTML = '';
+  const events = streams[runId] || [];
+  const pendingTools = new Map();
+  let toolEls = [];
+
+  function flushTools() {
+    if (!toolEls.length) return;
+    const group = document.createElement('div');
+    group.className = 'chat-tool-group';
+    if (toolEls.length > 2) {
+      group.appendChild(toolEls[0]);
+      const collapsed = document.createElement('div');
+      collapsed.className = 'chat-tool-collapsed';
+      const expandBtn = document.createElement('button');
+      expandBtn.className = 'chat-tool-expand';
+      expandBtn.textContent = (toolEls.length - 2) + ' more tool call' + (toolEls.length - 2 !== 1 ? 's' : '');
+      expandBtn.onclick = () => { collapsed.classList.add('chat-tool-expanded'); expandBtn.style.display = 'none'; };
+      for (let j = 1; j < toolEls.length - 1; j++) collapsed.appendChild(toolEls[j]);
+      group.appendChild(expandBtn);
+      group.appendChild(collapsed);
+      group.appendChild(toolEls[toolEls.length - 1]);
+    } else {
+      toolEls.forEach(el => group.appendChild(el));
+    }
+    feed.appendChild(group);
+    toolEls = [];
+  }
+
+  function buildToolUse(block) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'step-tool';
+    const bar = document.createElement('div');
+    bar.className = 'tool-bar';
+    const icon = document.createElement('span');
+    icon.className = 'tool-icon ' + iconClass(block.name);
+    icon.textContent = iconLetter(block.name);
+    const nameEl = document.createElement('span');
+    nameEl.className = 'tool-name';
+    nameEl.textContent = block.name;
+    const desc = document.createElement('span');
+    desc.className = 'tool-desc';
+    desc.textContent = toolSummaryText(block.name, block.input);
+    const status = document.createElement('span');
+    status.className = 'tool-status tool-status-done';
+    status.textContent = 'done';
+    bar.append(icon, nameEl, desc, status);
+    const detail = document.createElement('div');
+    detail.className = 'tool-detail';
+    const inputText = toolInputDisplay(block.name, block.input);
+    if (inputText) {
+      const sec = document.createElement('div');
+      sec.className = 'tool-input-section';
+      sec.textContent = inputText;
+      detail.appendChild(sec);
+    }
+    const outSec = document.createElement('div');
+    outSec.className = 'tool-output-section';
+    outSec.textContent = '(no output yet)';
+    detail.appendChild(outSec);
+    bar.onclick = () => detail.classList.toggle('open');
+    wrapper.append(bar, detail);
+    wrapper._statusEl = status;
+    wrapper._outputEl = outSec;
+    return wrapper;
+  }
+
+  for (const ev of events) {
+    // System messages
+    if (ev.type === 'system') {
+      if (ev.subtype === 'init') continue;
+      flushTools();
+      if (ev.message) {
+        const div = document.createElement('div');
+        div.className = 'system-msg';
+        div.textContent = ev.message;
+        if (ev.ts != null) { const ts = document.createElement('span'); ts.className = 'msg-ts'; ts.textContent = fmtElapsed(ev.ts); div.appendChild(ts); }
+        feed.appendChild(div);
+      }
+      continue;
+    }
+
+    // Error
+    if (ev.type === 'error') {
+      flushTools();
+      const div = document.createElement('div');
+      div.className = 'error-msg';
+      div.textContent = ev.message || ev.error || JSON.stringify(ev);
+      feed.appendChild(div);
+      continue;
+    }
+
+    // User prompt / steer
+    if (ev.type === 'user_prompt' || ev.type === 'user_steer') {
+      flushTools();
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble chat-user';
+      if (ev.ts != null) { const ts = document.createElement('span'); ts.className = 'msg-ts'; ts.textContent = fmtElapsed(ev.ts); bubble.appendChild(ts); }
+      const label = document.createElement('div');
+      label.className = 'chat-label';
+      label.textContent = ev.type === 'user_steer' ? 'You' : 'Prompt';
+      const body = document.createElement('div');
+      body.className = 'chat-body';
+      body.textContent = ev.message || '';
+      bubble.append(label, body);
+      feed.appendChild(bubble);
+      continue;
+    }
+
+    // Rate limit
+    if (ev.type === 'rate_limit_event') continue;
+
+    // Result
+    if (ev.type === 'result') {
+      flushTools();
+      if (ev.result) {
+        const block = document.createElement('div');
+        block.className = 'result-block';
+        block.innerHTML = '<div class="result-label">Result</div><div class="result-text">' + renderMarkdown(ev.result) + '</div>';
+        feed.appendChild(block);
+      }
+      continue;
+    }
+
+    // Assistant message
+    if (ev.type === 'assistant' && ev.message && ev.message.content) {
+      for (const block of ev.message.content) {
+        if (block.type === 'thinking' && block.thinking) {
+          flushTools();
+          const bubble = document.createElement('div');
+          bubble.className = 'chat-bubble chat-assistant chat-thinking-bubble';
+          const details = document.createElement('details');
+          details.className = 'step-thinking';
+          const summary = document.createElement('summary');
+          const lbl = document.createElement('span');
+          lbl.className = 'thinking-label';
+          lbl.textContent = 'Thinking';
+          const preview = document.createElement('span');
+          preview.className = 'thinking-preview';
+          preview.textContent = ' ' + truncate(block.thinking, 120);
+          if (ev.ts != null) { const ts = document.createElement('span'); ts.className = 'msg-ts'; ts.textContent = fmtElapsed(ev.ts); summary.append(lbl, preview, ts); }
+          else summary.append(lbl, preview);
+          details.appendChild(summary);
+          const body = document.createElement('div');
+          body.className = 'thinking-body';
+          body.textContent = block.thinking;
+          details.appendChild(body);
+          bubble.appendChild(details);
+          feed.appendChild(bubble);
+        }
+        else if (block.type === 'text' && block.text) {
+          flushTools();
+          const bubble = document.createElement('div');
+          bubble.className = 'chat-bubble chat-assistant';
+          if (ev.ts != null) { const ts = document.createElement('span'); ts.className = 'msg-ts'; ts.textContent = fmtElapsed(ev.ts); bubble.appendChild(ts); }
+          const div = document.createElement('div');
+          div.className = 'chat-body';
+          div.innerHTML = renderMarkdown(block.text);
+          bubble.appendChild(div);
+          feed.appendChild(bubble);
+        }
+        else if (block.type === 'tool_use') {
+          const toolEl = buildToolUse(block);
+          toolEls.push(toolEl);
+          pendingTools.set(block.id, toolEl);
+        }
+      }
+      continue;
+    }
+
+    // User (tool results)
+    if (ev.type === 'user' && ev.message && ev.message.content) {
+      for (const block of ev.message.content) {
+        if (block.type !== 'tool_result') continue;
+        let toolEl = pendingTools.get(block.tool_use_id);
+        if (!toolEl) continue;
+        let output = '';
+        if (ev.tool_use_result && ev.tool_use_result.content) {
+          output = ev.tool_use_result.content.map(c => c.text || '').filter(Boolean).join('\n');
+        }
+        if (!output && ev.tool_use_result) {
+          const r = ev.tool_use_result;
+          if (r.stdout) output = r.stdout;
+          if (r.stderr) output += (output ? '\n' : '') + r.stderr;
+        }
+        if (!output && typeof block.content === 'string') output = block.content;
+        if (!output && Array.isArray(block.content))
+          output = block.content.map(c => c.text || JSON.stringify(c)).join('\n');
+        const isError = block.is_error === true;
+        toolEl._statusEl.className = 'tool-status ' + (isError ? 'tool-status-error' : 'tool-status-done');
+        toolEl._statusEl.textContent = isError ? 'error' : 'done';
+        toolEl._outputEl.textContent = output || '(no output)';
+        if (isError) toolEl._outputEl.classList.add('tool-output-error');
+        pendingTools.delete(block.tool_use_id);
+      }
+      continue;
+    }
+  }
+  flushTools();
+}
+
+function renderFileList() {
+  const list = document.getElementById('file-list');
+  list.innerHTML = '';
+  if (!files || Object.keys(files).length === 0) {
+    list.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:0.72rem">No challenge files</div>';
+    return;
+  }
+  Object.keys(files).sort().forEach(name => {
+    const div = document.createElement('div');
+    div.className = 'file';
+    div.textContent = name;
+    div.title = name;
+    div.onclick = () => {
+      list.querySelectorAll('.file').forEach(f => f.classList.remove('active'));
+      div.classList.add('active');
+      showFile(name);
+    };
+    list.appendChild(div);
+  });
+}
+
+function showFile(name) {
+  showTab('files');
+  const container = document.getElementById('tab-files');
+  container.innerHTML = '';
+  const entry = files[name];
+  const wrapper = document.createElement('div');
+  wrapper.className = 'file-viewer';
+  const heading = document.createElement('h3');
+  heading.textContent = name;
+  heading.style.marginBottom = '12px';
+  wrapper.appendChild(heading);
+  if (entry.encoding === 'base64') {
+    if (entry.mime && entry.mime.startsWith('image/')) {
+      const img = document.createElement('img');
+      img.src = 'data:' + entry.mime + ';base64,' + entry.data;
+      wrapper.appendChild(img);
+    } else {
+      const note = document.createElement('div');
+      note.className = 'binary-note';
+      note.textContent = 'Binary file (' + (entry.size || '?') + ' bytes). Download from the zip to inspect.';
+      wrapper.appendChild(note);
+    }
+  } else {
+    const pre = document.createElement('pre');
+    pre.textContent = entry.data;
+    wrapper.appendChild(pre);
+  }
+  container.appendChild(wrapper);
+}
+
+renderStreams();
+renderFileList();
+</script>
+</body>
+</html>"""
+
+
+def _export_challenge_to_zip(
+    zf: zipfile.ZipFile, challenge: dict, prefix: str,
+) -> None:
+    """Write a single challenge's data + viewer into an open ZipFile."""
+    from html import escape as _esc
+
+    challenge_id = challenge["id"]
+    meta = {
+        "id": challenge_id,
+        "name": challenge["name"],
+        "description": challenge["description"],
+        "category": challenge.get("category", ""),
+        "flag_format": challenge["flag_format"],
+        "mode": challenge["mode"],
+        "status": challenge["status"],
+        "created_at": challenge["created_at"],
+        "detected_flags": challenge.get("detected_flags", {}),
+        "runs": {},
+    }
+    for run_id, run in challenge["runs"].items():
+        meta["runs"][run_id] = {
+            "id": run["id"],
+            "agent": run["agent"],
+            "model": run["model"],
+            "effort": run.get("effort", ""),
+            "status": run["status"],
+            "duration_ms": run.get("duration_ms"),
+            "notes_label": run.get("notes_label", ""),
+        }
+
+    zf.writestr(f"{prefix}/challenge.json", json.dumps(meta, indent=2))
+
+    stream_data: dict[str, list[dict]] = {}
+    for run_id in challenge["runs"]:
+        events = load_output_log(challenge_id, run_id)
+        stream_data[run_id] = events
+        jsonl = "\n".join(json.dumps(ev) for ev in events)
+        zf.writestr(f"{prefix}/streams/{run_id}.jsonl", jsonl)
+
+    file_entries: dict[str, dict] = {}
+    files_dir = CHALLENGES_DIR / challenge_id / "_files"
+    if files_dir.is_dir():
+        for p in sorted(files_dir.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = str(p.relative_to(files_dir))
+            data = p.read_bytes()
+            zf.writestr(f"{prefix}/files/{rel}", data)
+            ftype = classify_file(p)
+            if ftype == "image":
+                mime = mimetypes.guess_type(str(p))[0] or "image/png"
+                file_entries[rel] = {
+                    "encoding": "base64",
+                    "mime": mime,
+                    "data": base64.b64encode(data).decode("ascii"),
+                    "size": len(data),
+                }
+            elif ftype == "text":
+                try:
+                    text = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = data.decode("utf-8", errors="replace")
+                file_entries[rel] = {"encoding": "utf-8", "data": text, "size": len(data)}
+            else:
+                file_entries[rel] = {
+                    "encoding": "base64",
+                    "mime": "application/octet-stream",
+                    "data": base64.b64encode(data[:64 * 1024]).decode("ascii"),
+                    "size": len(data),
+                }
+
+    for run_id in challenge["runs"]:
+        run_dir = CHALLENGES_DIR / challenge_id / "_runs" / run_id
+        if not run_dir.is_dir():
+            continue
+        for p in sorted(run_dir.rglob("*")):
+            if not p.is_file():
+                continue
+            if p.is_symlink():
+                continue
+            rel = str(p.relative_to(run_dir))
+            if rel.startswith("challenge_files"):
+                continue
+            data = p.read_bytes()
+            zf.writestr(f"{prefix}/run_files/{run_id}/{rel}", data)
+            ftype = classify_file(p)
+            viewer_key = f"[{run_id}] {rel}"
+            if ftype == "text":
+                try:
+                    text = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = data.decode("utf-8", errors="replace")
+                file_entries[viewer_key] = {"encoding": "utf-8", "data": text, "size": len(data)}
+
+    detected = challenge.get("detected_flags", {})
+    detected_html = ""
+    if detected:
+        parts = []
+        for flag, st in detected.items():
+            parts.append(f"<code>{_esc(flag)}</code> ({_esc(str(st))})")
+        detected_html = "<b>Flags:</b> " + ", ".join(parts)
+
+    viewer_data = {
+        "challenge": meta,
+        "streams": stream_data,
+        "files": file_entries,
+    }
+    data_json = json.dumps(viewer_data).replace("</", "<\\/")
+
+    html = _VIEWER_HTML
+    html = html.replace("{{TITLE}}", _esc(meta["name"]))
+    title_short = meta["name"][:50] + ("..." if len(meta["name"]) > 50 else "")
+    html = html.replace("{{TITLE_SHORT}}", _esc(title_short))
+    html = html.replace("{{STATUS}}", _esc(meta["status"]))
+    html = html.replace("{{MODE}}", _esc(meta["mode"]))
+    html = html.replace("{{CREATED}}", _esc(meta["created_at"][:19]))
+    html = html.replace("{{FLAG_FORMAT}}", _esc(meta["flag_format"] or "—"))
+    html = html.replace("{{DETECTED_FLAGS}}", detected_html)
+    html = html.replace("{{DATA_JSON}}", data_json)
+
+    zf.writestr(f"{prefix}/viewer.html", html)
+
+
+def _safe_challenge_prefix(challenge: dict) -> str:
+    name = re.sub(r"[^a-zA-Z0-9_\- ]", "", challenge["name"])[:80].strip()
+    return (name or challenge["id"]).replace(" ", "_")
+
+
+async def export_challenge(request: Request) -> Response:
+    if err := require_auth(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    buf = io.BytesIO()
+    prefix = _safe_challenge_prefix(challenge)
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        _export_challenge_to_zip(zf, challenge, prefix)
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{prefix}.zip"'},
+    )
+
+
+async def export_challenges_bulk(request: Request) -> Response:
+    if err := require_auth(request):
+        return err
+
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    ids = body.get("ids", [])
+    if not isinstance(ids, list) or not ids:
+        return JSONResponse({"error": "ids required"}, status_code=400)
+
+    found = []
+    for cid in ids:
+        c = challenges.get(str(cid))
+        if c:
+            found.append(c)
+    if not found:
+        return JSONResponse({"error": "no matching challenges"}, status_code=404)
+
+    buf = io.BytesIO()
+    seen_prefixes: dict[str, int] = {}
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for c in found:
+            prefix = _safe_challenge_prefix(c)
+            count = seen_prefixes.get(prefix, 0)
+            seen_prefixes[prefix] = count + 1
+            if count:
+                prefix = f"{prefix}_{count}"
+            _export_challenge_to_zip(zf, c, prefix)
+
+    filename = f"ctf_export_{len(found)}_challenges.zip"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4954,6 +5661,7 @@ routes = [
         methods=["POST"],
     ),
     Route("/api/challenges/bulk", bulk_upload, methods=["POST"]),
+    Route("/api/challenges/export", export_challenges_bulk, methods=["POST"]),
     Route("/api/challenges/{id}/solve", solve_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/stop", stop_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/broadcast", broadcast_to_agents, methods=["POST"]),
@@ -4964,6 +5672,7 @@ routes = [
     Route("/api/challenges/{id}/files", list_files, methods=["GET"]),
     Route("/api/challenges/{id}/files/{path:path}", get_file, methods=["GET"]),
     Route("/api/challenges/{id}/download/{path:path}", download_file, methods=["GET"]),
+    Route("/api/challenges/{id}/export", export_challenge, methods=["GET"]),
     WebSocketRoute("/ws/events", global_events_ws),
     WebSocketRoute("/ws/{id}/{run_id}", challenge_ws),
     Mount(

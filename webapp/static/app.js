@@ -382,6 +382,7 @@ async function loadChallenges() {
   list.querySelectorAll(".challenge-card").forEach((card) =>
     card.addEventListener("click", (e) => {
       if (e.target.closest(".btn-card-delete") || e.target.closest(".btn-card-start")) return;
+      if (exportMode) { toggleExportCard(card); return; }
       openChallenge(card.dataset.id);
     })
   );
@@ -406,8 +407,112 @@ async function loadChallenges() {
 
 // Auto-refresh dashboard every 5s
 setInterval(() => {
-  if (!views.dashboard.classList.contains("hidden")) loadChallenges();
+  if (!views.dashboard.classList.contains("hidden") && !exportMode) loadChallenges();
 }, 5000);
+
+// === Export Mode ===
+let exportMode = false;
+const exportSelected = new Set();
+
+function enterExportMode() {
+  exportMode = true;
+  exportSelected.clear();
+  $("#challenges-list").classList.add("export-mode");
+  $("#export-bar").classList.remove("hidden");
+  $("#btn-export-mode").textContent = "Cancel Export";
+  updateExportCount();
+}
+
+function exitExportMode() {
+  exportMode = false;
+  exportSelected.clear();
+  $("#challenges-list").classList.remove("export-mode");
+  $("#export-bar").classList.add("hidden");
+  $("#btn-export-mode").textContent = "Export";
+  document.querySelectorAll(".challenge-card.export-selected").forEach(
+    (c) => c.classList.remove("export-selected")
+  );
+}
+
+function updateExportCount() {
+  const n = exportSelected.size;
+  $("#export-count").textContent = `${n} selected`;
+  $("#btn-export-download").disabled = n === 0;
+}
+
+function toggleExportCard(card) {
+  const id = card.dataset.id;
+  if (exportSelected.has(id)) {
+    exportSelected.delete(id);
+    card.classList.remove("export-selected");
+  } else {
+    exportSelected.add(id);
+    card.classList.add("export-selected");
+  }
+  updateExportCount();
+}
+
+$("#btn-export-mode").addEventListener("click", () => {
+  if (exportMode) exitExportMode();
+  else enterExportMode();
+});
+
+$("#btn-export-cancel").addEventListener("click", () => exitExportMode());
+
+$("#btn-export-select-all").addEventListener("click", () => {
+  const cards = $("#challenges-list").querySelectorAll(".challenge-card");
+  const allSelected = exportSelected.size === cards.length && cards.length > 0;
+  if (allSelected) {
+    exportSelected.clear();
+    cards.forEach((c) => c.classList.remove("export-selected"));
+    $("#btn-export-select-all").textContent = "Select All";
+  } else {
+    cards.forEach((c) => {
+      exportSelected.add(c.dataset.id);
+      c.classList.add("export-selected");
+    });
+    $("#btn-export-select-all").textContent = "Deselect All";
+  }
+  updateExportCount();
+});
+
+$("#btn-export-download").addEventListener("click", async () => {
+  if (!exportSelected.size) return;
+  const ids = [...exportSelected];
+  showToast(`Exporting ${ids.length} challenge${ids.length > 1 ? "s" : ""}...`);
+  try {
+    if (ids.length === 1) {
+      const resp = await fetch(`/api/challenges/${ids[0]}/export`, { credentials: "same-origin" });
+      if (!resp.ok) { showToast("Export failed"); return; }
+      const blob = await resp.blob();
+      const cd = resp.headers.get("content-disposition") || "";
+      const m = cd.match(/filename="([^"]+)"/);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = m ? m[1] : "export.zip";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } else {
+      const resp = await api("/api/challenges/export", {
+        method: "POST",
+        body: JSON.stringify({ ids }),
+      });
+      if (!resp || !resp.ok) { showToast("Export failed"); return; }
+      const blob = await resp.blob();
+      const cd = resp.headers.get("content-disposition") || "";
+      const m = cd.match(/filename="([^"]+)"/);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = m ? m[1] : "ctf_export.zip";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+    showToast("Export downloaded");
+    exitExportMode();
+  } catch (e) {
+    showToast("Export failed: " + e.message);
+  }
+});
 
 // === Agent list for New Challenge ===
 $("#btn-add-challenge-agent").addEventListener("click", () => {
@@ -2634,50 +2739,31 @@ $("#btn-toggle-tools").addEventListener("click", () => {
 });
 
 // === Export Report ===
-$("#btn-export").addEventListener("click", () => {
-  const feed = getActiveFeed();
-  if (!feed) return;
-  const lines = [];
-  const name = $("#detail-name").textContent;
-  const status = $("#detail-status").textContent;
-  lines.push(`# ${name}`, `**Status:** ${status}`, "");
-
-  feed.querySelectorAll(".step").forEach((step) => {
-    const ts = step.querySelector(".step-timestamp");
-    const prefix = ts ? `[${ts.textContent}] ` : "";
-
-    const thinking = step.querySelector(".thinking-body");
-    if (thinking) {
-      lines.push(`${prefix}**Thinking:**`, thinking.textContent, "");
+$("#btn-export").addEventListener("click", async () => {
+  if (!currentChallengeId) return;
+  showToast("Preparing export...");
+  try {
+    const resp = await fetch(`/api/challenges/${currentChallengeId}/export`, {
+      credentials: "same-origin",
+    });
+    if (!resp.ok) {
+      showToast("Export failed");
       return;
     }
-
-    const text = step.querySelector(".step-text");
-    if (text) {
-      lines.push(`${prefix}**Assistant:**`, text.textContent, "");
-      return;
-    }
-
-    const tool = step.querySelector(".tool-detail");
-    if (tool) {
-      const summary = tool.querySelector("summary");
-      lines.push(`${prefix}**Tool:** ${summary ? summary.textContent.trim() : "unknown"}`, "");
-      const output = tool.querySelector(".tool-output-section");
-      if (output) {
-        const pre = output.querySelector("pre");
-        lines.push("```", (pre || output).textContent.trim(), "```", "");
-      }
-    }
-  });
-
-  const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${name.replace(/[^a-zA-Z0-9]/g, "_")}_report.md`;
-  a.click();
-  URL.revokeObjectURL(url);
-  showToast("Report exported");
+    const blob = await resp.blob();
+    const cd = resp.headers.get("content-disposition") || "";
+    const match = cd.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : `${currentChallengeId}.zip`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast("Export downloaded");
+  } catch (e) {
+    showToast("Export failed: " + e.message);
+  }
 });
 
 // === Mobile Sidebar Toggle ===

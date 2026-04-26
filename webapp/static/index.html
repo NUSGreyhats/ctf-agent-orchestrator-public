@@ -35,6 +35,7 @@
             <div id="sync-connections"></div>
           </div>
         </div>
+        <button id="btn-export-mode" class="btn-ghost">Export</button>
         <button id="btn-usage" class="btn-ghost">Usage</button>
         <button id="btn-settings" class="btn-ghost">Settings</button>
         <button id="btn-logout" class="btn-ghost">Logout</button>
@@ -42,6 +43,12 @@
     </header>
     <div id="sync-notify-bar" class="sync-notify-bar hidden"></div>
     <div id="challenges-list"></div>
+    <div id="export-bar" class="export-bar hidden">
+      <span id="export-count">0 selected</span>
+      <button id="btn-export-select-all" class="btn-ghost btn-sm">Select All</button>
+      <button id="btn-export-download" class="btn-primary btn-sm">Download Zip</button>
+      <button id="btn-export-cancel" class="btn-ghost btn-sm">Cancel</button>
+    </div>
     <div id="empty-state" class="empty-state hidden">
       <div class="empty-icon">?</div>
       <p>No challenges yet</p>
@@ -332,7 +339,7 @@
           <span id="step-counter" class="step-counter"></span>
           <div class="panel-header-actions">
             <button id="btn-toggle-tools" class="btn-ghost btn-xs" title="Expand/collapse all tools">Expand all</button>
-            <button id="btn-export" class="btn-ghost btn-xs" title="Export as markdown">Export</button>
+            <button id="btn-export" class="btn-ghost btn-xs" title="Export as zip (streams, files, viewer)">Export</button>
           </div>
         </div>
         <div id="run-tabs" class="agent-tabs"></div>

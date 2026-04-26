@@ -261,6 +261,35 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .empty-state { text-align: center; padding: 6rem 2rem; }
 .empty-icon { font-size: 3rem; margin-bottom: 0.75rem; opacity: 0.3; }
 
+/* === Export Selection === */
+.export-bar {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  background: var(--bg-panel); border-top: 1px solid var(--border);
+  padding: 0.6rem 1.2rem; display: flex; align-items: center; gap: 0.6rem;
+  z-index: 50; box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
+}
+.export-bar #export-count {
+  font-size: 0.78rem; font-weight: 600; color: var(--text); margin-right: auto;
+}
+.export-mode .challenge-card {
+  cursor: pointer; user-select: none;
+}
+.export-mode .challenge-card::before {
+  content: ''; display: block; width: 16px; height: 16px;
+  border: 2px solid var(--border-light); border-radius: 4px;
+  position: absolute; top: 0.5rem; left: 0.5rem;
+  background: var(--bg-input); transition: all 0.15s;
+}
+.export-mode .challenge-card.export-selected::before {
+  background: var(--accent); border-color: var(--accent);
+  box-shadow: inset 0 0 0 2px var(--bg-card);
+}
+.export-mode .challenge-card {
+  padding-left: 2rem;
+}
+.export-mode .challenge-card .btn-card-delete,
+.export-mode .challenge-card .btn-card-start { display: none; }
+
 /* === Modal === */
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.7);
