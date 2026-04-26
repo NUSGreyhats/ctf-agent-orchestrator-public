@@ -62,7 +62,7 @@ pip_install() {
 
 uv_pip_install() {
   install_uv
-  with_lock python uv pip install --system "$@"
+  with_lock python uv pip install --system --break-system-packages "$@"
 }
 
 uv_tool_install() {

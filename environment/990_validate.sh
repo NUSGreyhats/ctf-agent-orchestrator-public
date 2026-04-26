@@ -9,13 +9,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 
 failures=0
+VALIDATE_TIMEOUT_SECONDS="${VALIDATE_TIMEOUT_SECONDS:-60}"
+
+with_validation_timeout() {
+  timeout "${VALIDATE_TIMEOUT_SECONDS}s" "$@"
+}
 
 check_cmd() {
   local name="$1"
   shift || true
   if have_cmd "$name"; then
     if [ "$#" -gt 0 ]; then
-      "$@" >/dev/null 2>&1 || warn "$name exists but validation command failed: $*"
+      with_validation_timeout "$@" >/dev/null 2>&1 || warn "$name exists but validation command failed or timed out after ${VALIDATE_TIMEOUT_SECONDS}s: $*"
     fi
     log "OK command: $name"
   else
@@ -36,7 +41,7 @@ check_path() {
 
 check_py_import() {
   local module="$1"
-  if python3 -c "import ${module}" >/dev/null 2>&1; then
+  if with_validation_timeout python3 -c "import ${module}" >/dev/null 2>&1; then
     log "OK python import: $module"
   else
     warn "Missing python import: $module"

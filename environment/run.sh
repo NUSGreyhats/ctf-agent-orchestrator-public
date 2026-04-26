@@ -43,14 +43,14 @@ run_one() {
     local elapsed=$((SECONDS - script_start))
     log "Completed $name in $(format_duration "$elapsed")"
     return 0
+  else
+    local status=$?
+    local elapsed=$((SECONDS - script_start))
+    warn "Failed $name after $(format_duration "$elapsed") (exit $status)"
+    warn "Last 80 log lines from $log_file:"
+    tail -n 80 "$log_file" >&2 || true
+    return "$status"
   fi
-
-  local status=$?
-  local elapsed=$((SECONDS - script_start))
-  warn "Failed $name after $(format_duration "$elapsed") (exit $status)"
-  warn "Last 80 log lines from $log_file:"
-  tail -n 80 "$log_file" >&2 || true
-  return "$status"
 }
 
 run_sequential() {
