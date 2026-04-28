@@ -277,7 +277,7 @@ def _discover_models() -> tuple[tuple[str, str], ...]:
 
     if len(models) <= 1:
         for slug in (
-            "gpt-5.4", "gpt-5.4-mini",
+            "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
             "gpt-5.3-codex", "gpt-5.3-codex-spark",
             "gpt-5.2",
         ):
