@@ -18,6 +18,7 @@ provider "digitalocean" {
 locals {
   repo_root      = abspath("${path.module}/../..")
   ssh_public_key = file(pathexpand(var.ssh_public_key_path))
+  ssh_key_name   = "${var.instance_name}-ssh-${substr(md5(trimspace(local.ssh_public_key)), 0, 8)}"
 
   environment_files = sort(fileset(local.repo_root, "environment/**"))
   hook_files        = sort(fileset(local.repo_root, "hooks/**"))
@@ -46,32 +47,27 @@ locals {
   ]))
 }
 
-# Compute the MD5 fingerprint of the SSH public key locally.
-# DigitalOcean accepts fingerprints for keys already on the account,
-# so this works regardless of whether the key was previously uploaded.
 resource "null_resource" "ssh_key_upload" {
   triggers = {
     public_key = md5(trimspace(local.ssh_public_key))
   }
 
   provisioner "local-exec" {
-    command = <<-EOT
+    interpreter = ["bash", "-c"]
+    command     = <<-EOT
       curl -s -X POST \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${var.do_token}" \
-        -d '{"name":"${var.instance_name}-ssh","public_key":"${trimspace(local.ssh_public_key)}"}' \
+        -d '${jsonencode({ name = local.ssh_key_name, public_key = trimspace(local.ssh_public_key) })}' \
         "https://api.digitalocean.com/v2/account/keys" \
         -o /dev/null -w "%%{http_code}" | grep -qE "^(201|422)$"
     EOT
   }
 }
 
-data "external" "ssh_fingerprint" {
-  program = ["bash", "-c", <<-EOT
-    FP=$(ssh-keygen -lf "${pathexpand(var.ssh_public_key_path)}" -E md5 2>/dev/null | awk '{print $2}' | sed 's/MD5://')
-    echo "{\"fingerprint\": \"$FP\"}"
-  EOT
-  ]
+data "digitalocean_ssh_key" "ctf" {
+  depends_on = [null_resource.ssh_key_upload]
+  name       = local.ssh_key_name
 }
 
 resource "digitalocean_droplet" "ctf" {
@@ -80,7 +76,7 @@ resource "digitalocean_droplet" "ctf" {
   region     = var.region
   size       = var.droplet_size
   image      = var.droplet_image
-  ssh_keys   = [data.external.ssh_fingerprint.result.fingerprint]
+  ssh_keys   = [data.digitalocean_ssh_key.ctf.fingerprint]
   user_data  = file("${path.module}/startup.sh")
 }
 
