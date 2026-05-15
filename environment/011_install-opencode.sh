@@ -10,7 +10,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 npm_install_global opencode-ai@latest
 opencode --version
 
-# Register local GDB/IDA MCP servers for OpenCode in global config.
+# Register local GDB MCP server for OpenCode in global config.
 python3 - <<'PY'
 import json
 from pathlib import Path
@@ -45,12 +45,7 @@ mcp["gdb"] = {
     "command": ["python3", "/root/ctf-agent-wrapper/mcps/gdb_mcp.py"],
     "enabled": True,
 }
-mcp["ida"] = {
-    "type": "local",
-    "command": ["ida-mcp"],
-    "env": {"IDADIR": "/opt/ida-pro-9.3"},
-    "enabled": True,
-}
+mcp.pop("ida", None)
 
 config_path.write_text(json.dumps(config, indent=2) + "\n")
 PY

@@ -9,9 +9,9 @@ source "$SCRIPT_DIR/lib/common.sh"
 
 npm_install_global @openai/codex@latest
 
-# Register local MCP servers for Codex.
+# Register local GDB MCP server for Codex.
+# IDA Pro is exposed through the analyze-with-ida-domain-api skill, not MCP.
 codex mcp remove gdb || true
 codex mcp add gdb -- python3 /root/ctf-agent-wrapper/mcps/gdb_mcp.py
 codex mcp remove ida || true
-IDADIR=/opt/ida-pro-9.3 codex mcp add ida -- ida-mcp
 codex mcp list

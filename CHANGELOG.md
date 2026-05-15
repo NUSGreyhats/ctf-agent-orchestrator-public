@@ -2,16 +2,12 @@
 
 ## Unreleased
 
-### IDA Pro via MCP Server
+### IDA Pro via Skill
 
-Replaced the IDA Domain API skill with [ida-mcp-rs](https://github.com/blacktop/ida-mcp-rs),
-a headless IDA Pro MCP server. Agents now call IDA tools directly
-(`ida_open_idb`, `ida_list_functions`, `ida_decompile`, etc.) instead of
-writing Python scripts against the Domain API. The `ida` MCP server is
-registered for Claude, Codex, and OpenCode.
-
-The `analyze-with-ida-domain-api` skill has been removed — no skill is
-needed, agents use the MCP tools directly.
+Restored the `analyze-with-ida-domain-api` skill for headless IDA Pro
+analysis through IDA's Python Domain API. Claude, Codex, and OpenCode no
+longer register an `ida` MCP server; Claude/Codex agents load the skill
+and write focused Python analysis scripts instead.
 
 ### Per-Challenge Statistics
 

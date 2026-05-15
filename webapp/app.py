@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """CTF Challenge Solver Web App.
 
-Spawns CLI coding agents to solve CTF challenges, streaming JSONL
-output to authenticated users via WebSocket.
+Runs coding-agent integrations to solve CTF challenges, streaming
+normalized output to authenticated users via WebSocket.
 
 Supports 2 solving modes:
 - single: One run.
@@ -1092,10 +1092,18 @@ def _check_basic_auth(auth_header: str) -> bool:
 def require_auth(request: Request) -> Response | None:
     if request.session.get("authenticated"):
         return None
+
+    client_ip = request.client.host if request.client else "unknown"
+    if err := _check_rate_limit(client_ip):
+        return err
+
     auth = request.headers.get("authorization", "")
     if _check_basic_auth(auth):
+        _login_attempts.pop(client_ip, None)
         request.session["authenticated"] = True
         return None
+    if auth:
+        _login_attempts[client_ip].append(_time.monotonic())
     return Response(
         content="Unauthorized",
         status_code=401,
@@ -1198,7 +1206,8 @@ async def login(request: Request) -> JSONResponse:
     body, json_err = await read_json_object(request)
     if json_err:
         return json_err
-    if body.get("password") == APP_PASSWORD:
+    password = str_field(body.get("password", ""))
+    if secrets.compare_digest(password, APP_PASSWORD):
         _login_attempts.pop(client_ip, None)
         csrf_token = secrets.token_hex(32)
         request.session["authenticated"] = True
@@ -1210,6 +1219,10 @@ async def login(request: Request) -> JSONResponse:
 
 
 async def logout(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
     request.session.clear()
     return JSONResponse({"ok": True})
 
@@ -1746,7 +1759,7 @@ async def bulk_upload(request: Request) -> JSONResponse:
                 agent_name = entry["agent"]
                 run_id = uuid.uuid4().hex[:8]
                 run_model = entry.get("model") or model or resolved_default_model(agent_name)
-                run_effort = normalize_effort_for_agent(agent_name, effort)
+                run_effort = normalize_effort_for_agent(agent_name, entry.get("effort") or effort)
                 run = make_run(
                     run_id=run_id,
                     agent=agent_name,
@@ -3114,8 +3127,8 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
         "",
         "Key tool rules:",
         "- For ANY binary (ELF/PE): use IDA Pro for static analysis "
-        "via the ida MCP tools (ida_open_idb, ida_list_functions, ida_decompile, etc.). "
-        "Do NOT use objdump or readelf as primary analysis — IDA is installed and licensed.",
+        "(load the analyze-with-ida-domain-api skill). Do NOT use objdump "
+        "or readelf as primary analysis — IDA is installed and licensed.",
         "- For runtime debugging: use libdebug (load the libdebug-debugging skill), not raw GDB.",
         "- For kernel challenges: use GDB+GEF via MCP (load the kernel-gef-debugging skill).",
         "- Run ctfgrep first for a quick flag search across encodings.",
@@ -3685,9 +3698,13 @@ async def run_agent_task(
     else:
         prompt = build_prompt(challenge, run, instance_info)
 
-    has_session = bool(run.get("_session_state", {}).get(
-        "claude_session_id"
-    ) or run.get("_session_state", {}).get("codex_thread_id"))
+    session_state_for_prompt = run.get("_session_state", {})
+    has_session = bool(
+        session_state_for_prompt.get("claude_session_id")
+        or session_state_for_prompt.get("codex_thread_id")
+        or session_state_for_prompt.get("opencode_session_id")
+        or session_state_for_prompt.get("copilot_session_id")
+    )
 
     if continue_msg and has_session:
         sys_event = {
@@ -4296,11 +4313,24 @@ async def get_usage(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
 
+    async def _collect_provider_usage(name: str, provider) -> tuple[str, dict | None]:
+        try:
+            return name, await asyncio.to_thread(provider.get_usage_data)
+        except Exception as exc:
+            log.warning("Failed to collect %s usage data: %s", name, exc)
+            return name, {
+                "auth_rows": [{"label": "Error", "value": str(exc)}],
+                "stat_rows": [],
+                "daily_activity": [],
+                "daily_activity_title": None,
+            }
+
+    usage_pairs = await asyncio.gather(*(
+        _collect_provider_usage(name, provider)
+        for name, provider in PROVIDERS.items()
+    ))
     result = {
-        "agents": {
-            name: provider.get_usage_data()
-            for name, provider in PROVIDERS.items()
-        },
+        "agents": dict(usage_pairs),
         "challenges": get_challenge_stats(),
     }
     return JSONResponse(result)
@@ -4576,7 +4606,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             agent_name = entry["agent"]
             run_id = uuid.uuid4().hex[:8]
             run_model = entry.get("model") or model or resolved_default_model(agent_name)
-            run_effort = normalize_effort_for_agent(agent_name, effort)
+            run_effort = normalize_effort_for_agent(agent_name, entry.get("effort") or effort)
             runs[run_id] = make_run(
                 run_id=run_id,
                 agent=agent_name,

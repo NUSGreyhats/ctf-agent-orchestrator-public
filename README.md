@@ -97,7 +97,7 @@ Optional Discord bot for team coordination:
 - **Runtime allowlist deploy** — Deploys copy only runtime project files (`environment`, `webapp`, `skills`, `mcps`, `hooks`, `README.md`, `DESIGN.md`) instead of the whole repo. Local `.git/`, `infra/`, Terraform state/vars, and local caches are not copied to the VM.
 - **Runtime data preservation** — Deploy sync preserves `/root/ctf-agent-wrapper/challenges` and `/root/ctf-agent-wrapper/state` on the VM.
 - **GDB MCP server** — Persistent GDB session for kernel/binary debugging, registered for Claude, Codex, and OpenCode.
-- **IDA MCP server** — Headless IDA Pro analysis via [ida-mcp-rs](https://github.com/blacktop/ida-mcp-rs). Provides function listing, disassembly, decompilation, string extraction, and IDAPython scripting through MCP tools.
+- **IDA Pro skill** — Headless static analysis through the `analyze-with-ida-domain-api` skill, backed by IDA Pro's Python Domain API.
 - **WireGuard VPN** — Built-in VPN management for challenges that require network access to a CTF infrastructure. Configure, start/stop, and generate client configs from the web UI.
 - **uv-based Python installs** — Environment scripts install most Python dependencies with `uv pip install --system` for faster provisioning while keeping `pip` available for vendor-local wheels.
 - **Parallel environment setup** — `environment/run.sh` runs independent tooling categories concurrently with package-manager locks; set `ENVIRONMENT_PARALLEL=0` for sequential setup.
@@ -214,6 +214,6 @@ webapp/         Starlette/ASGI app for challenge management and agent streaming
   static/       Frontend (vanilla JS, CSS)
 skills/         Agent skills (methodology, forensics, tool-specific, community)
 hooks/          Agent hook/tool files, including OpenCode collaboration tool
-mcps/           MCP servers (GDB debugger, IDA Pro via ida-mcp-rs)
+mcps/           MCP servers (GDB debugger)
 state/          Runtime state on the VM: metadata, output logs, connections
 ```

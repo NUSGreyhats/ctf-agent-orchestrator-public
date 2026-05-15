@@ -10,7 +10,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 # General Python packages used by the webapp, agents, and common CTF workflows.
 uv_pip_install \
   pwntools ipython pycryptodome sympy z3-solver gmpy2 angr unicorn zizmor \
-  starlette uvicorn python-multipart itsdangerous websockets httpx \
+  starlette uvicorn python-multipart itsdangerous websockets httpx requests \
   claude-agent-sdk github-copilot-sdk opencode-sdk
 
 # Fast Python developer/security tools installed as uv-managed command-line tools.

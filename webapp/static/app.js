@@ -216,16 +216,14 @@ async function api(path, opts = {}) {
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const pw = $("#login-password").value;
-  // Try Basic Auth first (sets session cookie for future requests)
-  const basicRes = await fetch("/api/challenges", {
-    headers: { "Authorization": "Basic " + btoa("user:" + pw) },
+  const loginRes = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: pw }),
   });
-  if (basicRes.ok) {
-    const csrfRes = await fetch("/api/csrf-token");
-    if (csrfRes.ok) {
-      const data = await csrfRes.json();
-      csrfToken = data.csrf_token;
-    }
+  if (loginRes.ok) {
+    const data = await loginRes.json();
+    csrfToken = data.csrf_token;
     if (await loadAgentCatalog()) {
       showView("dashboard");
       connectGlobalWS();
@@ -233,13 +231,18 @@ $("#login-form").addEventListener("submit", async (e) => {
       loadDefaultAgent();
     }
   } else {
-    $("#login-error").textContent = "Invalid password";
+    const err = await loginRes.json().catch(() => ({}));
+    $("#login-error").textContent = err.error || "Invalid password";
     $("#login-error").classList.remove("hidden");
   }
 });
 
 $("#btn-logout").addEventListener("click", async () => {
   await api("/api/logout", { method: "POST" });
+  disconnectAllWS();
+  disconnectGlobalWS();
+  csrfToken = null;
+  currentChallengeId = null;
   showView("login");
 });
 
@@ -1204,8 +1207,16 @@ function connectGlobalWS() {
     }
   };
   globalWs.onclose = () => {
-    setTimeout(connectGlobalWS, 3000);
+    globalWs = null;
+    if (csrfToken) setTimeout(connectGlobalWS, 3000);
   };
+}
+
+function disconnectGlobalWS() {
+  if (!globalWs) return;
+  globalWs.onclose = null;
+  globalWs.close();
+  globalWs = null;
 }
 
 function updateDashboardChallengeStatus(challengeId, status) {
