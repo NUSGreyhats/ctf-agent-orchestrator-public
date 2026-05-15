@@ -186,6 +186,20 @@ class HTBCTFPlugin(CTFPlatformPlugin):
                     docker_type = ch.get("docker_instance_type") or ""
                     tags.append(f"docker:{docker_type}" if docker_type else "docker")
 
+                flag_questions = []
+                for item in ch.get("flagsInfo", []) or []:
+                    if not isinstance(item, dict):
+                        continue
+                    question = str(item.get("question") or "").strip()
+                    flag_id = item.get("flag_id")
+                    if question and flag_id is not None:
+                        flag_questions.append({
+                            "flag_id": flag_id,
+                            "identifier": item.get("identifier"),
+                            "question": question,
+                            "solved": bool(item.get("solved")),
+                        })
+
                 results.append(RemoteChallenge(
                     remote_id=str(ch_id),
                     name=ch.get("name", f"Challenge {ch_id}"),
@@ -196,6 +210,7 @@ class HTBCTFPlugin(CTFPlatformPlugin):
                     files=files,
                     solved=bool(ch.get("solved")),
                     tags=tags,
+                    flag_questions=flag_questions,
                 ))
 
             return results
@@ -276,16 +291,24 @@ class HTBCTFPlugin(CTFPlatformPlugin):
             )
 
     async def submit_flag(
-        self, config: dict, remote_id: str, flag: str
+        self, config: dict, remote_id: str, flag: str,
+        flag_id: str | int | None = None,
     ) -> SubmitResult:
         ctf_id = config.get("ctf_id", "").strip()
         if not ctf_id:
             raise ValueError("CTF Event ID is required for flag submission")
 
         async with _client(config) as client:
+            payload: dict = {
+                "flag": flag,
+                "ctf_id": int(ctf_id),
+                "challenge_id": int(remote_id),
+            }
+            if flag_id not in (None, ""):
+                payload["flag_id"] = int(flag_id)
             resp = await client.post(
                 "/api/flags/global/own",
-                json={"flag": flag, "ctf_id": int(ctf_id)},
+                json=payload,
             )
             data = resp.json()
             message = data.get("message", "")
@@ -301,8 +324,8 @@ class HTBCTFPlugin(CTFPlatformPlugin):
                     "1", "true", "ok", "success", "correct", "solved",
                 }
             else:
-                bad_terms = ("wrong", "incorrect", "invalid", "rate limit", "already")
-                good_terms = ("correct", "solved", "success", "congrat")
+                bad_terms = ("wrong", "incorrect", "invalid", "rate limit")
+                good_terms = ("correct", "solved", "success", "congrat", "already")
                 correct = (
                     resp.status_code == 200
                     and any(term in message_l for term in good_terms)

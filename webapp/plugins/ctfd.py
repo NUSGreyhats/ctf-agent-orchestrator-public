@@ -230,7 +230,8 @@ class CTFdPlugin(CTFPlatformPlugin):
                 return await read_limited_response(resp, max_bytes)
 
     async def submit_flag(
-        self, config: dict, remote_id: str, flag: str
+        self, config: dict, remote_id: str, flag: str,
+        flag_id: str | int | None = None,
     ) -> SubmitResult:
         async with await _client(config) as client:
             resp = await client.post(

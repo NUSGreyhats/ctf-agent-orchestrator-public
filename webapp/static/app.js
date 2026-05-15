@@ -3104,6 +3104,7 @@ function renderImportPreview() {
         ? `${c.files.length} file${c.files.length !== 1 ? "s" : ""}`
         : "No files";
       const solvedClass = c.solved ? "import-ch-solved" : "";
+      const questionCount = (c.flag_questions || []).length;
       html += `
       <div class="import-card ${solvedClass}" data-index="${c._idx}">
         <div class="import-card-top">
@@ -3114,6 +3115,7 @@ function renderImportPreview() {
           ${c.points ? `<span class="import-card-badge">${c.points} pts</span>` : ""}
           <span class="import-card-badge">${c.solves ?? 0} solve${c.solves !== 1 ? "s" : ""}</span>
           <span class="import-card-badge">${esc(fileLabel)}</span>
+          ${questionCount ? `<span class="import-card-badge">${questionCount} question${questionCount !== 1 ? "s" : ""}</span>` : ""}
           ${c.solved ? '<span class="badge badge-solved">solved</span>' : ""}
         </div>
         <textarea class="bulk-ch-desc" rows="2" placeholder="Description">${esc(c.description || "")}</textarea>
@@ -3179,6 +3181,7 @@ $("#btn-import-submit").addEventListener("click", async () => {
       points: ch.points || 0,
       solves: ch.solves || 0,
       tags: ch.tags || [],
+      flag_questions: ch.flag_questions || [],
       files: ch.files,
     };
   });

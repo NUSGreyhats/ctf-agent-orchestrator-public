@@ -9,6 +9,13 @@ analysis through IDA's Python Domain API. Claude, Codex, and OpenCode no
 longer register an `ida` MCP server; Claude/Codex agents load the skill
 and write focused Python analysis scripts instead.
 
+### HTB Multi-Answer Challenges
+
+HTB `flagsInfo` questions are now imported and shown in the agent prompt.
+Imported platform runs get a local `submit_answer.py` helper so agents can
+submit arbitrary question answers (by question number or `flag_id`) instead
+of relying on a fixed flag regex.
+
 ### Per-Challenge Statistics
 
 Replaced the Tools sidebar tab with a Statistics tab showing per-run and

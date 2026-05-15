@@ -221,7 +221,8 @@ class RCTFPlugin(CTFPlatformPlugin):
                 return await read_limited_response(resp, max_bytes)
 
     async def submit_flag(
-        self, config: dict, remote_id: str, flag: str
+        self, config: dict, remote_id: str, flag: str,
+        flag_id: str | int | None = None,
     ) -> SubmitResult:
         client, _ = await _client(config)
         async with client:

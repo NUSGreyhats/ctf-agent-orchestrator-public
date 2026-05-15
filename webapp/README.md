@@ -98,7 +98,7 @@ A checkbox (default on for Copilot) that appends instructions telling the agent 
 
 ### Flag Detection
 
-Automatically scans agent output for flag patterns (`flag{...}`, `CTF{...}`, `HTB{...}`, `picoCTF{...}`, and custom formats). Displays a banner with copy button when a flag is found.
+Automatically scans agent output for flag patterns (`flag{...}`, `CTF{...}`, `HTB{...}`, `picoCTF{...}`, and custom formats). Displays a banner with copy button when a flag is found. HTB multi-answer imports also list each `flagsInfo` question in the prompt and provide `submit_answer.py` so agents can check arbitrary answers.
 
 ### File Browser
 

@@ -30,6 +30,7 @@ class RemoteChallenge:
     solves: int = 0
     solved: bool = False
     tags: list[str] = field(default_factory=list)
+    flag_questions: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -164,10 +165,13 @@ class CTFPlatformPlugin:
         pass
 
     async def submit_flag(
-        self, config: dict, remote_id: str, flag: str
+        self, config: dict, remote_id: str, flag: str,
+        flag_id: str | int | None = None,
     ) -> SubmitResult:
-        """Submit a flag to the platform.
+        """Submit a flag/answer to the platform.
 
+        `flag_id` is optional platform metadata for multi-answer challenges
+        where a candidate answer must be tied to a specific question.
         Returns a SubmitResult indicating whether the flag was correct.
         """
         raise NotImplementedError

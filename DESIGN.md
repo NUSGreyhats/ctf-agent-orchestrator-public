@@ -185,6 +185,8 @@ CTFd and rCTF verify TLS by default. They expose an explicit `insecure_tls` chec
 
 HTB challenges with Docker/machine instances are started at solve time, not import time, to respect concurrent instance limits. Connection info (`url`, `host`, `port`, `connection`) is injected into the agent prompt.
 
+HTB multi-answer challenge metadata (`flagsInfo`) is preserved as `_flag_questions`. The prompt lists each question and run workspaces include `submit_answer.py`, which calls a local token-protected endpoint to submit arbitrary answers by question number or platform `flag_id`.
+
 Connections are persisted to `state/connections.json` and can be synced to fetch new challenges from already-imported platforms.
 
 ## Discord Integration

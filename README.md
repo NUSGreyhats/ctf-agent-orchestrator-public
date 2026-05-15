@@ -43,6 +43,7 @@ All four agents run through their provider integration paths. Multiple agents ca
 - **Single challenges** — Create with name, description, flag format, agent/model/effort choices, and file uploads.
 - **Bulk upload** — Upload `.zip` or `.7z` archives with one folder per challenge. Preview and edit metadata before importing.
 - **Platform import** — Fetch challenges directly from CTFd, rCTF, or Hack The Box CTF instances. Saves connections for future syncs with automatic points/solves updates. HTB challenges with on-demand instances are started automatically at solve time.
+- **Multi-answer HTB support** — HTB `flagsInfo` questions are injected into the agent prompt, and agents get a `submit_answer.py` helper for answer-checking when there is no fixed flag format.
 - **Auto-submit** — Detected flags can be automatically submitted to the connected CTF platform. Correct submissions mark the challenge solved and stop other active runs.
 - **TLS verification by default** — CTFd and rCTF verify TLS certificates by default and expose an explicit “Disable TLS certificate verification” checkbox for self-signed/local events. HTB uses normal TLS verification.
 

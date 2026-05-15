@@ -360,6 +360,7 @@ def make_run(
         "_last_stream_error": None,
         "_last_stderr_lines": [],
         "_last_unknown_events": [],
+        "_submit_token": secrets.token_urlsafe(24),
     }
 
 
@@ -446,6 +447,87 @@ def setup_run_dir(challenge_id: str, run_id: str) -> Path:
 def setup_parallel_run_dir(challenge_id: str, run_id: str) -> Path:
     """Compatibility wrapper for existing parallel-mode call sites."""
     return setup_run_dir(challenge_id, run_id)
+
+
+def ensure_run_submit_token(run: dict) -> str:
+    token = run.get("_submit_token")
+    if not token:
+        token = secrets.token_urlsafe(24)
+        run["_submit_token"] = token
+    return token
+
+
+def write_submit_answer_helper(challenge_id: str, run_id: str) -> None:
+    """Write a local helper agents can use to submit arbitrary answers."""
+    challenge = challenges.get(challenge_id)
+    if not challenge or not challenge.get("_plugin") or not challenge.get("_remote_id"):
+        return
+    run = challenge.get("runs", {}).get(run_id)
+    if not run:
+        return
+    token = ensure_run_submit_token(run)
+    run_dir = get_run_cwd(challenge_id, run)
+    scheme = "https" if TLS_ENABLED else "http"
+    helper = run_dir / "submit_answer.py"
+    helper.write_text(f'''#!/usr/bin/env python3
+"""Submit candidate answers for this platform challenge.
+
+Examples:
+  ./submit_answer.py --answer 'HTB{{...}}'
+  ./submit_answer.py --question 1 --answer 'candidate answer'
+  ./submit_answer.py --flag-id 12345 --answer 'candidate answer'
+"""
+import argparse
+import json
+import ssl
+import sys
+import urllib.error
+import urllib.request
+
+URL = {json.dumps(f"{scheme}://127.0.0.1:443/api/agent/submit-answer")}
+CHALLENGE_ID = {json.dumps(challenge_id)}
+RUN_ID = {json.dumps(run_id)}
+TOKEN = {json.dumps(token)}
+
+parser = argparse.ArgumentParser(description="Submit a candidate answer")
+parser.add_argument("--question", type=int, help="1-based question number")
+parser.add_argument("--flag-id", help="platform flag/question id")
+parser.add_argument("--answer", required=True, help="candidate answer/flag")
+args = parser.parse_args()
+
+payload = {{
+    "challenge_id": CHALLENGE_ID,
+    "run_id": RUN_ID,
+    "token": TOKEN,
+    "answer": args.answer,
+}}
+if args.question is not None:
+    payload["question"] = args.question
+if args.flag_id:
+    payload["flag_id"] = args.flag_id
+
+req = urllib.request.Request(
+    URL,
+    data=json.dumps(payload).encode(),
+    headers={{"Content-Type": "application/json"}},
+    method="POST",
+)
+ctx = ssl._create_unverified_context() if URL.startswith("https://") else None
+try:
+    with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
+        data = json.loads(resp.read().decode())
+except urllib.error.HTTPError as exc:
+    try:
+        data = json.loads(exc.read().decode())
+    except Exception:
+        data = {{"error": str(exc)}}
+    print(json.dumps(data, indent=2))
+    sys.exit(1)
+
+print(json.dumps(data, indent=2))
+sys.exit(0)
+''')
+    helper.chmod(0o700)
 
 
 def setup_parallel_cross_notes(challenge_id: str, runs: dict | None = None) -> None:
@@ -817,6 +899,7 @@ def _serialize_runs(challenge: dict) -> dict:
             "notes_label": run.get("notes_label", ""),
             "provider_state": provider_state_for_metadata(run),
             "_session_state": run.get("_session_state", {}),
+            "_submit_token": run.get("_submit_token", ""),
         }
     return serialized
 
@@ -843,6 +926,7 @@ def save_metadata(challenge: dict) -> None:
         "_points": challenge.get("_points", 0),
         "_solves": challenge.get("_solves", 0),
         "_tags": challenge.get("_tags", []),
+        "_flag_questions": challenge.get("_flag_questions", []),
         "_instance_info": challenge.get("_instance_info"),
         "_source_url": challenge.get("_source_url", ""),
         "_connection_id": challenge.get("_connection_id", ""),
@@ -979,6 +1063,7 @@ def load_challenges_from_disk() -> None:
                     if run.get("_opencode_session_id"):
                         session_state["opencode_session_id"] = run["_opencode_session_id"]
                 run["_session_state"] = session_state
+                run["_submit_token"] = run_meta.get("_submit_token", "")
                 run["output_lines"] = _normalize_output_lines(
                     load_output_log(challenge_id, run_id),
                     run_agent,
@@ -1069,6 +1154,7 @@ def load_challenges_from_disk() -> None:
             "_points": meta.get("_points", 0),
             "_solves": meta.get("_solves", 0),
             "_tags": meta.get("_tags", []),
+            "_flag_questions": meta.get("_flag_questions", []),
             "_instance_info": meta.get("_instance_info"),
             "_source_url": meta.get("_source_url", ""),
             "_connection_id": meta.get("_connection_id", ""),
@@ -1352,6 +1438,7 @@ async def list_challenges(request: Request) -> JSONResponse:
             "files": c["files"],
             "points": c.get("_points", 0),
             "solves": c.get("_solves", 0),
+            "flag_questions": c.get("_flag_questions", []),
             "runs": runs_summary,
             "detected_flags": c.get("detected_flags", {}),
         })
@@ -2959,6 +3046,7 @@ def _export_challenge_to_zip(
         "status": challenge["status"],
         "created_at": challenge["created_at"],
         "detected_flags": challenge.get("detected_flags", {}),
+        "flag_questions": challenge.get("_flag_questions", []),
         "runs": {},
     }
     for run_id, run in challenge["runs"].items():
@@ -3224,7 +3312,25 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
     ])
     if challenge["description"]:
         parts.append(f"Description: {challenge['description']}")
-    if challenge["flag_format"]:
+    flag_questions = challenge.get("_flag_questions") or []
+    if flag_questions:
+        parts.extend([
+            "This is a multi-answer platform challenge. There may not be a fixed flag format.",
+            "Answer each question exactly as asked, and submit candidates with `./submit_answer.py`.",
+            "Questions:",
+        ])
+        for idx, q in enumerate(flag_questions, 1):
+            solved = " [already solved]" if q.get("solved") else ""
+            flag_id = q.get("flag_id")
+            flag_label = f" [flag_id {flag_id}]" if flag_id not in (None, "") else ""
+            parts.append(f"  {idx}.{flag_label} {q.get('question', '')}{solved}")
+        parts.extend([
+            "Submission examples:",
+            "  ./submit_answer.py --question 1 --answer 'candidate answer'",
+            "  ./submit_answer.py --flag-id <id> --answer 'candidate answer'",
+            "If an answer is incorrect, keep investigating and try another candidate.",
+        ])
+    elif challenge["flag_format"]:
         parts.append(f"Flag format: {challenge['flag_format']}")
     else:
         parts.append(
@@ -3659,6 +3765,7 @@ async def run_agent_task(
     challenge = challenges[challenge_id]
     run = challenge["runs"][run_id]
     run_cwd = get_run_cwd(challenge_id, run)
+    write_submit_answer_helper(challenge_id, run_id)
     run["solve_start"] = _time.monotonic()
     provider = get_provider(run["agent"])
 
@@ -4462,6 +4569,7 @@ async def plugin_fetch_challenges(request: Request) -> JSONResponse:
                 ],
                 "solved": c.solved,
                 "tags": c.tags,
+                "flag_questions": c.flag_questions,
             }
             for c in remote_challenges
         ])
@@ -4704,6 +4812,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "_points": ch_cfg.get("points", 0),
             "_solves": ch_cfg.get("solves", 0),
             "_tags": ch_cfg.get("tags", []),
+            "_flag_questions": ch_cfg.get("flag_questions", []),
             "_source_url": _source_url,
             "_connection_id": _conn_id,
         }
@@ -4760,6 +4869,32 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
     return JSONResponse({"created": created}, status_code=201)
 
 
+def resolve_challenge_plugin_config(challenge: dict) -> dict:
+    """Resolve saved plugin credentials for an imported challenge."""
+    _, config = _resolve_plugin_config(challenge)
+    return config
+
+
+def resolve_flag_question(
+    challenge: dict, question: int | None, flag_id: str | int | None,
+) -> tuple[dict | None, str | int | None, int | None]:
+    """Resolve a 1-based question number or platform flag_id."""
+    questions = challenge.get("_flag_questions") or []
+    if flag_id not in (None, ""):
+        flag_id_str = str(flag_id)
+        for idx, item in enumerate(questions, 1):
+            if str(item.get("flag_id")) == flag_id_str:
+                return item, item.get("flag_id"), idx
+        return None, flag_id, None
+    if question is not None:
+        idx = int(question)
+        if idx < 1 or idx > len(questions):
+            raise ValueError(f"question must be between 1 and {len(questions)}")
+        item = questions[idx - 1]
+        return item, item.get("flag_id"), idx
+    return None, None, None
+
+
 async def plugin_submit_flag(request: Request) -> JSONResponse:
     """Submit a flag to the remote platform.
 
@@ -4776,6 +4911,7 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
         return json_err
     challenge_id = str_field(body.get("challenge_id", ""))
     flag = str_field(body.get("flag", "")).strip()
+    flag_id = body.get("flag_id")
     if not flag:
         return JSONResponse({"error": "flag required"}, status_code=400)
 
@@ -4798,20 +4934,7 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
             status_code=404,
         )
 
-    # Resolve config from saved connections
-    config = {}
-    conn_id = challenge.get("_connection_id", "")
-    source_url = challenge.get("_source_url", "")
-    for conn in load_connections():
-        if conn_id and conn.get("id") == conn_id:
-            config = conn["config"]
-            break
-        if conn.get("plugin") == plugin_name and source_url:
-            conn_config = conn.get("config", {})
-            conn_src = plugin.source_url(conn_config)
-            if conn_src == source_url:
-                config = conn_config
-                break
+    config = resolve_challenge_plugin_config(challenge)
 
     if not config:
         return JSONResponse(
@@ -4821,13 +4944,34 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
         )
 
     try:
-        result = await plugin.submit_flag(config, remote_id, flag)
+        question_num = body.get("question")
+        resolved_question, resolved_flag_id, _ = resolve_flag_question(
+            challenge,
+            int(question_num) if question_num not in (None, "") else None,
+            flag_id,
+        )
+        has_questions = bool(challenge.get("_flag_questions"))
+        if has_questions and resolved_question is None and resolved_flag_id is None:
+            raise ValueError(
+                "question or flag_id is required for multi-answer challenges"
+            )
+        result = await plugin.submit_flag(
+            config, remote_id, flag, flag_id=resolved_flag_id,
+        )
 
         # Persist flag result
         detected = challenge.setdefault("detected_flags", {})
-        detected[flag] = "correct" if result.correct else "wrong"
+        detected_key = f"{resolved_flag_id}:{flag}" if resolved_flag_id else flag
+        detected[detected_key] = "correct" if result.correct else "wrong"
 
-        if result.correct:
+        if result.correct and resolved_question is not None:
+            resolved_question["solved"] = True
+
+        all_questions_solved = has_questions and all(
+            q.get("solved") for q in challenge.get("_flag_questions", [])
+        )
+
+        if result.correct and (not has_questions or all_questions_solved):
             _, solved_run = await apply_solved_status(
                 challenge_id,
                 challenge,
@@ -4852,6 +4996,122 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": str(exc)}, status_code=400
         )
+
+
+async def agent_submit_answer(request: Request) -> JSONResponse:
+    """Local token-protected endpoint for run workspace submit_answer.py."""
+    client_host = request.client.host if request.client else ""
+    if client_host not in {"127.0.0.1", "::1"}:
+        return JSONResponse({"error": "local submissions only"}, status_code=403)
+
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+
+    challenge_id = str_field(body.get("challenge_id", ""))
+    run_id = str_field(body.get("run_id", ""))
+    token = str_field(body.get("token", ""))
+    answer = str_field(body.get("answer", "")).strip()
+    if not answer:
+        return JSONResponse({"error": "answer required"}, status_code=400)
+
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    run = challenge.get("runs", {}).get(run_id)
+    if not run:
+        return JSONResponse({"error": "run not found"}, status_code=404)
+    expected_token = ensure_run_submit_token(run)
+    if not token or not secrets.compare_digest(token, expected_token):
+        return JSONResponse({"error": "invalid submission token"}, status_code=403)
+
+    plugin_name = challenge.get("_plugin")
+    remote_id = challenge.get("_remote_id")
+    if not plugin_name or not remote_id:
+        return JSONResponse(
+            {"error": "Challenge was not imported from a plugin"},
+            status_code=400,
+        )
+    plugin = get_plugin(plugin_name)
+    if not plugin:
+        return JSONResponse(
+            {"error": f"Plugin {plugin_name} not found"},
+            status_code=404,
+        )
+    config = resolve_challenge_plugin_config(challenge)
+    if not config:
+        return JSONResponse(
+            {"error": "No saved connection found for this challenge."},
+            status_code=400,
+        )
+
+    try:
+        question_value = body.get("question")
+        question = int(question_value) if question_value not in (None, "") else None
+        flag_id = body.get("flag_id")
+        resolved_question, resolved_flag_id, question_idx = resolve_flag_question(
+            challenge, question, flag_id,
+        )
+        has_questions = bool(challenge.get("_flag_questions"))
+        if has_questions and resolved_question is None and resolved_flag_id is None:
+            raise ValueError(
+                "question or flag_id is required for multi-answer challenges"
+            )
+        result = await plugin.submit_flag(
+            config, remote_id, answer, flag_id=resolved_flag_id,
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    detected = challenge.setdefault("detected_flags", {})
+    detected_key = f"{resolved_flag_id}:{answer}" if resolved_flag_id else answer
+    detected[detected_key] = "correct" if result.correct else "wrong"
+
+    if result.correct and resolved_question is not None:
+        resolved_question["solved"] = True
+
+    has_questions = bool(challenge.get("_flag_questions"))
+    all_questions_solved = has_questions and all(
+        q.get("solved") for q in challenge.get("_flag_questions", [])
+    )
+
+    status_word = "correct" if result.correct else "incorrect"
+    target = f"question {question_idx}" if question_idx else "challenge"
+    if resolved_flag_id:
+        target += f" (flag_id {resolved_flag_id})"
+    submit_event = {
+        "type": "system",
+        "data": f"Submitted answer for {target}: {status_word}. {result.message}",
+        "timestamp": datetime.now().isoformat(),
+    }
+    run["output_lines"].append(submit_event)
+    append_output_event(challenge_id, run_id, submit_event)
+    await broadcast(challenge_id, run_id, submit_event)
+
+    if result.correct and (not has_questions or all_questions_solved):
+        _, solved_run = await apply_solved_status(
+            challenge_id,
+            challenge,
+            flag=answer,
+            run_id=run_id,
+            stop_reason="agent_submit_solved",
+        )
+        solved_agent = solved_run.get("agent", "") if solved_run else ""
+        await discord_notify(
+            challenge,
+            embed=make_solve_embed(challenge, answer, solved_agent),
+        )
+        await discord_mark_solved(challenge, answer, solved_agent)
+    else:
+        save_metadata(challenge)
+
+    return JSONResponse({
+        "correct": result.correct,
+        "message": result.message,
+        "question": question_idx,
+        "flag_id": resolved_flag_id,
+        "all_questions_solved": all_questions_solved,
+    })
 
 
 async def list_connections(request: Request) -> JSONResponse:
@@ -4913,10 +5173,35 @@ async def sync_connection(request: Request) -> JSONResponse:
             {"error": str(exc)}, status_code=400
         )
 
-    # Filter out already-imported challenges
-    imported_ids = _imported_remote_ids(
-        plugin_name, plugin.source_url(config)
-    )
+    # Filter out already-imported challenges, while refreshing metadata for
+    # existing imported entries (points/solves/questions can change).
+    source_url = plugin.source_url(config)
+    imported_ids = _imported_remote_ids(plugin_name, source_url)
+    updated_existing = 0
+    for rc in remote_challenges:
+        rid = str(rc.remote_id)
+        if rid not in imported_ids:
+            continue
+        for ch in challenges.values():
+            if ch.get("_plugin") != plugin_name or ch.get("_remote_id") != rid:
+                continue
+            if source_url and ch.get("_source_url", "") != source_url:
+                continue
+            changed = False
+            if rc.points and ch.get("_points") != rc.points:
+                ch["_points"] = rc.points
+                changed = True
+            if rc.solves and ch.get("_solves") != rc.solves:
+                ch["_solves"] = rc.solves
+                changed = True
+            if rc.flag_questions and ch.get("_flag_questions") != rc.flag_questions:
+                ch["_flag_questions"] = rc.flag_questions
+                changed = True
+            if changed:
+                save_metadata(ch)
+                updated_existing += 1
+            break
+
     new_challenges = [
         c for c in remote_challenges
         if str(c.remote_id) not in imported_ids
@@ -4934,6 +5219,7 @@ async def sync_connection(request: Request) -> JSONResponse:
         },
         "total": len(remote_challenges),
         "new": len(new_challenges),
+        "updated": updated_existing,
         "challenges": [
             {
                 "remote_id": c.remote_id,
@@ -4948,6 +5234,7 @@ async def sync_connection(request: Request) -> JSONResponse:
                 ],
                 "solved": c.solved,
                 "tags": c.tags,
+                "flag_questions": c.flag_questions,
             }
             for c in new_challenges
         ],
@@ -4998,6 +5285,9 @@ async def poll_connections(request: Request) -> JSONResponse:
                         changed = True
                     if rc.solves and ch.get("_solves") != rc.solves:
                         ch["_solves"] = rc.solves
+                        changed = True
+                    if rc.flag_questions and ch.get("_flag_questions") != rc.flag_questions:
+                        ch["_flag_questions"] = rc.flag_questions
                         changed = True
                     if changed:
                         save_metadata(ch)
@@ -5741,6 +6031,7 @@ routes = [
     Route("/api/plugins/fetch", plugin_fetch_challenges, methods=["POST"]),
     Route("/api/plugins/import", plugin_import_challenges, methods=["POST"]),
     Route("/api/plugins/submit-flag", plugin_submit_flag, methods=["POST"]),
+    Route("/api/agent/submit-answer", agent_submit_answer, methods=["POST"]),
     Route("/api/connections", list_connections, methods=["GET"]),
     Route("/api/connections/delete", delete_connection, methods=["POST"]),
     Route("/api/connections/sync", sync_connection, methods=["POST"]),
