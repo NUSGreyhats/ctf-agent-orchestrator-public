@@ -20,3 +20,4 @@ infra/terraform.tfvars
 .claude/
 challenges/
 state/
+token

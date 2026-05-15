@@ -110,6 +110,11 @@
               <option value="tabbed">Tabbed View</option>
             </select>
           </div>
+          <div class="form-group flex-1">
+            <label for="settings-max-platform-import-size">Max Platform Import / Challenge (GiB)</label>
+            <input type="number" id="settings-max-platform-import-size" min="0.001" step="0.001" placeholder="2">
+            <span class="checkbox-hint">Skip platform imports whose attached files exceed this total.</span>
+          </div>
         </div>
         <div class="form-group form-group-inline">
           <label class="checkbox-label">

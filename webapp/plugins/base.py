@@ -48,6 +48,51 @@ class SubmitResult:
     message: str = ""
 
 
+class RemoteFileTooLarge(ValueError):
+    """Raised when a remote challenge file exceeds the configured limit."""
+
+
+def format_bytes(num_bytes: int) -> str:
+    """Format byte counts for operator-facing messages."""
+    value = float(max(0, int(num_bytes)))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{int(num_bytes)} B"
+
+
+async def read_limited_response(resp, max_bytes: int | None = None) -> bytes:
+    """Read an httpx streaming response with an optional byte cap."""
+    resp.raise_for_status()
+    if max_bytes is not None:
+        max_bytes = max(0, int(max_bytes))
+        content_length = resp.headers.get("content-length")
+        if content_length:
+            try:
+                expected = int(content_length)
+            except ValueError:
+                expected = None
+            if expected is not None and expected > max_bytes:
+                raise RemoteFileTooLarge(
+                    f"remote file is {format_bytes(expected)}, exceeding "
+                    f"remaining limit {format_bytes(max_bytes)}"
+                )
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in resp.aiter_bytes():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if max_bytes is not None and total > max_bytes:
+            raise RemoteFileTooLarge(
+                f"download exceeded remaining limit {format_bytes(max_bytes)}"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 class CTFPlatformPlugin:
     """Base class for CTF platform integrations.
 
@@ -85,7 +130,7 @@ class CTFPlatformPlugin:
         raise NotImplementedError
 
     async def download_file(
-        self, config: dict, file: RemoteFile
+        self, config: dict, file: RemoteFile, max_bytes: int | None = None
     ) -> bytes:
         """Download a challenge file.
 

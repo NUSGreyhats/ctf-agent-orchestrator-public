@@ -14,6 +14,7 @@ import base64
 import io
 import json
 import logging
+import math
 import re
 import zipfile
 
@@ -65,10 +66,10 @@ except ImportError:
     )
 try:
     from .plugins import get_plugins, get_plugin
-    from .plugins.base import RemoteFile
+    from .plugins.base import RemoteFile, RemoteFileTooLarge, format_bytes
 except ImportError:
     from plugins import get_plugins, get_plugin  # type: ignore
-    from plugins.base import RemoteFile  # type: ignore
+    from plugins.base import RemoteFile, RemoteFileTooLarge, format_bytes  # type: ignore
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -106,6 +107,8 @@ _login_attempts: dict[str, list[float]] = defaultdict(list)
 challenges: dict[str, dict] = {}
 
 CONNECTIONS_FILE = STATE_ROOT_DIR / "connections.json"
+DEFAULT_MAX_PLATFORM_IMPORT_SIZE_GB = 2.0
+BYTES_PER_GIB = 1024 ** 3
 
 
 def load_connections() -> list[dict]:
@@ -695,6 +698,7 @@ def load_settings() -> dict:
         "enabled_agents": [],
         "agent_models": {},
         "agent_efforts": {},
+        "max_platform_import_size_gb": DEFAULT_MAX_PLATFORM_IMPORT_SIZE_GB,
         "discord_enabled": False,
         "discord_bot_token": "",
         "discord_channel_id": "",
@@ -709,7 +713,29 @@ def load_settings() -> dict:
                         defaults[k] = v
         except (json.JSONDecodeError, OSError):
             pass
+    defaults["max_platform_import_size_gb"] = normalize_platform_import_size_gb(
+        defaults.get("max_platform_import_size_gb")
+    )
     return defaults
+
+
+def normalize_platform_import_size_gb(value) -> float:
+    """Return a sane per-challenge platform import cap in GiB."""
+    try:
+        gb = float(value)
+    except (TypeError, ValueError):
+        gb = DEFAULT_MAX_PLATFORM_IMPORT_SIZE_GB
+    if not math.isfinite(gb) or gb <= 0:
+        gb = DEFAULT_MAX_PLATFORM_IMPORT_SIZE_GB
+    return round(gb, 3)
+
+
+def platform_import_limit_bytes(settings: dict | None = None) -> int:
+    settings = settings or load_settings()
+    gb = normalize_platform_import_size_gb(
+        settings.get("max_platform_import_size_gb")
+    )
+    return int(gb * BYTES_PER_GIB)
 
 
 async def discord_create_thread(challenge: dict) -> None:
@@ -4267,6 +4293,10 @@ async def update_settings(request: Request) -> JSONResponse:
                 str_field(k): str_field(v) for k, v in efforts.items()
                 if str_field(k) in VALID_AGENTS
             }
+    if "max_platform_import_size_gb" in body:
+        settings["max_platform_import_size_gb"] = normalize_platform_import_size_gb(
+            body.get("max_platform_import_size_gb")
+        )
     if "discord_enabled" in body:
         settings["discord_enabled"] = bool(body["discord_enabled"])
     if "discord_bot_token" in body:
@@ -4489,6 +4519,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                 _ident = _v[:8] + "..."
                 break
     _conn_id = f"{plugin_name}:{_source_url}:{_ident}"
+    max_import_bytes = platform_import_limit_bytes()
 
     created = []
     for ch_cfg in selected:
@@ -4508,9 +4539,12 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         if not isinstance(remote_files, list):
             remote_files = []
 
-        # Download files (preserve paths, report failures)
+        # Download files (preserve paths, report failures). Enforce a
+        # per-challenge aggregate cap to avoid unbounded platform imports.
         file_data: dict[str, bytes] = {}
         download_errors: list[str] = []
+        downloaded_bytes = 0
+        skip_reason = ""
         for rf in remote_files:
             if not isinstance(rf, dict):
                 download_errors.append("invalid file entry")
@@ -4520,11 +4554,25 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             if not raw_name or not raw_url:
                 download_errors.append("file entry missing name or url")
                 continue
+            remaining_bytes = max_import_bytes - downloaded_bytes
+            if remaining_bytes <= 0:
+                skip_reason = (
+                    f"Skipped: attached files exceed per-challenge platform "
+                    f"import limit ({format_bytes(max_import_bytes)})"
+                )
+                file_data = {}
+                break
             try:
                 data = await plugin.download_file(
                     config,
                     RemoteFile(name=raw_name, url=raw_url),
+                    max_bytes=remaining_bytes,
                 )
+                if downloaded_bytes + len(data) > max_import_bytes:
+                    raise RemoteFileTooLarge(
+                        f"downloaded {format_bytes(downloaded_bytes + len(data))}, "
+                        f"limit {format_bytes(max_import_bytes)}"
+                    )
                 safe_name = normalize_uploaded_path(
                     raw_name, parallel=(mode == "parallel")
                 )
@@ -4550,10 +4598,28 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                         f"{raw_name}: renamed to {safe_name} (path collision)"
                     )
                 file_data[safe_name] = data
+                downloaded_bytes += len(data)
+            except RemoteFileTooLarge as exc:
+                skip_reason = (
+                    f"Skipped: attached files exceed per-challenge platform "
+                    f"import limit ({format_bytes(max_import_bytes)}): "
+                    f"{raw_name}: {exc}"
+                )
+                file_data = {}
+                break
             except Exception as exc:
                 download_errors.append(
                     f"{raw_name}: {exc}"
                 )
+
+        if skip_reason:
+            created.append({
+                "id": "",
+                "name": ch_name,
+                "status": "skipped",
+                "error": skip_reason,
+            })
+            continue
 
         if not file_data and download_errors:
             created.append({

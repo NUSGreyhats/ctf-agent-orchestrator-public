@@ -133,7 +133,7 @@ Accessible via the "Usage" button in the dashboard header. Shows per-agent stats
 | POST | `/api/logout` | Clear session |
 | GET | `/api/usage` | Agent auth status and usage stats |
 | GET | `/api/settings` | Get global settings |
-| PUT | `/api/settings` | Update global settings (default agent) |
+| PUT | `/api/settings` | Update global settings (agents, theme, import size cap, Discord) |
 | GET | `/api/challenges` | List all challenges |
 | POST | `/api/challenges` | Create challenge (multipart form) |
 | POST | `/api/challenges/{id}/solve` | Retry solving |

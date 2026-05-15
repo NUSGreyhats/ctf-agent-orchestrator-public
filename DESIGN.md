@@ -284,6 +284,7 @@ Settings persist to `challenges/settings.json`.
 | `enabled_agents` | empty | Which agents appear in the agent selector; empty means default behavior |
 | `agent_models` | `{}` | Per-agent default model overrides |
 | `agent_efforts` | `{}` | Per-agent default effort overrides |
+| `max_platform_import_size_gb` | `2.0` | Per-challenge cap for platform-imported files; challenges exceeding it are skipped |
 | `discord_enabled` | `false` | Enable Discord bot integration |
 | `discord_bot_token` | empty | Discord bot token |
 | `discord_channel_id` | empty | Discord channel for challenge threads |

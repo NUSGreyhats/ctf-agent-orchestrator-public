@@ -11,6 +11,7 @@ from .base import (
     RemoteChallenge,
     RemoteFile,
     SubmitResult,
+    read_limited_response,
 )
 
 try:
@@ -222,12 +223,11 @@ class CTFdPlugin(CTFPlatformPlugin):
             return results
 
     async def download_file(
-        self, config: dict, file: RemoteFile
+        self, config: dict, file: RemoteFile, max_bytes: int | None = None
     ) -> bytes:
         async with await _client(config) as client:
-            resp = await client.get(file.url)
-            resp.raise_for_status()
-            return resp.content
+            async with client.stream("GET", file.url) as resp:
+                return await read_limited_response(resp, max_bytes)
 
     async def submit_flag(
         self, config: dict, remote_id: str, flag: str

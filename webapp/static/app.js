@@ -3213,7 +3213,8 @@ $("#btn-import-submit").addEventListener("click", async () => {
     }
     const data = await res.json();
     const entries = data.created || [];
-    const successes = entries.filter((e) => e.status !== "error");
+    const successes = entries.filter((e) => e.id && e.status !== "error" && e.status !== "skipped");
+    const skipped = entries.filter((e) => e.status === "skipped");
     const errors = entries.filter((e) => e.status === "error");
     const warnings = entries.filter((e) => e.warning);
     if (successes.length) {
@@ -3222,10 +3223,13 @@ $("#btn-import-submit").addEventListener("click", async () => {
     if (warnings.length) {
       showToast(`${warnings.length} challenge(s) imported with missing files`, "info");
     }
+    if (skipped.length) {
+      showToast(`${skipped.length} challenge(s) skipped: ${skipped[0].error}`, "info");
+    }
     if (errors.length) {
       showToast(`${errors.length} challenge(s) failed: ${errors[0].error}`, "error");
     }
-    if (!successes.length && !errors.length) {
+    if (!successes.length && !skipped.length && !errors.length) {
       showToast("No challenges imported", "info");
     }
     $("#import-overlay").classList.add("hidden");
@@ -3279,6 +3283,7 @@ $("#btn-settings").addEventListener("click", async () => {
   $("#settings-flag-format").value = s.default_flag_format || "";
   $("#settings-theme").value = s.theme || "dark";
   $("#settings-chat-view").value = s.chat_view_mode || "split";
+  $("#settings-max-platform-import-size").value = s.max_platform_import_size_gb || 2;
   $("#settings-auto-submit").checked = !!s.auto_submit_flags;
 
   // Agents
@@ -3361,6 +3366,7 @@ $("#btn-settings-save").addEventListener("click", async () => {
     default_flag_format: $("#settings-flag-format").value.trim(),
     theme: $("#settings-theme").value,
     chat_view_mode: $("#settings-chat-view").value,
+    max_platform_import_size_gb: Number($("#settings-max-platform-import-size").value || 2),
     auto_submit_flags: $("#settings-auto-submit").checked,
     enabled_agents: selectedAgents,
     agent_models: models,
