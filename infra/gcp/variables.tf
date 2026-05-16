@@ -39,6 +39,18 @@ variable "boot_disk_type" {
   default     = "pd-ssd"
 }
 
+variable "network" {
+  description = "GCP VPC network name"
+  type        = string
+  default     = "default"
+}
+
+variable "subnetwork" {
+  description = "GCP VPC subnetwork name (required for custom subnet mode networks)"
+  type        = string
+  default     = "default"
+}
+
 variable "repo_path" {
   description = "Local path to the repository root"
   type        = string

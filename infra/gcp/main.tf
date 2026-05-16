@@ -61,7 +61,8 @@ resource "google_compute_instance" "ctf" {
   }
 
   network_interface {
-    network = "default"
+    network    = var.network
+    subnetwork = var.subnetwork
 
     access_config {}
   }
@@ -76,7 +77,7 @@ resource "google_compute_instance" "ctf" {
 
 resource "google_compute_firewall" "webapp" {
   name    = "allow-${var.instance_name}-webapp"
-  network = "default"
+  network = var.network
 
   allow {
     protocol = "tcp"
@@ -89,7 +90,7 @@ resource "google_compute_firewall" "webapp" {
 
 resource "google_compute_firewall" "wireguard" {
   name    = "allow-${var.instance_name}-wireguard"
-  network = "default"
+  network = var.network
 
   allow {
     protocol = "udp"
