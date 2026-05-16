@@ -38,6 +38,7 @@ let runStats = new Map();
 let timerStart = null;
 let timerInterval = null;
 let challengeFlagFormat = "";
+let challengeFlagFormats = [];
 let lastThinkingEl = null;
 
 // === Views ===
@@ -989,6 +990,7 @@ async function openChallenge(id) {
   runToolCounts.clear();
   runStepCounts.clear();
   runStats.clear();
+  $("#manual-flag-input").value = "";
   $("#flags-list").innerHTML = "";
   $("#flags-section").classList.add("hidden");
 
@@ -1028,9 +1030,15 @@ async function openChallenge(id) {
   }
 
   $("#detail-desc").textContent = c.description || "No description";
-  $("#detail-flag-format").textContent = c.flag_format ? `Flag: ${c.flag_format}` : "";
-  $("#detail-files").textContent = c.files.length ? `Files: ${c.files.join(", ")}` : "No files";
   challengeFlagFormat = c.flag_format || "";
+  challengeFlagFormats = (c.flag_formats && c.flag_formats.length)
+    ? c.flag_formats
+    : (challengeFlagFormat ? [challengeFlagFormat] : []);
+  $("#detail-flag-format").textContent = challengeFlagFormats.length
+    ? `Flag: ${challengeFlagFormats.join(", ")}`
+    : "";
+  renderFlagFormats();
+  $("#detail-files").textContent = c.files.length ? `Files: ${c.files.join(", ")}` : "No files";
 
   const errorBanner = $("#error-banner");
   if (c.error) {
@@ -1152,6 +1160,21 @@ $("#btn-stop").addEventListener("click", async () => {
       if (["solved", "failed", "completed"].includes(data.status)) stopTimer();
     }
     openChallenge(currentChallengeId);
+  }
+});
+
+$("#btn-add-flag-format").addEventListener("click", addFlagFormatAndScan);
+$("#flag-format-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    addFlagFormatAndScan();
+  }
+});
+$("#btn-add-manual-flag").addEventListener("click", addManualFlag);
+$("#manual-flag-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    addManualFlag();
   }
 });
 
@@ -1598,6 +1621,100 @@ function copyToClipboard(text, btnEl) {
   });
 }
 
+function renderFlagFormats() {
+  const list = $("#flag-format-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!challengeFlagFormats.length) {
+    const empty = document.createElement("div");
+    empty.className = "flag-format-empty";
+    empty.textContent = "No custom formats";
+    list.appendChild(empty);
+    return;
+  }
+  for (const fmt of challengeFlagFormats) {
+    const pill = document.createElement("span");
+    pill.className = "flag-format-pill";
+    pill.textContent = fmt;
+    list.appendChild(pill);
+  }
+}
+
+async function addFlagFormatAndScan() {
+  if (!currentChallengeId) return;
+  const input = $("#flag-format-input");
+  const btn = $("#btn-add-flag-format");
+  const format = input.value.trim();
+  if (!format) return;
+
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = "Scanning...";
+  const res = await api(`/api/challenges/${currentChallengeId}/flag-formats`, {
+    method: "POST",
+    body: JSON.stringify({ format }),
+  });
+  btn.disabled = false;
+  btn.textContent = oldText;
+  if (!res) return;
+  const data = await res.json();
+  if (data.error) {
+    showToast(data.error, "error");
+    return;
+  }
+
+  input.value = "";
+  challengeFlagFormat = data.flag_format || challengeFlagFormat;
+  challengeFlagFormats = data.flag_formats || challengeFlagFormats;
+  $("#detail-flag-format").textContent = challengeFlagFormats.length
+    ? `Flag: ${challengeFlagFormats.join(", ")}`
+    : "";
+  renderFlagFormats();
+
+  const detected = data.detected || [];
+  for (const item of detected) {
+    if (!item.flag) continue;
+    showFlagBanner(item.flag);
+    if (item.status === "correct" || item.status === "wrong") {
+      setFlagStatus(item.flag, item.status);
+    }
+  }
+  const suffix = data.auto_submit && detected.length ? " and queued auto-submit" : "";
+  showToast(`Format ${data.added ? "added" : "already exists"}; ${detected.length} flag${detected.length === 1 ? "" : "s"} found${suffix}.`);
+}
+
+async function addManualFlag() {
+  if (!currentChallengeId) return;
+  const input = $("#manual-flag-input");
+  const btn = $("#btn-add-manual-flag");
+  const flag = input.value.trim();
+  if (!flag) return;
+
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = "Adding...";
+  const res = await api(`/api/challenges/${currentChallengeId}/flags`, {
+    method: "POST",
+    body: JSON.stringify({ flag }),
+  });
+  btn.disabled = false;
+  btn.textContent = oldText;
+  if (!res) return;
+  const data = await res.json();
+  if (data.error) {
+    showToast(data.error, "error");
+    return;
+  }
+
+  input.value = "";
+  const storedFlag = data.flag || flag;
+  showFlagBanner(storedFlag);
+  if (data.status === "correct" || data.status === "wrong") {
+    setFlagStatus(storedFlag, data.status);
+  }
+  showToast(data.added ? "Flag added" : "Flag already exists");
+}
+
 function makeCopyBtn(getText) {
   const btn = document.createElement("button");
   btn.className = "btn-copy";
@@ -1610,34 +1727,53 @@ function makeCopyBtn(getText) {
 }
 
 // === Flag Detection ===
+function flagLookupKey(flag) {
+  return String(flag || "").toLowerCase();
+}
+
 function checkForFlag(text) {
   const patterns = [
+    /picoCTF\{[^}]+\}/gi,
     /flag\{[^}]+\}/gi,
-    /FLAG\{[^}]+\}/g,
-    /CTF\{[^}]+\}/g,
-    /HTB\{[^}]+\}/g,
-    /picoCTF\{[^}]+\}/g,
+    /FLAG\{[^}]+\}/gi,
+    /CTF\{[^}]+\}/gi,
+    /HTB\{[^}]+\}/gi,
   ];
-  if (challengeFlagFormat) {
-    const prefix = challengeFlagFormat.replace(/\{.*/, "");
+  for (const fmt of challengeFlagFormats) {
+    const prefix = String(fmt || "").replace(/\{.*/, "").trim();
     if (prefix.length >= 2) {
       patterns.push(
         new RegExp(prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-          + "\\{[^}]+\\}", "g")
+          + "\\{[^}]+\\}", "gi")
       );
     }
   }
   for (const pat of patterns) {
-    const m = text.match(pat);
-    if (m) return m[0];
+    pat.lastIndex = 0;
+    let m;
+    while ((m = pat.exec(text)) !== null) {
+      const candidate = m[0];
+      if (challengeFlagFormats.some((fmt) => flagLookupKey(candidate) === flagLookupKey(fmt))) {
+        continue;
+      }
+      return candidate;
+    }
   }
   return null;
 }
 
 const foundFlags = new Map();
 
+function knownFlagFor(flag) {
+  const wanted = flagLookupKey(flag);
+  for (const existing of foundFlags.keys()) {
+    if (flagLookupKey(existing) === wanted) return existing;
+  }
+  return null;
+}
+
 function showFlagBanner(flag) {
-  if (foundFlags.has(flag)) return;
+  if (knownFlagFor(flag)) return;
 
   const section = $("#flags-section");
   const list = $("#flags-list");
@@ -1673,14 +1809,15 @@ function showFlagBanner(flag) {
       submitBtn.classList.add("hidden");
       return;
     }
+    const resultFlag = data.flag || flag;
     if (data.correct) {
-      setFlagStatus(flag, "correct");
+      setFlagStatus(resultFlag, "correct");
       showToast("Flag correct!", "success");
       updateStatusBadge("solved");
       updateButtons("solved");
       stopTimer();
     } else {
-      setFlagStatus(flag, "wrong");
+      setFlagStatus(resultFlag, "wrong");
       submitBtn.textContent = data.message || "Wrong";
       submitBtn.disabled = false;
       setTimeout(() => { submitBtn.textContent = "Submit"; }, 2000);
@@ -1712,9 +1849,12 @@ function showFlagBanner(flag) {
 }
 
 function setFlagStatus(flag, status) {
-  foundFlags.set(flag, status);
-  const items = document.querySelectorAll(`.flag-item[data-flag="${CSS.escape(flag)}"]`);
+  const displayFlag = knownFlagFor(flag) || flag;
+  foundFlags.set(displayFlag, status);
+  const wanted = flagLookupKey(flag);
+  const items = document.querySelectorAll(".flag-item");
   items.forEach((item) => {
+    if (flagLookupKey(item.dataset.flag) !== wanted) return;
     item.classList.remove("flag-correct", "flag-wrong");
     if (status === "correct") item.classList.add("flag-correct");
     else if (status === "wrong") item.classList.add("flag-wrong");
@@ -1872,11 +2012,16 @@ function renderRunEvent(runId, event) {
   // --- System messages ---
   if (event.type === "system") {
     if (event.subtype === "init") return;
-    if (event.subtype === "teammate_broadcast" && event.message) {
-      appendMsg(feed, event.message, "teammate-broadcast-msg", event.ts);
+    const systemMessage = event.message || event.data || "";
+    if (event.subtype === "teammate_broadcast" && systemMessage) {
+      appendMsg(feed, systemMessage, "teammate-broadcast-msg", event.ts);
+      const flag = checkForFlag(systemMessage);
+      if (flag) showFlagBanner(flag);
       scrollBottomIfActive(runId); return;
     }
-    if (event.message) appendMsg(feed, event.message, "system-msg", event.ts);
+    if (systemMessage) {
+      appendMsg(feed, systemMessage, "system-msg", event.ts);
+    }
     scrollBottomIfActive(runId); return;
   }
 

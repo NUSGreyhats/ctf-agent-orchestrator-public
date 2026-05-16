@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CTF Solver</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260418m">
+  <link rel="stylesheet" href="/static/style.css?v=20260418o">
 </head>
 <body>
   <!-- Login -->
@@ -372,7 +372,22 @@
           <div class="panel-body panel-body-compact">
             <div id="detail-desc" class="info-desc"></div>
             <div id="detail-flag-format" class="info-meta"></div>
+            <div class="flag-format-section">
+              <div class="flags-header">Flag Formats</div>
+              <div id="flag-format-list" class="flag-format-list"></div>
+              <div class="flag-format-add">
+                <input type="text" id="flag-format-input" placeholder="e.g. HTB{...}">
+                <button id="btn-add-flag-format" class="btn-ghost btn-sm">Add &amp; Scan</button>
+              </div>
+            </div>
             <div id="detail-files" class="info-meta"></div>
+            <div class="manual-flag-section">
+              <div class="flags-header">Manual Flag</div>
+              <div class="manual-flag-add">
+                <input type="text" id="manual-flag-input" placeholder="Paste a candidate flag">
+                <button id="btn-add-manual-flag" class="btn-ghost btn-sm">Add</button>
+              </div>
+            </div>
             <div id="flags-section" class="flags-section hidden">
               <div class="flags-header">Flags Found</div>
               <div id="flags-list"></div>
@@ -507,6 +522,6 @@
   </div>
 
   <div id="toast-container" class="toast-container"></div>
-  <script src="/static/app.js?v=20260418m"></script>
+  <script src="/static/app.js?v=20260418o"></script>
 </body>
 </html>

@@ -105,6 +105,7 @@ LOGIN_WINDOW_SECONDS = 300
 _login_attempts: dict[str, list[float]] = defaultdict(list)
 
 challenges: dict[str, dict] = {}
+_instance_locks: dict[str, asyncio.Lock] = {}
 
 CONNECTIONS_FILE = STATE_ROOT_DIR / "connections.json"
 DEFAULT_MAX_PLATFORM_IMPORT_SIZE_GB = 2.0
@@ -169,32 +170,149 @@ def _resolve_plugin_config(challenge: dict) -> tuple:
 VALID_MODES = {"single", "parallel"}
 
 _FLAG_PATTERNS = [
+    re.compile(r"picoCTF\{[^}]+\}", re.IGNORECASE),
     re.compile(r"flag\{[^}]+\}", re.IGNORECASE),
-    re.compile(r"FLAG\{[^}]+\}"),
-    re.compile(r"CTF\{[^}]+\}"),
-    re.compile(r"HTB\{[^}]+\}"),
-    re.compile(r"picoCTF\{[^}]+\}"),
+    re.compile(r"FLAG\{[^}]+\}", re.IGNORECASE),
+    re.compile(r"CTF\{[^}]+\}", re.IGNORECASE),
+    re.compile(r"HTB\{[^}]+\}", re.IGNORECASE),
 ]
+
+
+def normalize_flag_format(value: str) -> str:
+    """Normalize a user-provided flag format placeholder."""
+    return str(value or "").strip()
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        item = str(value or "").strip()
+        if not item:
+            continue
+        key = item.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def challenge_flag_formats(challenge: dict) -> list[str]:
+    """Return all configured flag formats for a challenge."""
+    formats = [challenge.get("flag_format", "")]
+    extra = challenge.get("extra_flag_formats", [])
+    if isinstance(extra, list):
+        formats.extend(str(item) for item in extra)
+    return _unique_strings(formats)
+
+
+def add_challenge_flag_format(challenge: dict, flag_format: str) -> tuple[bool, str]:
+    """Add a flag format to a challenge, preserving the legacy primary field."""
+    normalized = normalize_flag_format(flag_format)
+    if not normalized:
+        raise ValueError("flag format required")
+    existing = {item.casefold() for item in challenge_flag_formats(challenge)}
+    if normalized.casefold() in existing:
+        return False, normalized
+    if not str(challenge.get("flag_format", "")).strip():
+        challenge["flag_format"] = normalized
+    else:
+        extra = challenge.setdefault("extra_flag_formats", [])
+        if not isinstance(extra, list):
+            extra = []
+            challenge["extra_flag_formats"] = extra
+        extra.append(normalized)
+    return True, normalized
+
+
+def _flag_format_prefix(flag_format: str) -> str:
+    text = normalize_flag_format(flag_format)
+    return text.split("{", 1)[0].strip() if "{" in text else text
+
+
+def flag_lookup_key(flag: str) -> str:
+    """Return a case-insensitive key for comparing flag strings."""
+    return str(flag).casefold()
+
+
+def detected_flag_key(detected: dict, flag: str) -> str:
+    """Return the existing detected flag key matching flag, ignoring case."""
+    wanted = flag_lookup_key(flag)
+    for existing in detected:
+        if flag_lookup_key(existing) == wanted:
+            return existing
+    return flag
+
+
+def set_detected_flag_status(challenge: dict, flag: str, status: str) -> str:
+    """Set detected flag status using case-insensitive flag identity."""
+    detected = challenge.setdefault("detected_flags", {})
+    key = detected_flag_key(detected, flag)
+    detected[key] = status
+    return key
+
+
+def normalize_flag_for_submission(flag: str, flag_format: str | list[str] = "") -> str:
+    """Match the configured flag prefix casing before remote submission."""
+    if not flag_format or "{" not in flag:
+        return flag
+    formats = flag_format if isinstance(flag_format, list) else [flag_format]
+    flag_prefix, rest = flag.split("{", 1)
+    for item in formats:
+        if "{" not in item:
+            continue
+        format_prefix = item.split("{", 1)[0]
+        if len(format_prefix) < 2:
+            continue
+        if flag_lookup_key(flag_prefix) == flag_lookup_key(format_prefix):
+            return f"{format_prefix}{{{rest}"
+    return flag
+
+
+def flag_patterns(flag_formats: list[str] | None = None) -> list[re.Pattern]:
+    """Return default flag regexes plus regexes derived from configured formats."""
+    patterns = list(_FLAG_PATTERNS)
+    seen_prefixes = set()
+    for flag_format in flag_formats or []:
+        prefix = _flag_format_prefix(flag_format)
+        if len(prefix) >= 2:
+            key = prefix.casefold()
+            if key in seen_prefixes:
+                continue
+            seen_prefixes.add(key)
+            patterns.append(
+                re.compile(
+                    re.escape(prefix) + r"\{[^}]+\}",
+                    re.IGNORECASE,
+                )
+            )
+    return patterns
+
+
+def detect_flags(text: str, flag_formats: list[str] | None = None) -> list[str]:
+    """Return all unique flags found in text."""
+    if not text:
+        return []
+    patterns = flag_patterns(flag_formats)
+    placeholders = {item.casefold() for item in flag_formats or [] if item}
+    found: list[str] = []
+    seen = set()
+    for pat in patterns:
+        for m in pat.finditer(text):
+            candidate = m.group(0)
+            key = flag_lookup_key(candidate)
+            if key in placeholders or key in seen:
+                continue
+            seen.add(key)
+            found.append(candidate)
+    return found
 
 
 def detect_flag(text: str, flag_format: str = "") -> str | None:
     """Return the first flag found in text, or None."""
-    patterns = list(_FLAG_PATTERNS)
-    if flag_format:
-        prefix = flag_format.split("{")[0] if "{" in flag_format else flag_format
-        if len(prefix) >= 2:
-            patterns.append(
-                re.compile(
-                    re.escape(prefix) + r"\{[^}]+\}",
-                )
-            )
-    for pat in patterns:
-        for m in pat.finditer(text):
-            candidate = m.group(0)
-            if flag_format and candidate == flag_format:
-                continue
-            return candidate
-    return None
+    flags = detect_flags(text, [flag_format] if flag_format else [])
+    return flags[0] if flags else None
 
 METADATA_FILE = "challenge.json"
 OUTPUT_FILE = "output.jsonl"
@@ -287,7 +405,7 @@ async def apply_solved_status(
 
     target_run = runs[target_run_id]
     if flag:
-        challenge.setdefault("detected_flags", {})[flag] = "correct"
+        set_detected_flag_status(challenge, flag, "correct")
 
     target_run["status"] = "solved"
     target_run["error"] = None
@@ -382,6 +500,25 @@ def assign_notes_labels(runs: dict[str, dict]) -> None:
             r["notes_label"] = a
 
 
+def run_notes_filename(challenge: dict, run: dict) -> str:
+    if challenge.get("mode") == "parallel":
+        return f"WORKING_NOTES_{run.get('notes_label', run['agent'])}.md"
+    return "WORKING_NOTES.md"
+
+
+def working_notes_template(label: str) -> str:
+    return (
+        f"# Working Notes — {label}\n"
+        "## Challenge Understanding\n"
+        "## Hypotheses\n"
+        "[ ] untested  [x] failed  [>] active\n"
+        "## Key Findings\n"
+        "## Tools & Techniques Tried\n"
+        "## Dead Ends\n"
+        "## Next Steps\n"
+    )
+
+
 def get_run_cwd(challenge_id: str, run: dict) -> Path:
     """Return the working directory for a run.
 
@@ -394,6 +531,18 @@ def get_run_cwd(challenge_id: str, run: dict) -> Path:
     if run_dir.exists() or challenge["mode"] == "parallel":
         return run_dir
     return CHALLENGES_DIR / challenge_id
+
+
+def seed_working_notes(challenge_id: str, run: dict) -> Path:
+    """Create this run's expected working notes file if it is missing."""
+    challenge = challenges[challenge_id]
+    notes_path = get_run_cwd(challenge_id, run) / run_notes_filename(challenge, run)
+    notes_path.parent.mkdir(parents=True, exist_ok=True)
+    if not notes_path.exists():
+        notes_path.write_text(
+            working_notes_template(run.get("notes_label", run["agent"]))
+        )
+    return notes_path
 
 
 def setup_parallel_shared_dir(challenge_id: str) -> Path:
@@ -551,15 +700,7 @@ def setup_parallel_cross_notes(challenge_id: str, runs: dict | None = None) -> N
         label = run.get("notes_label", run["agent"])
         own_notes = run_dir / f"WORKING_NOTES_{label}.md"
         if not own_notes.exists():
-            own_notes.write_text(
-                f"# Working Notes — {label}\n"
-                "## Challenge Understanding\n"
-                "## Hypotheses\n"
-                "## Key Findings\n"
-                "## Tools & Techniques Tried\n"
-                "## Dead Ends\n"
-                "## Next Steps\n"
-            )
+            own_notes.write_text(working_notes_template(label))
 
     # Cross-link: symlink each teammate's notes into this run dir
     for rid, run in run_items:
@@ -914,6 +1055,7 @@ def save_metadata(challenge: dict) -> None:
         "description": challenge["description"],
         "category": challenge.get("category", ""),
         "flag_format": challenge["flag_format"],
+        "extra_flag_formats": challenge.get("extra_flag_formats", []),
         "mode": challenge["mode"],
         "autonomous": challenge.get("autonomous", False),
         "status": challenge["status"],
@@ -1139,6 +1281,7 @@ def load_challenges_from_disk() -> None:
             "name": meta.get("name", f"Challenge {challenge_id}"),
             "description": meta.get("description", ""),
             "flag_format": meta.get("flag_format", ""),
+            "extra_flag_formats": meta.get("extra_flag_formats", []),
             "mode": mode,
             "autonomous": meta.get("autonomous", False),
             "status": "pending",
@@ -1431,6 +1574,8 @@ async def list_challenges(request: Request) -> JSONResponse:
             "description": c["description"],
             "category": c.get("category", ""),
             "flag_format": c["flag_format"],
+            "flag_formats": challenge_flag_formats(c),
+            "extra_flag_formats": c.get("extra_flag_formats", []),
             "mode": c["mode"],
             "status": c["status"],
             "error": c.get("error"),
@@ -1567,6 +1712,7 @@ async def create_challenge(request: Request) -> JSONResponse:
         "description": description,
         "category": "",
         "flag_format": flag_format,
+        "extra_flag_formats": [],
         "mode": mode,
         "autonomous": autonomous,
         "status": "solving",
@@ -1892,6 +2038,7 @@ async def bulk_upload(request: Request) -> JSONResponse:
                 "name": ch_name,
                 "description": ch_description,
                 "flag_format": ch_flag_format,
+                "extra_flag_formats": [],
                 "mode": mode,
                 "autonomous": autonomous,
                 "status": challenge_status,
@@ -3042,6 +3189,7 @@ def _export_challenge_to_zip(
         "description": challenge["description"],
         "category": challenge.get("category", ""),
         "flag_format": challenge["flag_format"],
+        "flag_formats": challenge_flag_formats(challenge),
         "mode": challenge["mode"],
         "status": challenge["status"],
         "created_at": challenge["created_at"],
@@ -3227,11 +3375,9 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
     notes_label = run.get("notes_label", agent_name)
     is_parallel = challenge["mode"] == "parallel"
 
-    # Determine notes filename
-    if is_parallel:
-        notes_file = f"WORKING_NOTES_{notes_label}.md"
-    else:
-        notes_file = "WORKING_NOTES.md"
+    notes_file = run_notes_filename(challenge, run)
+    run_cwd = get_run_cwd(challenge["id"], run)
+    notes_path = run_cwd / notes_file
 
     parts = [
         "You are solving a CTF challenge.",
@@ -3247,7 +3393,13 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
         "- For kernel challenges: use GDB+GEF via MCP (load the kernel-gef-debugging skill).",
         "- Run ctfgrep first for a quick flag search across encodings.",
         "",
-        f"Maintain `{notes_file}` with this structure:",
+        f"Maintain this exact working notes file: `{notes_path}`",
+        f"The file name is `{notes_file}`, but always write it at the absolute "
+        "path above inside your current working directory.",
+        f"Do not create or edit `/root/{notes_file}`, `/root/WORKING_NOTES_CLAUDE.md`, "
+        "or any WORKING_NOTES file outside this run directory.",
+        "",
+        "Use this structure:",
         "```",
         f"# Working Notes — {notes_label}",
         "## Challenge Understanding",
@@ -3330,14 +3482,17 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
             "  ./submit_answer.py --flag-id <id> --answer 'candidate answer'",
             "If an answer is incorrect, keep investigating and try another candidate.",
         ])
-    elif challenge["flag_format"]:
-        parts.append(f"Flag format: {challenge['flag_format']}")
     else:
-        parts.append(
-            "No flag format specified. Look for common "
-            "formats like flag{{...}}, FLAG{{...}}, "
-            "CTF{{...}}, or ask."
-        )
+        formats = challenge_flag_formats(challenge)
+        if formats:
+            label = "Flag format" if len(formats) == 1 else "Flag formats"
+            parts.append(f"{label}: {', '.join(formats)}")
+        else:
+            parts.append(
+                "No flag format specified. Look for common "
+                "formats like flag{{...}}, FLAG{{...}}, "
+                "CTF{{...}}, or ask."
+            )
     if instance_info:
         parts.append("")
         parts.append("Remote instance connection info:")
@@ -3345,9 +3500,12 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
             parts.append(f"  URL: {instance_info['url']}")
         if instance_info.get("connection"):
             parts.append(f"  Connection: {instance_info['connection']}")
-        if instance_info.get("host") and instance_info.get("port"):
+        if instance_info.get("host"):
             parts.append(f"  Host: {instance_info['host']}")
+        if instance_info.get("port"):
             parts.append(f"  Port: {instance_info['port']}")
+        if instance_info.get("expires_at"):
+            parts.append(f"  Expires at: {instance_info['expires_at']}")
         inst_type = instance_info.get("type", "")
         if inst_type:
             parts.append(f"  Type: {inst_type}")
@@ -3412,99 +3570,115 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
 # Run agent
 # ---------------------------------------------------------------------------
 
-def _try_detect_and_submit_flag(
-    challenge_id: str, run_id: str, event: dict, challenge: dict
-) -> None:
-    """Detect flags in agent output. Broadcast to frontend and auto-submit if enabled."""
-    # Extract text from assistant message
-    msg = event.get("message", {})
-    text_parts = []
-    for block in msg.get("content", []):
-        if block.get("type") == "text" and block.get("text"):
-            text_parts.append(block["text"])
-    if not text_parts:
-        return
+def _event_flag_texts(event: dict) -> list[str]:
+    """Extract agent-visible text to scan for flags."""
+    etype = event.get("type", "")
+    if etype == "assistant":
+        msg = event.get("message", {})
+        texts = []
+        for block in msg.get("content", []):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and block.get("text"):
+                texts.append(str(block.get("text")))
+        return texts
+    if etype == "system" and event.get("subtype") == "teammate_broadcast":
+        message = event.get("message")
+        if message:
+            return [str(message)]
+    return []
 
-    full_text = "\n".join(text_parts)
-    flag = detect_flag(full_text, challenge.get("flag_format", ""))
-    if not flag:
-        return
 
+def infer_auto_submit_flag_id(challenge: dict) -> str | int | None:
+    """Infer a multi-answer flag_id only when there is no ambiguity."""
+    questions = challenge.get("_flag_questions") or []
+    if not questions:
+        return None
+    unsolved = [q for q in questions if not q.get("solved")]
+    if len(unsolved) != 1:
+        return None
+    return unsolved[0].get("flag_id")
+
+
+def _handle_detected_flag(
+    challenge_id: str, run_id: str, challenge: dict, flag: str
+) -> bool:
+    """Persist, broadcast, and optionally auto-submit a detected flag."""
     run = challenge["runs"].get(run_id)
     if not run:
-        return
+        return False
 
-    # Guard: track which flags have been seen
-    seen = run.setdefault("_flags_submitted", set())
-    if flag in seen:
-        return
-    seen.add(flag)
-
-    # Persist flag in challenge metadata
     detected = challenge.setdefault("detected_flags", {})
-    if flag not in detected:
-        detected[flag] = "pending"
+    detected_key = detected_flag_key(detected, flag)
+    current_status = detected.get(detected_key)
+    is_new = detected_key not in detected
+    if is_new:
+        detected_key = set_detected_flag_status(challenge, flag, "pending")
         save_metadata(challenge)
 
-    # Broadcast flag_found to per-run WS and global WS
-    flag_event = {
-        "type": "flag_found",
-        "flag": flag,
-        "run_id": run_id,
-        "agent": run["agent"],
-        "challenge_id": challenge_id,
-        "challenge_name": challenge.get("name", ""),
-    }
+    if is_new:
+        flag_event = {
+            "type": "flag_found",
+            "flag": detected_key,
+            "run_id": run_id,
+            "agent": run["agent"],
+            "challenge_id": challenge_id,
+            "challenge_name": challenge.get("name", ""),
+        }
 
-    async def _notify():
-        await broadcast(challenge_id, run_id, flag_event)
-        await broadcast_global(flag_event)
-        await discord_notify(
-            challenge,
-            f"**{run.get('agent', '?')}** found possible flag: `{flag}`",
-        )
-    asyncio.create_task(_notify())
+        async def _notify():
+            await broadcast(challenge_id, run_id, flag_event)
+            await broadcast_global(flag_event)
+            await discord_notify(
+                challenge,
+                f"**{run.get('agent', '?')}** found possible flag: `{detected_key}`",
+            )
+        asyncio.create_task(_notify())
 
-    # Auto-submit if enabled
     settings = load_settings()
     if not settings.get("auto_submit_flags"):
-        return
+        return is_new
+    if current_status in {"correct", "wrong"}:
+        return is_new
+
+    seen = run.setdefault("_flags_submitted", set())
+    seen_key = flag_lookup_key(detected_key)
+    if seen_key in seen:
+        return is_new
+    seen.add(seen_key)
 
     plugin_name = challenge.get("_plugin")
     remote_id = challenge.get("_remote_id")
     if not plugin_name or not remote_id:
-        return
+        return is_new
 
     plugin = get_plugin(plugin_name)
     if not plugin:
-        return
+        return is_new
 
-    # Find saved connection config
-    config = {}
-    source_url = challenge.get("_source_url", "")
-    if source_url:
-        conn_id = challenge.get("_connection_id", "")
-        for conn in load_connections():
-            if conn_id and conn.get("id") == conn_id:
-                config = conn["config"]
-                break
-            if conn.get("plugin") == plugin_name:
-                conn_config = conn.get("config", {})
-                if plugin.source_url(conn_config) == source_url:
-                    config = conn_config
-                    break
-
+    config = resolve_challenge_plugin_config(challenge)
     if not config:
-        return
+        return is_new
+
+    auto_flag_id = None
+    if challenge.get("_flag_questions"):
+        auto_flag_id = infer_auto_submit_flag_id(challenge)
+        if auto_flag_id in (None, ""):
+            return is_new
 
     async def _submit():
+        submit_flag = normalize_flag_for_submission(
+            detected_key, challenge_flag_formats(challenge)
+        )
         try:
-            result = await plugin.submit_flag(config, remote_id, flag)
+            result = await plugin.submit_flag(
+                config, remote_id, submit_flag, flag_id=auto_flag_id
+            )
             submit_event = {
                 "type": "system",
                 "subtype": "flag_submit",
                 "message": (
-                    f"Auto-submitted flag: {flag}\n"
+                    f"Auto-submitted flag: {submit_flag}\n"
                     f"Result: {'Correct!' if result.correct else result.message}"
                 ),
             }
@@ -3512,39 +3686,55 @@ def _try_detect_and_submit_flag(
             append_output_event(challenge_id, run_id, submit_event)
             await broadcast(challenge_id, run_id, submit_event)
 
-            detected = challenge.setdefault("detected_flags", {})
-            detected[flag] = "correct" if result.correct else "wrong"
+            stored_flag = set_detected_flag_status(
+                challenge, submit_flag, "correct" if result.correct else "wrong"
+            )
             save_metadata(challenge)
 
             await broadcast_global({
                 "type": "flag_result",
                 "challenge_id": challenge_id,
-                "flag": flag,
+                "flag": stored_flag,
                 "correct": result.correct,
                 "message": result.message if not result.correct else "",
             })
 
             if result.correct:
+                if auto_flag_id not in (None, ""):
+                    for item in challenge.get("_flag_questions", []):
+                        if str(item.get("flag_id")) == str(auto_flag_id):
+                            item["solved"] = True
+                            break
+                all_questions_solved = bool(challenge.get("_flag_questions")) and all(
+                    q.get("solved") for q in challenge.get("_flag_questions", [])
+                )
+                if challenge.get("_flag_questions") and not all_questions_solved:
+                    save_metadata(challenge)
+                    return
                 _, solved_run = await apply_solved_status(
                     challenge_id,
                     challenge,
-                    flag=flag,
+                    flag=submit_flag,
                     run_id=run_id,
                     stop_reason="auto_submit_solved",
                 )
-                solved_agent = solved_run.get("agent", "") if solved_run else run.get("agent", "")
+                solved_agent = (
+                    solved_run.get("agent", "")
+                    if solved_run
+                    else run.get("agent", "")
+                )
                 await discord_notify(
                     challenge,
-                    embed=make_solve_embed(challenge, flag, solved_agent),
+                    embed=make_solve_embed(challenge, submit_flag, solved_agent),
                 )
-                await discord_mark_solved(challenge, flag, solved_agent)
+                await discord_mark_solved(challenge, submit_flag, solved_agent)
             else:
                 # Allow resubmission if the same candidate reappears later
-                seen.discard(flag)
+                seen.discard(seen_key)
                 wrong_event = {
                     "type": "system",
                     "message": (
-                        f"Flag '{flag}' was incorrect: {result.message}. "
+                        f"Flag '{submit_flag}' was incorrect: {result.message}. "
                         "Keep trying."
                     ),
                 }
@@ -3552,9 +3742,19 @@ def _try_detect_and_submit_flag(
                 append_output_event(challenge_id, run_id, wrong_event)
                 await broadcast(challenge_id, run_id, wrong_event)
         except Exception:
-            seen.discard(flag)
+            seen.discard(seen_key)
 
     asyncio.create_task(_submit())
+    return is_new
+
+
+def _try_detect_and_submit_flag(
+    challenge_id: str, run_id: str, event: dict, challenge: dict
+) -> None:
+    """Detect flags in agent output. Broadcast to frontend and auto-submit if enabled."""
+    for text in _event_flag_texts(event):
+        for flag in detect_flags(text, challenge_flag_formats(challenge)):
+            _handle_detected_flag(challenge_id, run_id, challenge, flag)
 
 
 async def _run_agent_sdk_path(
@@ -3634,7 +3834,13 @@ async def _run_agent_sdk_path(
             await broadcast(challenge_id, run_id, event)
 
             # Auto-submit flag detection
-            if etype == "assistant":
+            if (
+                etype == "assistant"
+                or (
+                    etype == "system"
+                    and event.get("subtype") == "teammate_broadcast"
+                )
+            ):
                 _try_detect_and_submit_flag(
                     challenge_id, run_id, event, challenge
                 )
@@ -3756,6 +3962,175 @@ async def _run_agent_sdk_path(
         log.error("[%s/%s] Broadcast error: %s", challenge_id[:8], run_id[:8], exc)
 
 
+def _challenge_needs_remote_instance(challenge: dict) -> bool:
+    tags = [str(t).lower() for t in challenge.get("_tags", [])]
+    if any(
+        t == "docker" or t.startswith("docker:") or t in {"machine", "scenario"}
+        for t in tags
+    ):
+        return True
+    return str(challenge.get("category", "")).lower() == "fullpwn"
+
+
+def _instance_ready_message(instance_info: dict) -> str:
+    ready_msg = "Instance ready"
+    if instance_info.get("url"):
+        ready_msg += f": {instance_info['url']}"
+    elif instance_info.get("connection"):
+        ready_msg += f": {instance_info['connection']}"
+    elif instance_info.get("host"):
+        ready_msg += f": {instance_info['host']}"
+    return ready_msg
+
+
+def _instance_connection_parts(instance_info: dict) -> list[str]:
+    conn_parts = []
+    if instance_info.get("url"):
+        conn_parts.append(f"URL: {instance_info['url']}")
+    if instance_info.get("connection"):
+        conn_parts.append(f"Connection: {instance_info['connection']}")
+    if instance_info.get("host"):
+        conn_parts.append(f"Host: {instance_info['host']}")
+    if instance_info.get("port"):
+        conn_parts.append(f"Port: {instance_info['port']}")
+    return conn_parts
+
+
+async def _append_run_event(
+    challenge_id: str, run_id: str, run: dict, event: dict
+) -> None:
+    if "ts" not in event and run.get("solve_start"):
+        event["ts"] = round(_time.monotonic() - run["solve_start"], 1)
+    run["output_lines"].append(event)
+    append_output_event(challenge_id, run_id, event)
+    await broadcast(challenge_id, run_id, event)
+
+
+async def _fail_run_before_agent(
+    challenge_id: str, run_id: str, challenge: dict, run: dict, message: str
+) -> None:
+    await _append_run_event(
+        challenge_id,
+        run_id,
+        run,
+        {"type": "error", "message": message},
+    )
+    run["status"] = "failed"
+    run["error"] = message
+    if run.get("solve_start"):
+        run["duration_ms"] = int((_time.monotonic() - run["solve_start"]) * 1000)
+    challenge["status"] = derive_challenge_status(challenge)
+    save_metadata(challenge)
+    await broadcast(challenge_id, run_id, {
+        "type": "run_status",
+        "run_id": run_id,
+        "status": run["status"],
+        "error": run.get("error"),
+    })
+    await broadcast_challenge(challenge_id, {
+        "type": "challenge_status",
+        "status": challenge["status"],
+    })
+
+
+async def _ensure_remote_instance_online(
+    challenge_id: str, run_id: str, challenge: dict, run: dict
+) -> tuple[bool, dict | None]:
+    instance_info = challenge.get("_instance_info")
+    if not _challenge_needs_remote_instance(challenge):
+        return True, None
+    checked_at = float(challenge.get("_instance_info_checked_at") or 0)
+    if instance_info and _time.monotonic() - checked_at < 60:
+        return True, instance_info
+    failed_at = float(challenge.get("_instance_start_failed_at") or 0)
+    if failed_at and _time.monotonic() - failed_at < 60:
+        message = (
+            challenge.get("_instance_start_error")
+            or "Remote instance did not become ready; agent was not started."
+        )
+        await _fail_run_before_agent(challenge_id, run_id, challenge, run, message)
+        return False, None
+
+    remote_id = challenge.get("_remote_id")
+    plugin, config = _resolve_plugin_config(challenge)
+    if not remote_id or not plugin:
+        if instance_info:
+            return True, instance_info
+        await _fail_run_before_agent(
+            challenge_id,
+            run_id,
+            challenge,
+            run,
+            "Remote instance is required, but the platform connection is missing.",
+        )
+        return False, None
+
+    await _append_run_event(
+        challenge_id,
+        run_id,
+        run,
+        {"type": "system", "message": "Starting remote instance..."},
+    )
+
+    lock = _instance_locks.setdefault(challenge_id, asyncio.Lock())
+    start_error = ""
+    async with lock:
+        instance_info = challenge.get("_instance_info")
+        checked_at = float(challenge.get("_instance_info_checked_at") or 0)
+        if instance_info and _time.monotonic() - checked_at < 60:
+            pass
+        else:
+            failed_at = float(challenge.get("_instance_start_failed_at") or 0)
+            if failed_at and _time.monotonic() - failed_at < 60:
+                start_error = (
+                    challenge.get("_instance_start_error")
+                    or "Remote instance did not become ready; agent was not started."
+                )
+            else:
+                challenge.pop("_instance_info", None)
+                try:
+                    instance_info = await plugin.start_instance(config, remote_id)
+                except Exception as exc:
+                    start_error = str(exc) or exc.__class__.__name__
+                    log.error("Failed to start instance for %s: %s", remote_id, exc)
+                if instance_info:
+                    challenge["_instance_info"] = instance_info
+                    challenge["_instance_info_checked_at"] = _time.monotonic()
+                    challenge.pop("_instance_start_failed_at", None)
+                    challenge.pop("_instance_start_error", None)
+                    save_metadata(challenge)
+                else:
+                    failure_message = (
+                        f"Remote instance did not become ready: {start_error}"
+                        if start_error
+                        else "Remote instance did not become ready; agent was not started."
+                    )
+                    challenge["_instance_start_failed_at"] = _time.monotonic()
+                    challenge["_instance_start_error"] = failure_message
+                    save_metadata(challenge)
+
+    instance_info = challenge.get("_instance_info")
+    if instance_info:
+        await _append_run_event(
+            challenge_id,
+            run_id,
+            run,
+            {"type": "system", "message": _instance_ready_message(instance_info)},
+        )
+        return True, instance_info
+
+    message = (
+        challenge.get("_instance_start_error")
+        or (
+            f"Remote instance did not become ready: {start_error}"
+            if start_error
+            else "Remote instance did not become ready; agent was not started."
+        )
+    )
+    await _fail_run_before_agent(challenge_id, run_id, challenge, run, message)
+    return False, None
+
+
 async def run_agent_task(
     challenge_id: str,
     run_id: str,
@@ -3765,67 +4140,23 @@ async def run_agent_task(
     challenge = challenges[challenge_id]
     run = challenge["runs"][run_id]
     run_cwd = get_run_cwd(challenge_id, run)
+    seed_working_notes(challenge_id, run)
     write_submit_answer_helper(challenge_id, run_id)
     run["solve_start"] = _time.monotonic()
     provider = get_provider(run["agent"])
 
-    # Start remote instance if needed (docker/machine challenges)
-    instance_info = challenge.get("_instance_info")
-    if not instance_info and not continue_msg:
-        tags = challenge.get("_tags", [])
-        needs_instance = any(
-            t == "docker" or t.startswith("docker:") or t == "machine"
-            for t in tags
-        )
-        if needs_instance:
-            remote_id = challenge.get("_remote_id")
-            if remote_id:
-                plugin, config = _resolve_plugin_config(challenge)
-                if plugin:
-                    sys_event_inst = {
-                        "type": "system",
-                        "message": "Starting remote instance...",
-                    }
-                    run["output_lines"].append(sys_event_inst)
-                    append_output_event(challenge_id, run_id, sys_event_inst)
-                    await broadcast(challenge_id, run_id, sys_event_inst)
-                    try:
-                        instance_info = await plugin.start_instance(config, remote_id)
-                        if instance_info:
-                            challenge["_instance_info"] = instance_info
-                            save_metadata(challenge)
-                            ready_msg = "Instance ready"
-                            if instance_info.get("url"):
-                                ready_msg += f": {instance_info['url']}"
-                            elif instance_info.get("connection"):
-                                ready_msg += f": {instance_info['connection']}"
-                            sys_event_ready = {
-                                "type": "system",
-                                "message": ready_msg,
-                            }
-                            run["output_lines"].append(sys_event_ready)
-                            append_output_event(challenge_id, run_id, sys_event_ready)
-                            await broadcast(challenge_id, run_id, sys_event_ready)
-                        else:
-                            log.warning("Instance start returned None for %s", remote_id)
-                    except Exception as exc:
-                        log.error("Failed to start instance for %s: %s", remote_id, exc)
-                        sys_event_fail = {
-                            "type": "system",
-                            "message": f"Warning: failed to start instance: {exc}",
-                        }
-                        run["output_lines"].append(sys_event_fail)
-                        append_output_event(challenge_id, run_id, sys_event_fail)
-                        await broadcast(challenge_id, run_id, sys_event_fail)
+    # Start remote instance if needed. Agents must not begin work until a
+    # required docker container or machine/scenario is online.
+    ok_to_start, instance_info = await _ensure_remote_instance_online(
+        challenge_id, run_id, challenge, run
+    )
+    if not ok_to_start:
+        return
 
     if continue_msg:
         prompt = continue_msg
         if instance_info:
-            conn_parts = []
-            if instance_info.get("url"):
-                conn_parts.append(f"URL: {instance_info['url']}")
-            if instance_info.get("connection"):
-                conn_parts.append(f"Connection: {instance_info['connection']}")
+            conn_parts = _instance_connection_parts(instance_info)
             if conn_parts:
                 prompt += f"\n\nRemote instance: {', '.join(conn_parts)}"
     else:
@@ -4022,8 +4353,11 @@ async def run_agent_task(
 
                 # Auto-submit flag detection
                 if (
-                    not run.get("_flag_submitted")
-                    and event.get("type") == "assistant"
+                    event.get("type") == "assistant"
+                    or (
+                        event.get("type") == "system"
+                        and event.get("subtype") == "teammate_broadcast"
+                    )
                 ):
                     _try_detect_and_submit_flag(
                         challenge_id, run_id, event, challenge
@@ -4800,6 +5134,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "description": ch_description,
             "category": ch_category,
             "flag_format": ch_flag_format,
+            "extra_flag_formats": [],
             "mode": mode,
             "autonomous": autonomous,
             "status": challenge_status,
@@ -4895,6 +5230,105 @@ def resolve_flag_question(
     return None, None, None
 
 
+async def rescan_challenge_for_flags(
+    challenge_id: str, challenge: dict, formats: list[str] | None = None
+) -> list[dict]:
+    """Scan saved run output for flags matching the configured formats."""
+    search_formats = formats or challenge_flag_formats(challenge)
+    found: dict[str, dict] = {}
+    for run_id, run in challenge.get("runs", {}).items():
+        events = run.get("output_lines") or load_output_log(challenge_id, run_id)
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            for text in _event_flag_texts(event):
+                for flag in detect_flags(text, search_formats):
+                    _handle_detected_flag(challenge_id, run_id, challenge, flag)
+                    stored = detected_flag_key(
+                        challenge.setdefault("detected_flags", {}), flag
+                    )
+                    found[flag_lookup_key(stored)] = {
+                        "flag": stored,
+                        "status": challenge.get("detected_flags", {}).get(stored, "pending"),
+                        "run_id": run_id,
+                    }
+    return list(found.values())
+
+
+async def add_flag_format(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    raw_format = str_field(body.get("format", "")).strip()
+    if not raw_format:
+        raw_format = str_field(body.get("flag_format", "")).strip()
+    if not raw_format:
+        return JSONResponse({"error": "flag format required"}, status_code=400)
+
+    try:
+        added, normalized = add_challenge_flag_format(challenge, raw_format)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    save_metadata(challenge)
+    detected = await rescan_challenge_for_flags(
+        challenge_id, challenge, challenge_flag_formats(challenge)
+    )
+
+    return JSONResponse({
+        "added": added,
+        "format": normalized,
+        "flag_format": challenge.get("flag_format", ""),
+        "flag_formats": challenge_flag_formats(challenge),
+        "detected": detected,
+        "auto_submit": bool(load_settings().get("auto_submit_flags")),
+    })
+
+
+async def add_manual_flag(request: Request) -> JSONResponse:
+    """Persist a user-provided flag candidate without auto-detecting text."""
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    flag = str_field(body.get("flag", "")).strip()
+    if not flag:
+        return JSONResponse({"error": "flag required"}, status_code=400)
+
+    detected = challenge.setdefault("detected_flags", {})
+    stored_flag = detected_flag_key(detected, flag)
+    added = stored_flag not in detected
+    if added:
+        stored_flag = set_detected_flag_status(challenge, flag, "pending")
+    status = detected.get(stored_flag, "pending")
+    save_metadata(challenge)
+
+    return JSONResponse({
+        "added": added,
+        "flag": stored_flag,
+        "status": status,
+    })
+
+
 async def plugin_submit_flag(request: Request) -> JSONResponse:
     """Submit a flag to the remote platform.
 
@@ -4955,14 +5389,25 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
             raise ValueError(
                 "question or flag_id is required for multi-answer challenges"
             )
+        submit_flag = (
+            flag
+            if has_questions
+            else normalize_flag_for_submission(
+                flag, challenge_flag_formats(challenge)
+            )
+        )
         result = await plugin.submit_flag(
-            config, remote_id, flag, flag_id=resolved_flag_id,
+            config, remote_id, submit_flag, flag_id=resolved_flag_id,
         )
 
-        # Persist flag result
-        detected = challenge.setdefault("detected_flags", {})
-        detected_key = f"{resolved_flag_id}:{flag}" if resolved_flag_id else flag
-        detected[detected_key] = "correct" if result.correct else "wrong"
+        detected_key = (
+            f"{resolved_flag_id}:{submit_flag}" if resolved_flag_id else submit_flag
+        )
+        stored_flag = set_detected_flag_status(
+            challenge,
+            detected_key,
+            "correct" if result.correct else "wrong",
+        )
 
         if result.correct and resolved_question is not None:
             resolved_question["solved"] = True
@@ -4975,22 +5420,24 @@ async def plugin_submit_flag(request: Request) -> JSONResponse:
             _, solved_run = await apply_solved_status(
                 challenge_id,
                 challenge,
-                flag=flag,
+                flag=submit_flag,
                 run_id=str_field(body.get("run_id", "")),
                 stop_reason="manual_submit_solved",
             )
             solved_agent = solved_run.get("agent", "") if solved_run else ""
             await discord_notify(
                 challenge,
-                embed=make_solve_embed(challenge, flag, solved_agent),
+                embed=make_solve_embed(challenge, submit_flag, solved_agent),
             )
-            await discord_mark_solved(challenge, flag, solved_agent)
+            await discord_mark_solved(challenge, submit_flag, solved_agent)
         else:
             save_metadata(challenge)
 
         return JSONResponse({
             "correct": result.correct,
             "message": result.message,
+            "flag": stored_flag,
+            "submitted_flag": submit_flag,
         })
     except Exception as exc:
         return JSONResponse(
@@ -5057,15 +5504,27 @@ async def agent_submit_answer(request: Request) -> JSONResponse:
             raise ValueError(
                 "question or flag_id is required for multi-answer challenges"
             )
+        submit_answer = (
+            answer
+            if has_questions
+            else normalize_flag_for_submission(
+                answer, challenge_flag_formats(challenge)
+            )
+        )
         result = await plugin.submit_flag(
-            config, remote_id, answer, flag_id=resolved_flag_id,
+            config, remote_id, submit_answer, flag_id=resolved_flag_id,
         )
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
-    detected = challenge.setdefault("detected_flags", {})
-    detected_key = f"{resolved_flag_id}:{answer}" if resolved_flag_id else answer
-    detected[detected_key] = "correct" if result.correct else "wrong"
+    detected_key = (
+        f"{resolved_flag_id}:{submit_answer}" if resolved_flag_id else submit_answer
+    )
+    stored_flag = set_detected_flag_status(
+        challenge,
+        detected_key,
+        "correct" if result.correct else "wrong",
+    )
 
     if result.correct and resolved_question is not None:
         resolved_question["solved"] = True
@@ -5081,7 +5540,7 @@ async def agent_submit_answer(request: Request) -> JSONResponse:
         target += f" (flag_id {resolved_flag_id})"
     submit_event = {
         "type": "system",
-        "data": f"Submitted answer for {target}: {status_word}. {result.message}",
+        "message": f"Submitted answer for {target}: {status_word}. {result.message}",
         "timestamp": datetime.now().isoformat(),
     }
     run["output_lines"].append(submit_event)
@@ -5092,16 +5551,16 @@ async def agent_submit_answer(request: Request) -> JSONResponse:
         _, solved_run = await apply_solved_status(
             challenge_id,
             challenge,
-            flag=answer,
+            flag=submit_answer,
             run_id=run_id,
             stop_reason="agent_submit_solved",
         )
         solved_agent = solved_run.get("agent", "") if solved_run else ""
         await discord_notify(
             challenge,
-            embed=make_solve_embed(challenge, answer, solved_agent),
+            embed=make_solve_embed(challenge, submit_answer, solved_agent),
         )
-        await discord_mark_solved(challenge, answer, solved_agent)
+        await discord_mark_solved(challenge, submit_answer, solved_agent)
     else:
         save_metadata(challenge)
 
@@ -5110,6 +5569,8 @@ async def agent_submit_answer(request: Request) -> JSONResponse:
         "message": result.message,
         "question": question_idx,
         "flag_id": resolved_flag_id,
+        "flag": stored_flag,
+        "submitted_flag": submit_answer,
         "all_questions_solved": all_questions_solved,
     })
 
@@ -5741,21 +6202,24 @@ async def _handle_discord_interaction(interaction: dict) -> None:
             return
         remote_id = challenge.get("_remote_id", "")
         try:
-            result = await plugin.submit_flag(config, remote_id, flag)
+            submit_flag = normalize_flag_for_submission(
+                flag, challenge_flag_formats(challenge)
+            )
+            result = await plugin.submit_flag(config, remote_id, submit_flag)
             if result.correct:
                 await apply_solved_status(
                     ch_id,
                     challenge,
-                    flag=flag,
+                    flag=submit_flag,
                     stop_reason="discord_submit_solved",
                 )
                 solved_by = f"{author} (Discord)"
                 await bot.followup_interaction(
                     interaction_token,
-                    embed=make_solve_embed(challenge, flag, solved_by))
-                await discord_mark_solved(challenge, flag, solved_by)
+                    embed=make_solve_embed(challenge, submit_flag, solved_by))
+                await discord_mark_solved(challenge, submit_flag, solved_by)
             else:
-                challenge.setdefault("detected_flags", {})[flag] = "wrong"
+                set_detected_flag_status(challenge, submit_flag, "wrong")
                 save_metadata(challenge)
                 await bot.followup_interaction(
                     interaction_token, f"Incorrect: {result.message}")
@@ -6055,6 +6519,8 @@ routes = [
     Route("/api/challenges/{id}/steer", steer_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/unsolve", unsolve_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/mark-solved", mark_solved, methods=["POST"]),
+    Route("/api/challenges/{id}/flag-formats", add_flag_format, methods=["POST"]),
+    Route("/api/challenges/{id}/flags", add_manual_flag, methods=["POST"]),
     Route("/api/challenges/{id}", delete_challenge, methods=["DELETE"]),
     Route("/api/challenges/{id}/files", list_files, methods=["GET"]),
     Route("/api/challenges/{id}/files/{path:path}", get_file, methods=["GET"]),
