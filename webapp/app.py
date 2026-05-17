@@ -3369,6 +3369,38 @@ async def export_challenges_bulk(request: Request) -> Response:
 # Build prompt
 # ---------------------------------------------------------------------------
 
+def _instance_field_parts(instance_info: dict, include_type: bool = True) -> list[str]:
+    fields = []
+    if instance_info.get("url"):
+        fields.append(f"URL: {instance_info['url']}")
+    if instance_info.get("connection"):
+        fields.append(f"Connection: {instance_info['connection']}")
+    if instance_info.get("host"):
+        fields.append(f"Host: {instance_info['host']}")
+    if instance_info.get("port"):
+        fields.append(f"Port: {instance_info['port']}")
+    if instance_info.get("expires_at"):
+        fields.append(f"Expires at: {instance_info['expires_at']}")
+    if include_type and instance_info.get("type"):
+        fields.append(f"Type: {instance_info['type']}")
+    return fields
+
+
+def _instance_prompt_lines(instance_info: dict) -> list[str]:
+    remotes = instance_info.get("remotes")
+    if isinstance(remotes, list) and remotes:
+        lines = []
+        for idx, remote in enumerate(remotes, 1):
+            if not isinstance(remote, dict):
+                continue
+            fields = _instance_field_parts(remote)
+            if fields:
+                lines.append(f"Remote {idx}: {', '.join(fields)}")
+        if lines:
+            return lines
+    return _instance_field_parts(instance_info)
+
+
 def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) -> str:
     """Build the CTF solving prompt."""
     agent_name = run["agent"]
@@ -3496,19 +3528,8 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
     if instance_info:
         parts.append("")
         parts.append("Remote instance connection info:")
-        if instance_info.get("url"):
-            parts.append(f"  URL: {instance_info['url']}")
-        if instance_info.get("connection"):
-            parts.append(f"  Connection: {instance_info['connection']}")
-        if instance_info.get("host"):
-            parts.append(f"  Host: {instance_info['host']}")
-        if instance_info.get("port"):
-            parts.append(f"  Port: {instance_info['port']}")
-        if instance_info.get("expires_at"):
-            parts.append(f"  Expires at: {instance_info['expires_at']}")
-        inst_type = instance_info.get("type", "")
-        if inst_type:
-            parts.append(f"  Type: {inst_type}")
+        for line in _instance_prompt_lines(instance_info):
+            parts.append(f"  {line}")
 
     has_declared_files = bool(challenge.get("files"))
     try:
@@ -3844,6 +3865,11 @@ async def _run_agent_sdk_path(
                 _try_detect_and_submit_flag(
                     challenge_id, run_id, event, challenge
                 )
+            if etype == "result" and provider.name == "claude":
+                await _mark_run_completed_from_result(
+                    challenge_id, run_id, challenge, run
+                )
+                break
 
     except asyncio.CancelledError:
         log.info("[%s/%s] SDK task cancelled", challenge_id[:8], run_id[:8])
@@ -3974,26 +4000,25 @@ def _challenge_needs_remote_instance(challenge: dict) -> bool:
 
 def _instance_ready_message(instance_info: dict) -> str:
     ready_msg = "Instance ready"
-    if instance_info.get("url"):
-        ready_msg += f": {instance_info['url']}"
-    elif instance_info.get("connection"):
-        ready_msg += f": {instance_info['connection']}"
-    elif instance_info.get("host"):
-        ready_msg += f": {instance_info['host']}"
+    conn_parts = _instance_connection_parts(instance_info)
+    if conn_parts:
+        ready_msg += f": {'; '.join(conn_parts)}"
     return ready_msg
 
 
 def _instance_connection_parts(instance_info: dict) -> list[str]:
-    conn_parts = []
-    if instance_info.get("url"):
-        conn_parts.append(f"URL: {instance_info['url']}")
-    if instance_info.get("connection"):
-        conn_parts.append(f"Connection: {instance_info['connection']}")
-    if instance_info.get("host"):
-        conn_parts.append(f"Host: {instance_info['host']}")
-    if instance_info.get("port"):
-        conn_parts.append(f"Port: {instance_info['port']}")
-    return conn_parts
+    remotes = instance_info.get("remotes")
+    if isinstance(remotes, list) and remotes:
+        conn_parts = []
+        for idx, remote in enumerate(remotes, 1):
+            if not isinstance(remote, dict):
+                continue
+            fields = _instance_field_parts(remote, include_type=False)
+            if fields:
+                conn_parts.append(f"Remote {idx}: {', '.join(fields)}")
+        if conn_parts:
+            return conn_parts
+    return _instance_field_parts(instance_info, include_type=False)
 
 
 async def _append_run_event(
@@ -4004,6 +4029,30 @@ async def _append_run_event(
     run["output_lines"].append(event)
     append_output_event(challenge_id, run_id, event)
     await broadcast(challenge_id, run_id, event)
+
+
+async def _mark_run_completed_from_result(
+    challenge_id: str, run_id: str, challenge: dict, run: dict
+) -> None:
+    """Mark a run completed as soon as a provider emits its final result."""
+    if run.get("_stop_reason") or run.get("status") != "solving":
+        return
+    run["status"] = "completed"
+    run["error"] = None
+    if run.get("solve_start"):
+        run["duration_ms"] = int((_time.monotonic() - run["solve_start"]) * 1000)
+    challenge["status"] = derive_challenge_status(challenge)
+    save_metadata(challenge)
+    await broadcast(challenge_id, run_id, {
+        "type": "run_status",
+        "run_id": run_id,
+        "status": run["status"],
+        "error": run.get("error"),
+    })
+    await broadcast_challenge(challenge_id, {
+        "type": "challenge_status",
+        "status": challenge["status"],
+    })
 
 
 async def _fail_run_before_agent(

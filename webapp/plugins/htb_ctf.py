@@ -162,6 +162,32 @@ def _response_message(resp: httpx.Response) -> str:
     return str(data)[:300]
 
 
+def _normalize_ports(ports) -> list:
+    if isinstance(ports, list):
+        values = ports
+    else:
+        values = [ports]
+    return [port for port in values if port not in (None, "")]
+
+
+def _docker_remote_info(hostname: str, port, docker_type: str) -> dict:
+    result: dict = {
+        "host": hostname,
+        "port": port,
+    }
+    kind = str(docker_type or "").lower()
+    if kind == "web":
+        result["url"] = f"http://{hostname}:{port}"
+        result["type"] = "web"
+    elif kind == "tcp":
+        result["connection"] = f"nc {hostname} {port}"
+        result["type"] = "tcp"
+    else:
+        result["connection"] = f"{hostname}:{port}"
+        result["type"] = "unknown"
+    return result
+
+
 def _docker_instance_info(challenge: dict) -> dict | None:
     hostname = challenge.get("hostname")
     ports = challenge.get("docker_ports")
@@ -169,20 +195,28 @@ def _docker_instance_info(challenge: dict) -> dict | None:
         return None
 
     docker_type = challenge.get("docker_instance_type") or ""
-    port = ports[0] if isinstance(ports, list) else ports
+    port_list = _normalize_ports(ports)
+    if not port_list:
+        return None
+
+    remotes = [
+        _docker_remote_info(str(hostname), port, docker_type)
+        for port in port_list
+    ]
     result: dict = {
-        "host": hostname,
-        "port": port,
+        "host": str(hostname),
+        "ports": port_list,
+        "remotes": remotes,
     }
-    if str(docker_type).lower() == "web":
-        result["url"] = f"http://{hostname}:{port}"
-        result["type"] = "web"
-    elif str(docker_type).lower() == "tcp":
-        result["connection"] = f"nc {hostname} {port}"
-        result["type"] = "tcp"
-    else:
-        result["connection"] = f"{hostname}:{port}"
-        result["type"] = "unknown"
+    result.update(remotes[0])
+    urls = [remote["url"] for remote in remotes if remote.get("url")]
+    connections = [
+        remote["connection"] for remote in remotes if remote.get("connection")
+    ]
+    if urls:
+        result["urls"] = urls
+    if connections:
+        result["connections"] = connections
     return result
 
 

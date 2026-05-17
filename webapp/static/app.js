@@ -26,6 +26,7 @@ let activeRunId = null;             // which run tab is active
 let currentChallengeMode = "single";
 let wsConnections = new Map();      // run_id -> WebSocket
 let globalWs = null;
+let historyLoadingRuns = new Set(); // run_ids currently replaying saved chat history
 
 // Per-run counters
 let runToolCounts = new Map();
@@ -1254,11 +1255,21 @@ function updateDashboardChallengeStatus(challengeId, status) {
 function connectRunWS(challengeId, runId, agentLabel) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws/${challengeId}/${runId}`);
+  let hydrating = true;
+  historyLoadingRuns.add(runId);
   ws.onopen = () => {
     setWsStatus("connected");
   };
-  ws.onmessage = (e) => renderRunEvent(runId, JSON.parse(e.data));
+  ws.onmessage = (e) => {
+    const event = JSON.parse(e.data);
+    renderRunEvent(runId, event);
+    if (hydrating && event.type === "run_status") {
+      hydrating = false;
+      finishHistoryLoad(runId);
+    }
+  };
   ws.onclose = () => {
+    historyLoadingRuns.delete(runId);
     if (currentChallengeId !== challengeId) return;
     // Don't reconnect if the run is in a terminal state
     const run = currentRuns.find(r => r.id === runId);
@@ -1282,6 +1293,7 @@ function connectRunWS(challengeId, runId, agentLabel) {
 }
 
 function disconnectAllWS() {
+  historyLoadingRuns.clear();
   for (const [, ws] of wsConnections) {
     ws.onclose = null;
     ws.close();
@@ -1315,12 +1327,28 @@ function scrollBottom() {
 }
 
 function scrollBottomIfActive(runId) {
+  if (historyLoadingRuns.has(runId)) return;
   if (isSplitView()) {
     const f = document.getElementById(`feed-${runId}`);
     if (autoScroll && f) f.scrollTop = f.scrollHeight;
     return;
   }
   if (runId === activeRunId) scrollBottom();
+}
+
+function finishHistoryLoad(runId) {
+  historyLoadingRuns.delete(runId);
+  requestAnimationFrame(() => {
+    if (!autoScroll) {
+      updateScrollBtn();
+      return;
+    }
+    const f = document.getElementById(`feed-${runId}`);
+    if (f && (isSplitView() || runId === activeRunId)) {
+      f.scrollTop = f.scrollHeight;
+    }
+    updateScrollBtn();
+  });
 }
 
 // === Run Tabs ===
