@@ -11,6 +11,7 @@ Supports 2 solving modes:
 
 import asyncio
 import base64
+import difflib
 import io
 import json
 import logging
@@ -7088,6 +7089,214 @@ def _discord_category_choices() -> str:
     return f"Available categories: {preview}"
 
 
+def _discord_option_map(raw_options: list[dict]) -> tuple[str, dict]:
+    if raw_options and raw_options[0].get("type") == 1:
+        subcommand = str(raw_options[0].get("name", ""))
+        nested = raw_options[0].get("options", [])
+        return subcommand, {
+            o["name"]: o.get("value")
+            for o in nested
+            if "name" in o
+        }
+    return "", {
+        o["name"]: o.get("value")
+        for o in raw_options
+        if "name" in o
+    }
+
+
+def _discord_search_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def _discord_challenge_label(challenge: dict) -> str:
+    category = str(challenge.get("category", "") or "Uncategorized")
+    return f"[{category}] {challenge.get('name', '?')}"
+
+
+def _discord_join_candidates(query: str) -> list[tuple[float, str, dict]]:
+    query_key = _discord_search_key(query)
+    if not query_key:
+        return []
+
+    candidates = []
+    for ch_id, challenge in challenges.items():
+        if not challenge.get("_discord_thread_id"):
+            continue
+        fields = [
+            challenge.get("name", ""),
+            challenge.get("category", ""),
+            _discord_challenge_label(challenge),
+            challenge.get("_remote_id", ""),
+        ]
+        keys = [_discord_search_key(field) for field in fields if field]
+        if not keys:
+            continue
+        score = max(
+            1.0 if key == query_key
+            else 0.92 if query_key in key
+            else difflib.SequenceMatcher(None, query_key, key).ratio()
+            for key in keys
+        )
+        candidates.append((score, ch_id, challenge))
+    candidates.sort(key=lambda item: (-item[0], _discord_challenge_label(item[2])))
+    return candidates
+
+
+def _format_discord_tokens(value: int | float) -> str:
+    value = int(value or 0)
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}k"
+    return str(value)
+
+
+def _format_discord_duration(ms: int | float) -> str:
+    seconds = int((ms or 0) / 1000)
+    if seconds <= 0:
+        return "-"
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def _discord_stats_message(challenge_id: str, challenge: dict) -> str:
+    lines = [
+        f"**Stats: {challenge.get('name', '?')}**",
+        f"Status: `{challenge.get('status', '?')}`",
+    ]
+    detected = challenge.get("detected_flags", {})
+    if detected:
+        correct = sum(1 for status in detected.values() if status == "correct")
+        lines.append(f"Flags: {correct} correct / {len(detected)} detected")
+
+    total = _empty_stats()
+    for run_id, run in challenge.get("runs", {}).items():
+        events = run.get("output_lines") or load_output_log(challenge_id, run_id)
+        stats = _aggregate_run_stats(run, events)
+        for key in ("inputTokens", "outputTokens", "cacheReadTokens",
+                    "cacheCreationTokens", "toolCalls", "turns",
+                    "durationMs", "durationApiMs"):
+            total[key] += stats.get(key, 0)
+        total["costUsd"] += stats.get("costUsd", 0)
+
+        token_bits = [
+            f"in {_format_discord_tokens(stats.get('inputTokens', 0))}",
+            f"out {_format_discord_tokens(stats.get('outputTokens', 0))}",
+        ]
+        if stats.get("cacheReadTokens"):
+            token_bits.append(f"cache {_format_discord_tokens(stats['cacheReadTokens'])}")
+        if stats.get("cacheCreationTokens"):
+            token_bits.append(f"write {_format_discord_tokens(stats['cacheCreationTokens'])}")
+        cost = f", ${stats['costUsd']:.4f}" if stats.get("costUsd") else ""
+        turns = f", {int(stats['turns'])} turns" if stats.get("turns") else ""
+        tools = f", {int(stats['toolCalls'])} tools" if stats.get("toolCalls") else ""
+        lines.append(
+            f"- `{run.get('agent', '?')}` `{run.get('status', '?')}` "
+            f"{_format_discord_duration(stats.get('durationMs', 0))}: "
+            f"{', '.join(token_bits)}{turns}{tools}{cost}"
+        )
+
+    if len(challenge.get("runs", {})) > 1:
+        lines.append(
+            "Total: "
+            f"in {_format_discord_tokens(total['inputTokens'])}, "
+            f"out {_format_discord_tokens(total['outputTokens'])}, "
+            f"runtime {_format_discord_duration(total['durationMs'])}"
+        )
+    return _truncate("\n".join(lines))
+
+
+def _discord_event_summary(event: dict) -> str:
+    etype = event.get("type", "")
+    if etype == "assistant":
+        blocks = event.get("message", {}).get("content", [])
+        parts = []
+        for block in blocks:
+            btype = block.get("type")
+            if btype == "text" and block.get("text"):
+                parts.append(block["text"])
+            elif btype == "tool_use":
+                name = block.get("name", "tool")
+                parts.append(f"[tool] {name}")
+            elif btype == "thinking":
+                text = block.get("thinking") or ""
+                parts.append(f"[thinking] {text}")
+        return "Assistant: " + " | ".join(parts)
+    if etype == "user":
+        blocks = event.get("message", {}).get("content", [])
+        parts = []
+        for block in blocks:
+            if block.get("type") != "tool_result":
+                continue
+            content = block.get("content", "")
+            tool_id = block.get("tool_use_id", "tool")
+            parts.append(f"[result {tool_id}] {content}")
+        return "Tool result: " + " | ".join(parts)
+    if etype in {"user_prompt", "user_steer"}:
+        label = "Prompt" if etype == "user_prompt" else "Steer"
+        return f"{label}: {event.get('message', '')}"
+    if etype == "result":
+        return f"Result: {event.get('result', '')}"
+    if etype == "error":
+        return f"Error: {event.get('message', '')}"
+    if etype == "system":
+        return f"System: {event.get('message', '')}"
+    if etype == "codex_usage":
+        usage = event.get("usage") or {}
+        return (
+            "Usage: "
+            f"in {_format_discord_tokens(usage.get('input_tokens', 0))}, "
+            f"out {_format_discord_tokens(usage.get('output_tokens', 0))}"
+        )
+    text = _event_search_text(event)
+    return f"{etype or 'event'}: {text}"
+
+
+def _discord_tail_message(
+    challenge_id: str,
+    challenge: dict,
+    agent_filter: str = "",
+    lines: int = 10,
+) -> str:
+    lines = max(1, min(int(lines or 10), 25))
+    agent_key = str(agent_filter or "").strip().casefold()
+    selected = []
+    for run_id, run in challenge.get("runs", {}).items():
+        searchable = " ".join([
+            run_id,
+            str(run.get("agent", "")),
+            str(run.get("model", "")),
+        ]).casefold()
+        if agent_key and agent_key not in searchable:
+            continue
+        selected.append((run_id, run))
+    if not selected:
+        return f"No runs matched `{agent_filter}`."
+
+    per_run = lines if len(selected) == 1 else max(1, min(5, lines))
+    out = [f"**Tail: {challenge.get('name', '?')}**"]
+    for run_id, run in selected:
+        events = run.get("output_lines") or load_output_log(challenge_id, run_id)
+        tail = [
+            (idx, event) for idx, event in enumerate(events, 1)
+            if event.get("type") not in {"run_status", "challenge_status", "flag_found"}
+        ][-per_run:]
+        out.append(f"**{run.get('agent', '?')}** `{run_id}`")
+        if not tail:
+            out.append("- No transcript events")
+            continue
+        for idx, event in tail:
+            summary = " ".join(_discord_event_summary(event).split())
+            out.append(f"{idx}. {_truncate(summary, 240)}")
+    return _truncate("\n".join(out))
+
+
 def _discord_help_message() -> str:
     return _truncate(
         "**CTF Solver Bot Help**\n\n"
@@ -7095,11 +7304,15 @@ def _discord_help_message() -> str:
         "`/ctf` — show all challenges grouped by category.\n"
         "`/add category:<name>` — add yourself to every challenge thread in a category.\n"
         "`/add category:all` — add yourself to all challenge threads.\n"
+        "`/join challenge:<name>` — add yourself to one challenge thread by fuzzy name.\n"
         "`/help` — show this help message.\n\n"
         "**Use inside a challenge thread**\n"
         "`/status` — show challenge and agent run status.\n"
+        "`/stats` — show runtime, token, tool, and flag stats.\n"
+        "`/tail agent:<name> lines:<n>` — show recent transcript events.\n"
         "`/flags` — list detected flags and submission state.\n"
-        "`/broadcast message:<text>` — send a breakthrough or instruction to running agents.\n"
+        "`/flags add:<flag>` — manually add a detected flag candidate.\n"
+        "`/broadcast message:<text>` — steer all active agents with a breakthrough or instruction.\n"
         "`/submit flag:<flag>` — submit a flag to the connected CTF platform.\n"
         "`/solved flag:<flag>` — manually mark the challenge solved; flag is optional.\n"
         "`/stop` — stop currently running agents for this challenge.\n"
@@ -7124,7 +7337,7 @@ async def _handle_discord_interaction(interaction: dict) -> None:
 
     data = interaction.get("data", {})
     cmd = data.get("name", "")
-    options = {o["name"]: o["value"] for o in data.get("options", [])}
+    subcommand, options = _discord_option_map(data.get("options", []))
     interaction_id = interaction["id"]
     interaction_token = interaction["token"]
     member_user = interaction.get("member", {}).get("user", {}) or {}
@@ -7231,6 +7444,70 @@ async def _handle_discord_interaction(interaction: dict) -> None:
         await bot.followup_interaction(interaction_token, message)
         return
 
+    # /join works from any channel so users can add themselves to one
+    # challenge thread without joining a whole category.
+    if cmd == "join":
+        query = str(options.get("challenge", "")).strip()
+        if not query:
+            await bot.respond_to_interaction(
+                interaction_id,
+                interaction_token,
+                "Challenge name required.",
+                flags=64,
+            )
+            return
+        if not author_id:
+            await bot.respond_to_interaction(
+                interaction_id,
+                interaction_token,
+                "Could not identify the Discord user to add.",
+                flags=64,
+            )
+            return
+
+        matches = _discord_join_candidates(query)
+        if not matches or matches[0][0] < 0.35:
+            await bot.respond_to_interaction(
+                interaction_id,
+                interaction_token,
+                f"No challenge thread matched `{query}`.",
+                flags=64,
+            )
+            return
+        if len(matches) > 1 and matches[1][0] >= matches[0][0] - 0.08:
+            choices = "\n".join(
+                f"- {_discord_challenge_label(ch)}"
+                for _, _, ch in matches[:5]
+            )
+            await bot.respond_to_interaction(
+                interaction_id,
+                interaction_token,
+                f"`{query}` is ambiguous. Try a more specific name:\n{choices}",
+                flags=64,
+            )
+            return
+
+        _, _, challenge_match = matches[0]
+        ok, error = await bot.add_thread_member(
+            str(challenge_match.get("_discord_thread_id", "")),
+            author_id,
+        )
+        if ok:
+            await bot.respond_to_interaction(
+                interaction_id,
+                interaction_token,
+                f"Added you to {_discord_challenge_label(challenge_match)}.",
+                flags=64,
+            )
+        else:
+            await bot.respond_to_interaction(
+                interaction_id,
+                interaction_token,
+                f"Could not add you to {_discord_challenge_label(challenge_match)}: {error}",
+                flags=64,
+            )
+        return
+
     ch_id = _challenge_id_from_discord_interaction(interaction)
     if not ch_id:
         await bot.respond_to_interaction(
@@ -7312,7 +7589,64 @@ async def _handle_discord_interaction(interaction: dict) -> None:
         await bot.respond_to_interaction(
             interaction_id, interaction_token, "\n".join(lines))
 
+    elif cmd == "stats":
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            _discord_stats_message(ch_id, challenge),
+        )
+
+    elif cmd == "tail":
+        try:
+            line_count = int(options.get("lines") or 10)
+        except (TypeError, ValueError):
+            line_count = 10
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            _discord_tail_message(
+                ch_id,
+                challenge,
+                agent_filter=str(options.get("agent", "") or ""),
+                lines=line_count,
+            ),
+        )
+
     elif cmd == "flags":
+        manual_flag = str(options.get("add", "") or "").strip()
+        if manual_flag:
+            detected = challenge.setdefault("detected_flags", {})
+            stored_flag = detected_flag_key(detected, manual_flag)
+            added = stored_flag not in detected
+            if added:
+                stored_flag = set_detected_flag_status(
+                    challenge, manual_flag, "pending"
+                )
+            record_detected_flag_source(
+                challenge,
+                stored_flag,
+                agent=author,
+                source_type="manual",
+            )
+            save_metadata(challenge)
+            flag_event = {
+                "type": "flag_found",
+                "flag": stored_flag,
+                "meta": detected_flag_meta(challenge, stored_flag),
+                "run_id": "",
+                "agent": author,
+                "challenge_id": ch_id,
+                "challenge_name": challenge.get("name", ""),
+            }
+            await broadcast_global(flag_event)
+            status = "added" if added else "already existed"
+            await bot.respond_to_interaction(
+                interaction_id,
+                interaction_token,
+                f"Flag {status}: `{stored_flag}`",
+            )
+            return
+
         detected = challenge.get("detected_flags", {})
         if not detected:
             await bot.respond_to_interaction(

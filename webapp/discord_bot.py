@@ -53,6 +53,12 @@ SLASH_COMMANDS = [
     {
         "name": "flags",
         "description": "List all detected flags for this challenge",
+        "options": [{
+            "name": "add",
+            "description": "Manually add a flag candidate",
+            "type": 3,
+            "required": False,
+        }],
     },
     {
         "name": "stop",
@@ -69,6 +75,35 @@ SLASH_COMMANDS = [
     {
         "name": "help",
         "description": "Show how to use the CTF solver Discord bot",
+    },
+    {
+        "name": "join",
+        "description": "Add yourself to one challenge thread by fuzzy name",
+        "options": [{
+            "name": "challenge",
+            "description": "Challenge name to join",
+            "type": 3,
+            "required": True,
+        }],
+    },
+    {
+        "name": "stats",
+        "description": "Show agent runtime and token stats for this challenge",
+    },
+    {
+        "name": "tail",
+        "description": "Show recent transcript messages for this challenge",
+        "options": [{
+            "name": "agent",
+            "description": "Agent name or run id to filter",
+            "type": 3,
+            "required": False,
+        }, {
+            "name": "lines",
+            "description": "Number of recent events to show",
+            "type": 4,
+            "required": False,
+        }],
     },
     {
         "name": "files",
