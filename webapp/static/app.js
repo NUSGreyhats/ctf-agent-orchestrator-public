@@ -45,6 +45,8 @@ let transcriptSearchResults = [];
 let transcriptSearchActiveIndex = -1;
 let metadataLastSyncAt = null;
 let metadataSyncTimer = null;
+let fileBrowserPath = "";
+let fileBrowserRequestToken = 0;
 
 // Per-run counters
 let runToolCounts = new Map();
@@ -1167,6 +1169,10 @@ async function openChallenge(id) {
   initRunTabs(currentRuns);
   $("#stats-panel").innerHTML = "";
   $("#files-tree").innerHTML = "";
+  $("#files-breadcrumb").innerHTML = "";
+  $("#file-counter").textContent = "0";
+  fileBrowserPath = "";
+  fileBrowserRequestToken++;
   updateCounters();
   showView("detail");
   switchTab("tab-info");
@@ -1181,7 +1187,6 @@ async function openChallenge(id) {
   }
   renderStats();
   loadChallengeStatsSnapshot(id);
-  loadFiles();
 }
 
 function updateStatusBadge(status) {
@@ -3728,80 +3733,162 @@ function switchTab(tabId) {
   if (btn) btn.classList.add("active");
   const content = document.getElementById(tabId);
   if (content) content.classList.add("active");
+  if (tabId === "tab-files") loadFiles();
 }
 
 // === Files Browser ===
-async function loadFiles() {
+function normalizeFileBrowserPath(path) {
+  return String(path || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((part) => part && part !== "." && part !== "..")
+    .join("/");
+}
+
+function parentFileBrowserPath(path) {
+  const parts = normalizeFileBrowserPath(path).split("/").filter(Boolean);
+  parts.pop();
+  return parts.join("/");
+}
+
+function fileTypeLabel(type) {
+  if (type === "image") return "IMG";
+  if (type === "text") return "TXT";
+  if (type === "binary") return "BIN";
+  return "FILE";
+}
+
+function renderFilesBreadcrumb(path) {
+  const breadcrumb = $("#files-breadcrumb");
+  if (!breadcrumb) return;
+  const cleanPath = normalizeFileBrowserPath(path);
+  breadcrumb.innerHTML = "";
+
+  const root = document.createElement("button");
+  root.type = "button";
+  root.className = "file-crumb";
+  root.textContent = "root";
+  root.addEventListener("click", () => loadFiles(""));
+  breadcrumb.appendChild(root);
+
+  let acc = "";
+  for (const part of cleanPath.split("/").filter(Boolean)) {
+    const sep = document.createElement("span");
+    sep.className = "file-crumb-sep";
+    sep.textContent = "/";
+    breadcrumb.appendChild(sep);
+
+    acc = acc ? `${acc}/${part}` : part;
+    const crumbPath = acc;
+    const crumb = document.createElement("button");
+    crumb.type = "button";
+    crumb.className = "file-crumb";
+    crumb.textContent = part;
+    crumb.title = crumbPath;
+    crumb.addEventListener("click", () => loadFiles(crumbPath));
+    breadcrumb.appendChild(crumb);
+  }
+}
+
+function createFileRow(entry) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = `file-item ${entry.kind === "directory" ? "file-folder" : ""}`;
+
+  const icon = document.createElement("span");
+  icon.className = `file-icon file-icon-${entry.kind === "directory" ? "directory" : entry.type}`;
+  icon.textContent = entry.kind === "directory" ? "DIR" : fileTypeLabel(entry.type);
+
+  const name = document.createElement("span");
+  name.className = "file-name";
+  name.textContent = entry.name;
+  name.title = entry.path;
+
+  const size = document.createElement("span");
+  size.className = "file-size";
+  size.textContent = entry.kind === "directory" ? "" : formatSize(entry.size || 0);
+
+  item.append(icon, name, size);
+  if (entry.kind === "directory") {
+    item.addEventListener("click", () => loadFiles(entry.path));
+  } else {
+    item.addEventListener("click", () => viewFile(entry.path));
+  }
+  return item;
+}
+
+async function loadFiles(path = fileBrowserPath) {
   if (!currentChallengeId) return;
-  let url = `/api/challenges/${currentChallengeId}/files`;
+  const challengeId = currentChallengeId;
+  const token = ++fileBrowserRequestToken;
+  const nextPath = normalizeFileBrowserPath(path);
+
+  const params = new URLSearchParams();
+  params.set("browse", "1");
+  params.set("dir", nextPath);
   const runSelect = $("#files-run-select");
   if (runSelect && runSelect.value) {
-    url += `?run_id=${encodeURIComponent(runSelect.value)}`;
+    params.set("run_id", runSelect.value);
   }
+  const url = `/api/challenges/${challengeId}/files?${params.toString()}`;
   const res = await api(url);
   if (!res) return;
+  if (token !== fileBrowserRequestToken || challengeId !== currentChallengeId) {
+    return;
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     showToast(err.error || "Failed to load files", "error");
     return;
   }
-  const files = await res.json();
+  const data = await res.json();
+  const entries = data.entries || [];
 
-  $("#file-counter").textContent = files.length;
+  fileBrowserPath = normalizeFileBrowserPath(data.path || nextPath);
+  renderFilesBreadcrumb(fileBrowserPath);
+  $("#file-counter").textContent = entries.length;
   const tree = $("#files-tree");
   tree.innerHTML = "";
 
-  // Group by directory
-  const dirs = new Map();
-  for (const f of files) {
-    const parts = f.path.split("/");
-    const dir = parts.length > 1 ? parts.slice(0, -1).join("/") : ".";
-    if (!dirs.has(dir)) dirs.set(dir, []);
-    dirs.get(dir).push(f);
+  if (fileBrowserPath) {
+    tree.appendChild(createFileRow({
+      kind: "directory",
+      name: "..",
+      path: parentFileBrowserPath(fileBrowserPath),
+    }));
   }
 
-  for (const [dir, dirFiles] of dirs) {
-    if (dirs.size > 1 || dir !== ".") {
-      const label = document.createElement("div");
-      label.className = "file-dir-label";
-      label.textContent = dir === "." ? "root" : dir;
-      tree.appendChild(label);
-    }
-    for (const f of dirFiles) {
-      const item = document.createElement("div");
-      item.className = "file-item";
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "file-empty";
+    empty.textContent = "No files in this folder";
+    tree.appendChild(empty);
+    return;
+  }
 
-      const icon = document.createElement("span");
-      icon.className = `file-icon file-icon-${f.type}`;
-      icon.textContent = f.type === "image" ? "\uD83D\uDDBC" : f.type === "text" ? "\uD83D\uDCC4" : "\uD83D\uDD37";
-
-      const name = document.createElement("span");
-      name.className = "file-name";
-      name.textContent = f.path.split("/").pop();
-      name.title = f.path;
-
-      const size = document.createElement("span");
-      size.className = "file-size";
-      size.textContent = formatSize(f.size);
-
-      item.append(icon, name, size);
-      item.addEventListener("click", () => viewFile(f.path));
-      tree.appendChild(item);
-    }
+  for (const entry of entries) {
+    tree.appendChild(createFileRow(entry));
   }
 }
 
-$("#btn-refresh-files").addEventListener("click", loadFiles);
+$("#btn-refresh-files").addEventListener("click", () => loadFiles());
 
 // Listen for files run select change
 const filesRunSelect = $("#files-run-select");
 if (filesRunSelect) {
-  filesRunSelect.addEventListener("change", loadFiles);
+  filesRunSelect.addEventListener("change", () => {
+    fileBrowserPath = "";
+    loadFiles("");
+  });
 }
 
 // Auto-refresh files while solving
 setInterval(() => {
-  if (currentChallengeId && !views.detail.classList.contains("hidden")) {
+  if (
+    currentChallengeId &&
+    !views.detail.classList.contains("hidden") &&
+    $("#tab-files").classList.contains("active")
+  ) {
     loadFiles();
   }
 }, 8000);

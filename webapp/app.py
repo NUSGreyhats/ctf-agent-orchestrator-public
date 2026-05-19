@@ -3147,6 +3147,22 @@ def safe_user_path(raw: str) -> str | None:
     return p.as_posix()
 
 
+def safe_user_dir(raw: str) -> str | None:
+    """Return a safe relative POSIX directory path, allowing root."""
+    value = str(raw or "").replace("\\", "/")
+    if value.startswith("/"):
+        return None
+    value = value.strip("/")
+    if not value or value == ".":
+        return ""
+    p = PurePosixPath(value)
+    if p.is_absolute():
+        return None
+    if any(part in ("", ".", "..") for part in p.parts):
+        return None
+    return p.as_posix()
+
+
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -3170,6 +3186,23 @@ def resolve_allowed_path(
         except ValueError:
             continue
     return None
+
+
+def resolve_allowed_dir(
+    base: Path, raw: str, allowed_roots: list[Path]
+) -> tuple[Path | None, str | None]:
+    """Resolve a user-supplied directory under one of the allowed roots."""
+    safe = safe_user_dir(raw)
+    if safe is None:
+        return None, None
+    target = (base / safe).resolve() if safe else base.resolve()
+    for root in allowed_roots:
+        try:
+            target.relative_to(root.resolve())
+            return target, safe
+        except ValueError:
+            continue
+    return None, None
 
 
 def classify_file(path: Path) -> str:
@@ -3239,6 +3272,66 @@ async def list_files(request: Request) -> JSONResponse:
     allowed_roots = [
         root.resolve() for root in _allowed_file_roots(challenge_id, challenge_dir)
     ]
+
+    if request.query_params.get("browse") == "1":
+        requested_dir = request.query_params.get("dir", "")
+        current_dir, safe_dir = resolve_allowed_dir(
+            challenge_dir, requested_dir, allowed_roots
+        )
+        if safe_dir is None:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if not current_dir or not current_dir.is_dir():
+            return JSONResponse({"error": "not found"}, status_code=404)
+
+        entries = []
+        try:
+            children = sorted(
+                current_dir.iterdir(),
+                key=lambda p: (not p.is_dir(), p.name.casefold()),
+            )
+        except OSError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        for child in children:
+            try:
+                resolved = child.resolve()
+            except OSError:
+                continue
+            if not any(_is_relative_to(resolved, root) for root in allowed_roots):
+                continue
+
+            rel = (
+                (PurePosixPath(safe_dir) / child.name).as_posix()
+                if safe_dir else child.name
+            )
+            try:
+                if child.is_dir():
+                    entries.append({
+                        "kind": "directory",
+                        "name": child.name,
+                        "path": rel,
+                    })
+                elif child.is_file():
+                    entries.append({
+                        "kind": "file",
+                        "name": child.name,
+                        "path": rel,
+                        "size": child.stat().st_size,
+                        "type": classify_file(child),
+                    })
+            except OSError:
+                continue
+
+        parent = ""
+        if safe_dir:
+            parent_path = PurePosixPath(safe_dir).parent.as_posix()
+            parent = "" if parent_path == "." else parent_path
+        return JSONResponse({
+            "path": safe_dir,
+            "parent": parent,
+            "entries": entries,
+        })
+
     files = []
     for p in sorted(challenge_dir.rglob("*")):
         if not p.is_file():

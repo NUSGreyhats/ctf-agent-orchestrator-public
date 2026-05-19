@@ -750,16 +750,36 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   outline: none; cursor: pointer;
 }
 
+.files-breadcrumb {
+  display: flex; align-items: center; gap: 0.2rem;
+  padding: 0.25rem 0 0.45rem; min-height: 1.8rem;
+  overflow-x: auto; scrollbar-width: thin;
+}
+.file-crumb {
+  border: 1px solid var(--border); background: var(--bg-input);
+  color: var(--text-muted); border-radius: 4px; cursor: pointer;
+  font: 0.65rem var(--mono); padding: 0.18rem 0.4rem;
+  max-width: 10rem; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex-shrink: 0;
+}
+.file-crumb:hover { color: var(--text); background: var(--bg-hover); }
+.file-crumb-sep { color: var(--text-dim); font: 0.65rem var(--mono); }
+
 .file-item {
   display: flex; align-items: center; gap: 0.35rem;
   padding: 0.25rem 0.4rem; font-size: 0.7rem; cursor: pointer;
   border-radius: 4px; transition: background 0.1s;
+  width: 100%; border: 0; background: transparent; color: var(--text-muted);
+  font-family: var(--sans); text-align: left;
 }
 .file-item:hover { background: var(--bg-hover); }
+.file-folder .file-name { color: var(--text); font-weight: 600; }
 
 .file-icon {
-  font-size: 0.7rem; width: 16px; text-align: center; flex-shrink: 0;
+  font-size: 0.55rem; width: 2rem; text-align: center; flex-shrink: 0;
+  font-family: var(--mono); color: var(--text-dim);
 }
+.file-icon-directory { color: var(--yellow); }
 .file-icon-image { color: var(--green); }
 .file-icon-text { color: var(--accent); }
 .file-icon-binary { color: var(--text-dim); }
@@ -770,6 +790,9 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 .file-size {
   color: var(--text-dim); font-family: var(--mono); font-size: 0.6rem; flex-shrink: 0;
+}
+.file-empty {
+  color: var(--text-dim); font-size: 0.72rem; padding: 0.6rem 0.4rem;
 }
 
 .file-dir-label {
