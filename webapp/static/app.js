@@ -27,6 +27,24 @@ let currentChallengeMode = "single";
 let wsConnections = new Map();      // run_id -> WebSocket
 let globalWs = null;
 let historyLoadingRuns = new Set(); // run_ids currently replaying saved chat history
+const INITIAL_TRANSCRIPT_EVENTS = 200;
+const TRANSCRIPT_PAGE_EVENTS = 200;
+const TRANSCRIPT_RENDER_BATCH = 25;
+const LIVE_RENDER_BATCH = 50;
+const MAX_TOOL_OUTPUT_DISPLAY_CHARS = 50000;
+let historyLoadToken = 0;
+let runHistoryState = new Map();
+let historyRenderDepth = 0;
+let statsRenderPending = false;
+let pendingScrollRuns = new Set();
+let scrollFramePending = false;
+let queuedRunEvents = [];
+let queuedRunEventFrame = false;
+let renderedEventNodes = new Map();
+let transcriptSearchResults = [];
+let transcriptSearchActiveIndex = -1;
+let metadataLastSyncAt = null;
+let metadataSyncTimer = null;
 
 // Per-run counters
 let runToolCounts = new Map();
@@ -34,12 +52,14 @@ let runStepCounts = new Map();
 
 // Per-run statistics
 let runStats = new Map();
+let statsUseSnapshot = false;
+let statsRefreshTimer = null;
 
 // Timer & cost
-let timerStart = null;
 let timerInterval = null;
 let challengeFlagFormat = "";
 let challengeFlagFormats = [];
+let currentFlagQuestions = [];
 let lastThinkingEl = null;
 
 // === Views ===
@@ -212,6 +232,64 @@ async function api(path, opts = {}) {
   const res = await fetch(path, { ...opts, headers });
   if (res.status === 401) { window.location.reload(); return null; }
   return res;
+}
+
+function newestConnectionSync(connections) {
+  let newest = null;
+  for (const conn of connections || []) {
+    const value = conn.last_sync;
+    if (!value) continue;
+    const ts = parseServerTimestamp(value);
+    if (Number.isNaN(ts.getTime())) continue;
+    if (!newest || ts > newest) newest = ts;
+  }
+  return newest;
+}
+
+function parseServerTimestamp(value) {
+  if (value instanceof Date) return value;
+  if (typeof value !== "string") return new Date(value);
+  const trimmed = value.trim();
+  if (!trimmed) return new Date(NaN);
+  // Legacy backend timestamps were UTC but had no timezone suffix.
+  const hasTimezone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(trimmed);
+  return new Date(hasTimezone ? trimmed : `${trimmed}Z`);
+}
+
+function setMetadataLastSync(value) {
+  if (!value) return;
+  const ts = parseServerTimestamp(value);
+  if (Number.isNaN(ts.getTime())) return;
+  metadataLastSyncAt = ts;
+  renderMetadataSyncAge();
+  if (!metadataSyncTimer) {
+    metadataSyncTimer = setInterval(renderMetadataSyncAge, 30 * 1000);
+  }
+}
+
+function formatRelativeTime(ts) {
+  const diffMs = Date.now() - ts.getTime();
+  if (diffMs < 0) return "just now";
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function renderMetadataSyncAge() {
+  const el = $("#metadata-sync-age");
+  if (!el) return;
+  if (!metadataLastSyncAt) {
+    el.textContent = "CTF metadata not synced yet";
+    return;
+  }
+  el.textContent = `CTF metadata updated ${formatRelativeTime(metadataLastSyncAt)}`;
+  el.title = metadataLastSyncAt.toLocaleString();
 }
 
 // === Login ===
@@ -531,6 +609,7 @@ async function loadConnections() {
   const res = await api("/api/connections");
   if (!res) return;
   savedConnections = await res.json();
+  setMetadataLastSync(newestConnectionSync(savedConnections));
   renderSyncConnections();
 }
 
@@ -570,11 +649,21 @@ async function triggerSync(connId) {
     return;
   }
   const data = await res.json();
+  setMetadataLastSync(data.last_sync);
+  const savedConn = savedConnections.find((c) => c.id === connId);
+  if (savedConn && data.last_sync) savedConn.last_sync = data.last_sync;
   if (!data.challenges.length) {
     showToast(`No new challenges (${data.total} total on platform)`, "info");
     return;
   }
-  showToast(`Found ${data.new} new challenge${data.new !== 1 ? "s" : ""}`, "success");
+  if (data.new > 0) {
+    showToast(`Found ${data.new} new unsolved challenge${data.new !== 1 ? "s" : ""}`, "success");
+  } else if (data.skipped_solved > 0) {
+    showToast(
+      `No new unsolved challenges; ${data.skipped_solved} solved challenge${data.skipped_solved !== 1 ? "s" : ""} available in preview`,
+      "info",
+    );
+  }
 
   // Open import modal in preview phase with the fetched challenges
   importPluginConfig = savedConnections.find((c) => c.id === connId)?.config || {};
@@ -608,6 +697,7 @@ async function pollConnections() {
     if (!res || !res.ok) return;
     const data = await res.json();
     const bar = $("#sync-notify-bar");
+    setMetadataLastSync(data.last_sync);
 
     if (data.new_total > 0) {
       bar.innerHTML = `<span class="sync-notify-text">!! ${data.new_total} new challenge${data.new_total !== 1 ? "s" : ""} to sync !!</span><button class="sync-notify-close" title="Dismiss">&times;</button>`;
@@ -988,9 +1078,15 @@ async function openChallenge(id) {
   stepCount = 0;
   pendingTools.clear();
   foundFlags.clear();
+  flagDetails.clear();
   runToolCounts.clear();
   runStepCounts.clear();
   runStats.clear();
+  statsUseSnapshot = false;
+  if (statsRefreshTimer) {
+    clearTimeout(statsRefreshTimer);
+    statsRefreshTimer = null;
+  }
   $("#manual-flag-input").value = "";
   $("#flags-list").innerHTML = "";
   $("#flags-section").classList.add("hidden");
@@ -1052,12 +1148,15 @@ async function openChallenge(id) {
   // Reset timer / cost
   lastThinkingEl = null;
   $("#detail-timer").textContent = "";
-  foundFlags.clear(); $("#flags-list").innerHTML = ""; $("#flags-section").classList.add("hidden");
+  foundFlags.clear(); flagDetails.clear(); $("#flags-list").innerHTML = ""; $("#flags-section").classList.add("hidden");
+  clearTranscriptSearch();
+  currentFlagQuestions = c.flag_questions || [];
 
   // Restore persisted flags
   const df = c.detected_flags || {};
+  const flagMeta = c.detected_flag_meta || {};
   for (const [f, status] of Object.entries(df)) {
-    showFlagBanner(f);
+    showFlagBanner(f, flagMeta[f] || findFlagDetail(flagMeta, f) || {});
     if (status === "correct" || status === "wrong") setFlagStatus(f, status);
   }
 
@@ -1080,6 +1179,8 @@ async function openChallenge(id) {
     const s = getRunStats(run.id);
     if (run.duration_ms) s.durationMs = run.duration_ms;
   }
+  renderStats();
+  loadChallengeStatsSnapshot(id);
   loadFiles();
 }
 
@@ -1102,6 +1203,71 @@ function updateCounters() {
   $("#step-counter").textContent = stepCount ? `${stepCount} steps` : "";
 }
 
+function durationMs(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function runTimerMs(run) {
+  if (!run) return 0;
+  let total = durationMs(run.duration_ms);
+  if (run.status === "solving" && run._timerStartedAt) {
+    total += Math.max(0, Date.now() - run._timerStartedAt);
+  }
+  return total;
+}
+
+function currentChallengeTimerMs() {
+  return currentRuns.reduce((sum, run) => sum + runTimerMs(run), 0);
+}
+
+function activateRunTimer(run, reset = false) {
+  if (!run) return;
+  if (reset) run.duration_ms = 0;
+  run.status = "solving";
+  run._timerStartedAt = Date.now();
+}
+
+function freezeRunTimer(run) {
+  if (!run || !run._timerStartedAt) return;
+  run.duration_ms = runTimerMs(run);
+  delete run._timerStartedAt;
+}
+
+function syncRunTimerState() {
+  const now = Date.now();
+  for (const run of currentRuns) {
+    if (run.status === "solving") {
+      if (!run._timerStartedAt) run._timerStartedAt = now;
+    } else {
+      freezeRunTimer(run);
+    }
+  }
+}
+
+function markRunsSolving(runId = "", options = {}) {
+  for (const run of currentRuns) {
+    if (runId && run.id !== runId) continue;
+    if (run.status === "solved") continue;
+    activateRunTimer(run, !!options.reset);
+  }
+}
+
+function applyRunStatusEvent(event, fallbackRunId) {
+  const rid = event.run_id || fallbackRunId;
+  const run = currentRuns.find((r) => r.id === rid);
+  if (!run) return;
+  if (event.duration_ms !== undefined && event.duration_ms !== null) {
+    run.duration_ms = durationMs(event.duration_ms);
+  }
+  if (event.status) run.status = event.status;
+  if (run.status === "solving") {
+    run._timerStartedAt = Date.now();
+  } else {
+    delete run._timerStartedAt;
+  }
+}
+
 // === Detail Buttons ===
 $("#btn-back").addEventListener("click", () => {
   disconnectAllWS(); stopTimer(); currentChallengeId = null;
@@ -1113,6 +1279,7 @@ $("#btn-start").addEventListener("click", async () => {
   if (!currentChallengeId) return;
   const res = await api(`/api/challenges/${currentChallengeId}/solve`, { method: "POST" });
   if (res && res.ok) {
+    markRunsSolving();
     updateStatusBadge("solving"); updateButtons("solving"); startTimer();
   }
 });
@@ -1121,12 +1288,13 @@ $("#btn-retry").addEventListener("click", async () => {
   if (!currentChallengeId) return;
   initRunTabs([]);
   $("#error-banner").classList.add("hidden");
-  foundFlags.clear(); $("#flags-list").innerHTML = ""; $("#flags-section").classList.add("hidden");
+  foundFlags.clear(); flagDetails.clear(); $("#flags-list").innerHTML = ""; $("#flags-section").classList.add("hidden");
   stepCount = 0;
   lastThinkingEl = null;
-  pendingTools.clear(); runToolCounts.clear(); runStepCounts.clear(); runStats.clear(); updateCounters();
+  pendingTools.clear(); runToolCounts.clear(); runStepCounts.clear(); runStats.clear(); statsUseSnapshot = false; updateCounters();
   const res = await api(`/api/challenges/${currentChallengeId}/solve`, { method: "POST" });
   if (res && res.ok) {
+    markRunsSolving("", { reset: true });
     updateStatusBadge("solving"); updateButtons("solving"); startTimer();
     // Re-open to pick up new runs from the server
     openChallenge(currentChallengeId);
@@ -1137,6 +1305,7 @@ $("#btn-resume").addEventListener("click", async () => {
   if (!currentChallengeId) return;
   const res = await api(`/api/challenges/${currentChallengeId}/solve?resume=1`, { method: "POST" });
   if (res && res.ok) {
+    markRunsSolving();
     updateStatusBadge("solving"); updateButtons("solving"); startTimer();
     openChallenge(currentChallengeId);
   }
@@ -1204,9 +1373,13 @@ function connectAllRuns(challengeId, runs) {
     setWsStatus("disconnected");
     return;
   }
-  for (const run of runs) {
-    connectRunWS(challengeId, run.id, run.agent);
-  }
+  const token = historyLoadToken;
+  (async () => {
+    for (const run of runs) {
+      if (token !== historyLoadToken || currentChallengeId !== challengeId) return;
+      await loadInitialRunHistoryAndConnect(challengeId, run, token);
+    }
+  })();
 }
 
 function connectGlobalWS() {
@@ -1216,6 +1389,9 @@ function connectGlobalWS() {
   globalWs.onmessage = (e) => {
     const event = JSON.parse(e.data);
     if (event.type === "flag_found") {
+      if (event.challenge_id === currentChallengeId && event.flag) {
+        showFlagBanner(event.flag, event.meta || {});
+      }
       showFlagFoundToast(
         event.challenge_name || "Challenge",
         event.agent || "Agent",
@@ -1224,7 +1400,13 @@ function connectGlobalWS() {
       );
     }
     if (event.type === "flag_result" && event.flag) {
-      setFlagStatus(event.flag, event.correct ? "correct" : "wrong");
+      if (event.challenge_id === currentChallengeId) {
+        if (event.flag_questions) {
+          currentFlagQuestions = event.flag_questions;
+          updateFlagTargetSelects();
+        }
+        setFlagStatus(event.flag, event.correct ? "correct" : "wrong", event.meta || null);
+      }
     }
     if (event.type === "challenge_status" && event.challenge_id) {
       updateDashboardChallengeStatus(event.challenge_id, event.status);
@@ -1252,9 +1434,434 @@ function updateDashboardChallengeStatus(challengeId, status) {
   badge.className = "badge badge-" + status;
 }
 
-function connectRunWS(challengeId, runId, agentLabel) {
+function isTranscriptEvent(event) {
+  return !["run_status", "challenge_status", "run_added", "flag_found"].includes(event.type);
+}
+
+function rememberTranscriptEvent(runId, event) {
+  if (!isTranscriptEvent(event)) return;
+  const state = runHistoryState.get(runId) || {
+    total: 0,
+    nextBefore: null,
+    hasMore: false,
+    loading: false,
+  };
+  state.total = (state.total || 0) + 1;
+  runHistoryState.set(runId, state);
+}
+
+function yieldToBrowser() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function fetchRunEvents(challengeId, runId, params = {}) {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) qs.set(key, String(value));
+  }
+  const res = await api(
+    `/api/challenges/${encodeURIComponent(challengeId)}/runs/${encodeURIComponent(runId)}/events?${qs}`
+  );
+  if (!res || !res.ok) {
+    throw new Error(`failed to load transcript (${res ? res.status : "network"})`);
+  }
+  return res.json();
+}
+
+function transcriptNodeKey(runId, eventIndex) {
+  return `${runId}:${eventIndex}`;
+}
+
+function markRenderedEventNodes(runId, eventIndex, feed, startNode) {
+  if (!Number.isInteger(eventIndex) || !feed) return;
+  const nodes = [];
+  let node = startNode ? startNode.nextSibling : feed.firstChild;
+  while (node) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      node.dataset.runId = runId;
+      node.dataset.eventIndex = String(eventIndex);
+      nodes.push(node);
+    }
+    node = node.nextSibling;
+  }
+  if (nodes.length) {
+    renderedEventNodes.set(transcriptNodeKey(runId, eventIndex), nodes[0]);
+  }
+}
+
+function renderRunEventWithIndex(runId, event, eventIndex = null) {
+  const feed = document.getElementById(`feed-${runId}`) || document.getElementById("feed-__default__");
+  const marker = feed ? feed.lastChild : null;
+  renderRunEvent(runId, event);
+  markRenderedEventNodes(runId, eventIndex, feed, marker);
+}
+
+async function renderEventsChunked(runId, events, options = {}) {
+  if (!events || !events.length) return;
+  const feed = document.getElementById(`feed-${runId}`) || document.getElementById("feed-__default__");
+  if (!feed) return;
+
+  const prepend = options.prepend === true;
+  let insertMarker = null;
+  let appendMarker = null;
+  let previousHeight = 0;
+  let previousTop = 0;
+  if (prepend) {
+    previousHeight = feed.scrollHeight;
+    previousTop = feed.scrollTop;
+    const historyControls = feed.querySelector(".history-load-controls");
+    const insertBefore = historyControls ? historyControls.nextSibling : feed.firstChild;
+    insertMarker = document.createComment("older-history-insert");
+    appendMarker = document.createComment("older-history-append");
+    feed.insertBefore(insertMarker, insertBefore);
+    feed.appendChild(appendMarker);
+  }
+
+  historyRenderDepth++;
+  try {
+    for (let i = 0; i < events.length; i += TRANSCRIPT_RENDER_BATCH) {
+      const chunk = events.slice(i, i + TRANSCRIPT_RENDER_BATCH);
+      for (let j = 0; j < chunk.length; j++) {
+        const eventIndex = Number.isInteger(options.startIndex)
+          ? options.startIndex + i + j
+          : null;
+        renderRunEventWithIndex(runId, chunk[j], eventIndex);
+      }
+      if (!prepend && i + TRANSCRIPT_RENDER_BATCH < events.length) await yieldToBrowser();
+    }
+  } finally {
+    historyRenderDepth--;
+    if (prepend && insertMarker?.parentNode && appendMarker?.parentNode) {
+      const fragment = document.createDocumentFragment();
+      let node = appendMarker.nextSibling;
+      while (node) {
+        const next = node.nextSibling;
+        fragment.appendChild(node);
+        node = next;
+      }
+      appendMarker.remove();
+      feed.insertBefore(fragment, insertMarker);
+      insertMarker.remove();
+      feed.scrollTop = previousTop + (feed.scrollHeight - previousHeight);
+    }
+    flushDeferredStats();
+  }
+}
+
+function updateHistoryLoadButton(runId) {
+  const feed = document.getElementById(`feed-${runId}`);
+  if (!feed) return;
+  const state = runHistoryState.get(runId);
+  let controls = feed.querySelector(".history-load-controls");
+  if (!state?.hasMore) {
+    if (controls) controls.remove();
+    return;
+  }
+  if (!controls) {
+    controls = document.createElement("div");
+    controls.className = "history-load-controls";
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn-ghost btn-sm history-load-btn";
+    btn.addEventListener("click", () => loadOlderRunEvents(runId));
+
+    const allBtn = document.createElement("button");
+    allBtn.type = "button";
+    allBtn.className = "btn-ghost btn-sm history-load-all-btn";
+    allBtn.addEventListener("click", () => loadAllRunEvents(runId));
+
+    controls.append(btn, allBtn);
+    feed.insertBefore(controls, feed.firstChild);
+  }
+  const btn = controls.querySelector(".history-load-btn");
+  const allBtn = controls.querySelector(".history-load-all-btn");
+  if (btn) {
+    btn.disabled = !!state.loading;
+    btn.textContent = state.loadingAll
+      ? "Loading older messages..."
+      : state.loading ? "Loading older messages..." : "Load older messages";
+  }
+  if (allBtn) {
+    allBtn.disabled = !!state.loading;
+    allBtn.textContent = state.loadingAll ? "Loading all messages..." : "Load All Messages";
+  }
+}
+
+async function loadHistoryPage(runId, state, challengeId, token, limit) {
+  const data = await fetchRunEvents(challengeId, runId, {
+    before: state.nextBefore,
+    limit,
+  });
+  if (token !== historyLoadToken || currentChallengeId !== challengeId) return false;
+  state.total = Math.max(state.total || 0, data.total || 0);
+  state.nextBefore = data.next_before;
+  state.hasMore = !!data.has_more;
+  await renderEventsChunked(runId, data.events || [], {
+    prepend: true,
+    startIndex: data.start || 0,
+  });
+  return true;
+}
+
+async function loadOlderRunEvents(runId) {
+  const state = runHistoryState.get(runId);
+  if (!state || !state.hasMore || state.loading || !currentChallengeId) return;
+  const challengeId = currentChallengeId;
+  const token = historyLoadToken;
+  state.loading = true;
+  state.loadingAll = false;
+  updateHistoryLoadButton(runId);
+  historyLoadingRuns.add(runId);
+  try {
+    await loadHistoryPage(runId, state, challengeId, token, TRANSCRIPT_PAGE_EVENTS);
+  } catch (err) {
+    console.warn("Failed to load older transcript events", err);
+    showToast("Failed to load older messages", "error");
+  } finally {
+    state.loading = false;
+    state.loadingAll = false;
+    historyLoadingRuns.delete(runId);
+    updateHistoryLoadButton(runId);
+  }
+}
+
+async function loadAllRunEvents(runId) {
+  const state = runHistoryState.get(runId);
+  if (!state || !state.hasMore || state.loading || !currentChallengeId) return;
+  const challengeId = currentChallengeId;
+  const token = historyLoadToken;
+  state.loading = true;
+  state.loadingAll = true;
+  updateHistoryLoadButton(runId);
+  historyLoadingRuns.add(runId);
+  try {
+    while (
+      state.hasMore &&
+      token === historyLoadToken &&
+      currentChallengeId === challengeId
+    ) {
+      const loaded = await loadHistoryPage(runId, state, challengeId, token, 500);
+      if (!loaded || !state.hasMore) break;
+      await yieldToBrowser();
+    }
+  } catch (err) {
+    console.warn("Failed to load full transcript", err);
+    showToast("Failed to load all messages", "error");
+  } finally {
+    state.loading = false;
+    state.loadingAll = false;
+    historyLoadingRuns.delete(runId);
+    updateHistoryLoadButton(runId);
+  }
+}
+
+async function loadRunEventsThrough(runId, eventIndex) {
+  let state = runHistoryState.get(runId);
+  while (
+    state &&
+    state.hasMore &&
+    !state.loading &&
+    Number.isInteger(state.nextBefore) &&
+    state.nextBefore > eventIndex
+  ) {
+    await loadOlderRunEvents(runId);
+    state = runHistoryState.get(runId);
+  }
+}
+
+async function loadInitialRunHistoryAndConnect(challengeId, run, token) {
+  const runId = run.id;
+  const state = {
+    total: 0,
+    nextBefore: null,
+    hasMore: false,
+    loading: true,
+    loadingAll: false,
+  };
+  runHistoryState.set(runId, state);
+  historyLoadingRuns.add(runId);
+  updateHistoryLoadButton(runId);
+
+  try {
+    const data = await fetchRunEvents(challengeId, runId, {
+      limit: INITIAL_TRANSCRIPT_EVENTS,
+    });
+    if (token !== historyLoadToken || currentChallengeId !== challengeId) return;
+
+    state.total = data.total || 0;
+    state.nextBefore = data.next_before;
+    state.hasMore = !!data.has_more;
+    state.loading = false;
+    await renderEventsChunked(runId, data.events || [], {
+      startIndex: data.start || 0,
+    });
+    updateHistoryLoadButton(runId);
+    connectRunWS(challengeId, runId, run.agent, { after: state.total || 0 });
+  } catch (err) {
+    console.warn("Failed to load initial transcript history", err);
+    if (token !== historyLoadToken || currentChallengeId !== challengeId) return;
+    state.loading = false;
+    historyLoadingRuns.delete(runId);
+    updateHistoryLoadButton(runId);
+    showToast("Failed to load transcript history; live updates still connected", "error");
+    connectRunWS(challengeId, runId, run.agent, { history: false });
+  }
+}
+
+async function searchTranscript() {
+  const input = $("#transcript-search-input");
+  const resultsEl = $("#transcript-search-results");
+  const clearBtn = $("#btn-transcript-search-clear");
+  if (!input || !resultsEl || !currentChallengeId) return;
+  const query = input.value.trim();
+  transcriptSearchResults = [];
+  transcriptSearchActiveIndex = -1;
+  if (!query) {
+    resultsEl.classList.add("hidden");
+    clearTranscriptSearchHighlight();
+    if (clearBtn) clearBtn.classList.add("hidden");
+    return;
+  }
+
+  resultsEl.classList.remove("hidden");
+  resultsEl.innerHTML = '<div class="transcript-search-summary">Searching...</div>';
+  if (clearBtn) clearBtn.classList.remove("hidden");
+  const qs = new URLSearchParams({ q: query, limit: "100" });
+  const res = await api(`/api/challenges/${currentChallengeId}/transcript-search?${qs}`);
+  if (!res || !res.ok) {
+    resultsEl.innerHTML = '<div class="transcript-search-summary">Search failed</div>';
+    return;
+  }
+  renderTranscriptSearchResults(await res.json());
+}
+
+function renderTranscriptSearchResults(data) {
+  const resultsEl = $("#transcript-search-results");
+  if (!resultsEl) return;
+  transcriptSearchResults = data.matches || [];
+  transcriptSearchActiveIndex = -1;
+  if (!transcriptSearchResults.length) {
+    resultsEl.innerHTML = '<div class="transcript-search-summary">No matches</div>';
+    return;
+  }
+  const suffix = data.truncated ? " shown, refine search for more" : "";
+  resultsEl.innerHTML = `
+    <div class="transcript-search-summary">${transcriptSearchResults.length} match${transcriptSearchResults.length !== 1 ? "es" : ""}${suffix}</div>
+    ${transcriptSearchResults.map((match, idx) => `
+      <button class="transcript-search-result" data-index="${idx}">
+        <span class="transcript-search-result-meta">${esc(runLabelForSearch(match.run_id, match.run_label))} &middot; event ${match.event_index} &middot; ${esc(match.event_type || "event")}</span>
+        <span class="transcript-search-result-preview">${esc(match.preview || "")}</span>
+      </button>
+    `).join("")}
+  `;
+  resultsEl.querySelectorAll(".transcript-search-result").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      focusTranscriptSearchResult(Number(btn.dataset.index));
+    });
+  });
+}
+
+function runLabelForSearch(runId, fallback) {
+  const run = currentRuns.find((r) => r.id === runId);
+  if (!run) return fallback || runId;
+  const meta = getAgentMeta(run.agent);
+  return meta.label || run.agent || fallback || runId;
+}
+
+function clearTranscriptSearchHighlight() {
+  document.querySelectorAll(".transcript-search-hit").forEach((el) =>
+    el.classList.remove("transcript-search-hit")
+  );
+}
+
+async function focusTranscriptSearchResult(index) {
+  const result = transcriptSearchResults[index];
+  if (!result) return;
+  transcriptSearchActiveIndex = index;
+  await focusTranscriptEvent(result.run_id, result.event_index);
+}
+
+async function focusTranscriptEvent(runId, eventIndex) {
+  if (!isSplitView() && activeRunId !== runId) switchRunTab(runId);
+
+  let node = renderedEventNodes.get(transcriptNodeKey(runId, eventIndex));
+  if (!node) {
+    await loadRunEventsThrough(runId, eventIndex);
+    node = renderedEventNodes.get(transcriptNodeKey(runId, eventIndex));
+  }
+  if (!node) {
+    showToast("Transcript event is not loaded yet", "info");
+    return;
+  }
+  clearTranscriptSearchHighlight();
+  node.classList.add("transcript-search-hit");
+  node.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+function clearTranscriptSearch() {
+  const input = $("#transcript-search-input");
+  const resultsEl = $("#transcript-search-results");
+  const clearBtn = $("#btn-transcript-search-clear");
+  if (input) input.value = "";
+  if (resultsEl) resultsEl.classList.add("hidden");
+  if (clearBtn) clearBtn.classList.add("hidden");
+  transcriptSearchResults = [];
+  transcriptSearchActiveIndex = -1;
+  clearTranscriptSearchHighlight();
+}
+
+function enqueueRunEvent(runId, event, afterRender) {
+  queuedRunEvents.push({ runId, event, afterRender });
+  if (queuedRunEventFrame) return;
+  queuedRunEventFrame = true;
+  requestAnimationFrame(flushQueuedRunEvents);
+}
+
+function renderQueuedRunItem(item) {
+  const state = runHistoryState.get(item.runId);
+  const eventIndex = isTranscriptEvent(item.event) && state
+    ? state.total || 0
+    : null;
+  renderRunEventWithIndex(item.runId, item.event, eventIndex);
+  if (item.afterRender) item.afterRender(item.event);
+}
+
+function flushQueuedRunEventsNow(runId) {
+  if (!queuedRunEvents.length) return;
+  const remaining = [];
+  for (const item of queuedRunEvents) {
+    if (runId == null || item.runId === runId) renderQueuedRunItem(item);
+    else remaining.push(item);
+  }
+  queuedRunEvents = remaining;
+  if (!queuedRunEvents.length) queuedRunEventFrame = false;
+}
+
+function flushQueuedRunEvents() {
+  queuedRunEventFrame = false;
+  const batch = queuedRunEvents.splice(0, LIVE_RENDER_BATCH);
+  for (const item of batch) {
+    renderQueuedRunItem(item);
+  }
+  if (queuedRunEvents.length) {
+    queuedRunEventFrame = true;
+    requestAnimationFrame(flushQueuedRunEvents);
+  }
+}
+
+function connectRunWS(challengeId, runId, agentLabel, options = {}) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(`${proto}//${location.host}/ws/${challengeId}/${runId}`);
+  const params = new URLSearchParams();
+  if (Number.isInteger(options.after)) {
+    params.set("after", String(options.after));
+  } else if (options.history === false) {
+    params.set("history", "0");
+  }
+  const qs = params.toString();
+  const ws = new WebSocket(
+    `${proto}//${location.host}/ws/${encodeURIComponent(challengeId)}/${encodeURIComponent(runId)}${qs ? `?${qs}` : ""}`
+  );
   let hydrating = true;
   historyLoadingRuns.add(runId);
   ws.onopen = () => {
@@ -1262,14 +1869,18 @@ function connectRunWS(challengeId, runId, agentLabel) {
   };
   ws.onmessage = (e) => {
     const event = JSON.parse(e.data);
-    renderRunEvent(runId, event);
-    if (hydrating && event.type === "run_status") {
-      hydrating = false;
-      finishHistoryLoad(runId);
-    }
+    enqueueRunEvent(runId, event, (rendered) => {
+      if (hydrating && rendered.type === "run_status") {
+        hydrating = false;
+        finishHistoryLoad(runId);
+      } else {
+        rememberTranscriptEvent(runId, rendered);
+      }
+    });
   };
   ws.onclose = () => {
     historyLoadingRuns.delete(runId);
+    flushQueuedRunEventsNow(runId);
     if (currentChallengeId !== challengeId) return;
     // Don't reconnect if the run is in a terminal state
     const run = currentRuns.find(r => r.id === runId);
@@ -1285,7 +1896,8 @@ function connectRunWS(challengeId, runId, agentLabel) {
     if (!anyOpen) setWsStatus("reconnecting");
     setTimeout(() => {
       if (currentChallengeId === challengeId) {
-        connectRunWS(challengeId, runId, agentLabel);
+        const state = runHistoryState.get(runId);
+        connectRunWS(challengeId, runId, agentLabel, state ? { after: state.total || 0 } : undefined);
       }
     }, 2000);
   };
@@ -1293,7 +1905,18 @@ function connectRunWS(challengeId, runId, agentLabel) {
 }
 
 function disconnectAllWS() {
+  historyLoadToken++;
   historyLoadingRuns.clear();
+  runHistoryState.clear();
+  renderedEventNodes.clear();
+  queuedRunEvents = [];
+  queuedRunEventFrame = false;
+  if (statsRefreshTimer) {
+    clearTimeout(statsRefreshTimer);
+    statsRefreshTimer = null;
+  }
+  pendingScrollRuns.clear();
+  scrollFramePending = false;
   for (const [, ws] of wsConnections) {
     ws.onclose = null;
     ws.close();
@@ -1326,14 +1949,33 @@ function scrollBottom() {
   if (autoScroll && f) f.scrollTop = f.scrollHeight;
 }
 
-function scrollBottomIfActive(runId) {
-  if (historyLoadingRuns.has(runId)) return;
-  if (isSplitView()) {
-    const f = document.getElementById(`feed-${runId}`);
-    if (autoScroll && f) f.scrollTop = f.scrollHeight;
+function flushPendingScrolls() {
+  scrollFramePending = false;
+  if (!autoScroll) {
+    updateScrollBtn();
+    pendingScrollRuns.clear();
     return;
   }
-  if (runId === activeRunId) scrollBottom();
+  if (isSplitView()) {
+    for (const rid of pendingScrollRuns) {
+      const f = document.getElementById(`feed-${rid}`);
+      if (f) f.scrollTop = f.scrollHeight;
+    }
+  } else if (pendingScrollRuns.has(activeRunId)) {
+    scrollBottom();
+  }
+  pendingScrollRuns.clear();
+  updateScrollBtn();
+}
+
+function scrollBottomIfActive(runId) {
+  if (historyLoadingRuns.has(runId)) return;
+  if (!isSplitView() && runId !== activeRunId) return;
+  pendingScrollRuns.add(runId);
+  if (!scrollFramePending) {
+    scrollFramePending = true;
+    requestAnimationFrame(flushPendingScrolls);
+  }
 }
 
 function finishHistoryLoad(runId) {
@@ -1702,9 +2344,9 @@ async function addFlagFormatAndScan() {
   const detected = data.detected || [];
   for (const item of detected) {
     if (!item.flag) continue;
-    showFlagBanner(item.flag);
+    showFlagBanner(item.flag, item.meta || {});
     if (item.status === "correct" || item.status === "wrong") {
-      setFlagStatus(item.flag, item.status);
+      setFlagStatus(item.flag, item.status, item.meta || null);
     }
   }
   const suffix = data.auto_submit && detected.length ? " and queued auto-submit" : "";
@@ -1736,9 +2378,9 @@ async function addManualFlag() {
 
   input.value = "";
   const storedFlag = data.flag || flag;
-  showFlagBanner(storedFlag);
+  showFlagBanner(storedFlag, data.meta || {});
   if (data.status === "correct" || data.status === "wrong") {
-    setFlagStatus(storedFlag, data.status);
+    setFlagStatus(storedFlag, data.status, data.meta || null);
   }
   showToast(data.added ? "Flag added" : "Flag already exists");
 }
@@ -1791,6 +2433,7 @@ function checkForFlag(text) {
 }
 
 const foundFlags = new Map();
+const flagDetails = new Map();
 
 function knownFlagFor(flag) {
   const wanted = flagLookupKey(flag);
@@ -1800,8 +2443,164 @@ function knownFlagFor(flag) {
   return null;
 }
 
-function showFlagBanner(flag) {
-  if (knownFlagFor(flag)) return;
+function selectorEscape(value) {
+  if (window.CSS && CSS.escape) return CSS.escape(value);
+  return String(value).replace(/["\\]/g, "\\$&");
+}
+
+function findFlagDetail(metaMap, flag) {
+  const wanted = flagLookupKey(flag);
+  for (const [key, value] of Object.entries(metaMap || {})) {
+    if (flagLookupKey(key) === wanted) return value;
+  }
+  return null;
+}
+
+function mergeFlagDetail(flag, meta = {}) {
+  const displayFlag = knownFlagFor(flag) || flag;
+  const existing = flagDetails.get(displayFlag) || {};
+  const merged = { ...existing, ...meta };
+  const sources = [...(existing.sources || [])];
+  for (const source of meta.sources || []) {
+    const key = `${source.type || ""}:${source.run_id || ""}:${source.event_index ?? ""}`;
+    if (!sources.some((item) => `${item.type || ""}:${item.run_id || ""}:${item.event_index ?? ""}` === key)) {
+      sources.push(source);
+    }
+  }
+  const submissions = [...(existing.submissions || [])];
+  for (const sub of meta.submissions || []) {
+    const key = `${sub.at || ""}:${sub.flag_id ?? ""}:${sub.submitted_flag || ""}:${sub.correct}`;
+    if (!submissions.some((item) => `${item.at || ""}:${item.flag_id ?? ""}:${item.submitted_flag || ""}:${item.correct}` === key)) {
+      submissions.push(sub);
+    }
+  }
+  merged.sources = sources;
+  merged.submissions = submissions;
+  flagDetails.set(displayFlag, merged);
+  return merged;
+}
+
+function flagQuestionLabel(question, idx) {
+  const label = question.question || question.identifier || `Question ${idx + 1}`;
+  const solved = question.solved ? " (solved)" : "";
+  return `${idx + 1}. ${label}${solved}`;
+}
+
+function selectFlagTargetValue(detail = {}) {
+  if (detail.flag_id !== undefined && detail.flag_id !== null && detail.flag_id !== "") {
+    return `flag_id:${detail.flag_id}`;
+  }
+  if (detail.question) return `question:${detail.question}`;
+  const unsolved = currentFlagQuestions.filter((q) => !q.solved);
+  if (unsolved.length === 1) {
+    const idx = currentFlagQuestions.indexOf(unsolved[0]);
+    const flagId = unsolved[0].flag_id;
+    return flagId !== undefined && flagId !== null && flagId !== ""
+      ? `flag_id:${flagId}`
+      : `question:${idx + 1}`;
+  }
+  return "";
+}
+
+function selectedFlagTarget(item) {
+  const select = item.querySelector(".flag-target-select");
+  if (!select) return {};
+  const value = select.value;
+  if (!value) return { missing: true };
+  if (value.startsWith("flag_id:")) return { flag_id: value.slice("flag_id:".length) };
+  if (value.startsWith("question:")) return { question: Number(value.slice("question:".length)) };
+  return {};
+}
+
+function updateFlagTargetSelects() {
+  document.querySelectorAll(".flag-item").forEach((item) => {
+    const flag = item.dataset.flag;
+    const detail = flagDetails.get(flag) || {};
+    const oldSelect = item.querySelector(".flag-target-select");
+    if (!currentFlagQuestions.length) {
+      if (oldSelect) oldSelect.remove();
+      const markBtn = item.querySelector(".btn-flag-mark");
+      if (markBtn) markBtn.textContent = "Mark Solved";
+      return;
+    }
+    const select = oldSelect || document.createElement("select");
+    select.className = "flag-target-select";
+    const selected = oldSelect?.value || selectFlagTargetValue(detail);
+    select.innerHTML = '<option value="">Choose target...</option>' + currentFlagQuestions.map((q, idx) => {
+      const flagId = q.flag_id;
+      const value = flagId !== undefined && flagId !== null && flagId !== ""
+        ? `flag_id:${esc(flagId)}`
+        : `question:${idx + 1}`;
+      return `<option value="${value}">${esc(flagQuestionLabel(q, idx))}</option>`;
+    }).join("");
+    select.value = Array.from(select.options).some((opt) => opt.value === selected) ? selected : "";
+    if (!oldSelect) item.querySelector(".flag-actions")?.prepend(select);
+    const markBtn = item.querySelector(".btn-flag-mark");
+    if (markBtn) markBtn.textContent = "Mark Slot";
+  });
+}
+
+function primaryFlagSource(detail = {}) {
+  const sources = detail.sources || [];
+  return sources.find((source) =>
+    source.run_id && Number.isInteger(source.event_index)
+  ) || sources[0] || null;
+}
+
+function flagSourceText(detail = {}) {
+  const source = primaryFlagSource(detail);
+  if (!source) return "Source not recorded";
+  if (source.type === "manual") return "Manual entry";
+  const pieces = [];
+  if (source.agent) pieces.push(source.agent);
+  if (source.type === "teammate_broadcast") pieces.push("breakthrough");
+  else if (source.type) pieces.push(source.type);
+  if (Number.isInteger(source.event_index)) pieces.push(`event ${source.event_index}`);
+  return pieces.join(" · ") || "Source recorded";
+}
+
+function flagSubmissionText(detail = {}) {
+  const submissions = detail.submissions || [];
+  if (!submissions.length) return "";
+  const last = submissions[submissions.length - 1];
+  const status = last.correct ? "correct" : "wrong";
+  const target = last.question ? `q${last.question}` : (last.flag_id ? `flag_id ${last.flag_id}` : "");
+  return [`Last submit: ${status}`, target, last.message || ""].filter(Boolean).join(" · ");
+}
+
+async function focusFlagSource(detail = {}) {
+  const source = primaryFlagSource(detail);
+  if (!source || !source.run_id || !Number.isInteger(source.event_index)) {
+    showToast("No transcript source recorded for this flag", "info");
+    return;
+  }
+  await focusTranscriptEvent(source.run_id, source.event_index);
+}
+
+function refreshFlagItem(item, flag) {
+  const detail = flagDetails.get(flag) || {};
+  const sourceEl = item.querySelector(".flag-source");
+  if (sourceEl) sourceEl.textContent = flagSourceText(detail);
+  const submitEl = item.querySelector(".flag-submit-meta");
+  if (submitEl) {
+    const text = flagSubmissionText(detail);
+    submitEl.textContent = text;
+    submitEl.classList.toggle("hidden", !text);
+  }
+  const jumpBtn = item.querySelector(".btn-flag-source");
+  const source = primaryFlagSource(detail);
+  if (jumpBtn) jumpBtn.disabled = !(source?.run_id && Number.isInteger(source.event_index));
+  updateFlagTargetSelects();
+}
+
+function showFlagBanner(flag, meta = {}) {
+  const existing = knownFlagFor(flag);
+  if (existing) {
+    mergeFlagDetail(existing, meta);
+    const item = document.querySelector(`.flag-item[data-flag="${selectorEscape(existing)}"]`);
+    if (item) refreshFlagItem(item, existing);
+    return;
+  }
 
   const section = $("#flags-section");
   const list = $("#flags-list");
@@ -1810,40 +2609,76 @@ function showFlagBanner(flag) {
   const item = document.createElement("div");
   item.className = "flag-item";
   item.dataset.flag = flag;
+  const main = document.createElement("div");
+  main.className = "flag-main";
   const span = document.createElement("span");
   span.className = "flag-text";
   span.textContent = flag;
+  const source = document.createElement("span");
+  source.className = "flag-source";
+  const submitMeta = document.createElement("span");
+  submitMeta.className = "flag-submit-meta hidden";
+  main.append(span, source, submitMeta);
 
+  const actions = document.createElement("div");
+  actions.className = "flag-actions";
   const copyBtn = document.createElement("button");
   copyBtn.className = "btn-flag-action";
   copyBtn.textContent = "Copy";
   copyBtn.addEventListener("click", () => copyToClipboard(flag, copyBtn));
-  item.append(span, copyBtn);
+  actions.appendChild(copyBtn);
+
+  const jumpBtn = document.createElement("button");
+  jumpBtn.className = "btn-flag-action btn-flag-source";
+  jumpBtn.textContent = "Jump";
+  jumpBtn.addEventListener("click", () => focusFlagSource(flagDetails.get(flag) || {}));
+  actions.appendChild(jumpBtn);
 
   const submitBtn = document.createElement("button");
   submitBtn.className = "btn-flag-action btn-flag-submit";
   submitBtn.textContent = "Submit";
   submitBtn.addEventListener("click", async () => {
     if (!currentChallengeId) return;
+    const target = selectedFlagTarget(item);
+    if (target.missing) {
+      showToast("Choose which flag target to submit to", "error");
+      return;
+    }
     submitBtn.disabled = true;
     submitBtn.textContent = "Submitting...";
     const res = await api("/api/plugins/submit-flag", {
       method: "POST",
-      body: JSON.stringify({ challenge_id: currentChallengeId, flag }),
+      body: JSON.stringify({
+        challenge_id: currentChallengeId,
+        flag,
+        run_id: activeRunId || currentRuns[0]?.id || "",
+        ...target,
+      }),
     });
     if (!res) { submitBtn.disabled = false; submitBtn.textContent = "Submit"; return; }
     const data = await res.json();
     if (data.error) {
-      submitBtn.classList.add("hidden");
+      showToast(data.error, "error");
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Submit";
       return;
     }
     const resultFlag = data.flag || flag;
+    if (data.meta) mergeFlagDetail(resultFlag, data.meta);
+    if (data.flag_questions) {
+      currentFlagQuestions = data.flag_questions;
+      updateFlagTargetSelects();
+    }
     if (data.correct) {
       setFlagStatus(resultFlag, "correct");
-      showToast("Flag correct!", "success");
-      updateStatusBadge("solved");
-      updateButtons("solved");
-      stopTimer();
+      if (data.status === "solved" || data.all_questions_solved || !currentFlagQuestions.length) {
+        showToast("Flag correct!", "success");
+        updateStatusBadge("solved");
+        updateButtons("solved");
+        stopTimer();
+      } else {
+        showToast("Flag correct for selected target", "success");
+      }
     } else {
       setFlagStatus(resultFlag, "wrong");
       submitBtn.textContent = data.message || "Wrong";
@@ -1851,33 +2686,56 @@ function showFlagBanner(flag) {
       setTimeout(() => { submitBtn.textContent = "Submit"; }, 2000);
     }
   });
-  item.appendChild(submitBtn);
+  actions.appendChild(submitBtn);
 
   const markBtn = document.createElement("button");
-  markBtn.className = "btn-flag-action";
-  markBtn.textContent = "Mark Solved";
+  markBtn.className = "btn-flag-action btn-flag-mark";
+  markBtn.textContent = currentFlagQuestions.length ? "Mark Slot" : "Mark Solved";
   markBtn.addEventListener("click", async () => {
     if (!currentChallengeId) return;
+    const target = selectedFlagTarget(item);
+    if (target.missing) {
+      showToast("Choose which flag target to mark", "error");
+      return;
+    }
     const res = await api(`/api/challenges/${currentChallengeId}/mark-solved`, {
       method: "POST",
-      body: JSON.stringify({ flag }),
+      body: JSON.stringify({
+        flag,
+        run_id: activeRunId || currentRuns[0]?.id || "",
+        ...target,
+      }),
     });
     if (res && res.ok) {
+      const data = await res.json();
+      if (data.meta) mergeFlagDetail(data.flag || flag, data.meta);
+      if (data.flag_questions) {
+        currentFlagQuestions = data.flag_questions;
+        updateFlagTargetSelects();
+      }
       setFlagStatus(flag, "correct");
-      showToast("Challenge marked as solved", "success");
-      updateStatusBadge("solved");
-      updateButtons("solved");
-      stopTimer();
+      if (data.status === "solved" || data.all_questions_solved || !currentFlagQuestions.length) {
+        showToast("Challenge marked as solved", "success");
+        updateStatusBadge("solved");
+        updateButtons("solved");
+        stopTimer();
+      } else {
+        showToast("Flag target marked correct", "success");
+      }
     }
   });
-  item.appendChild(markBtn);
+  actions.appendChild(markBtn);
 
+  item.append(main, actions);
   list.appendChild(item);
   foundFlags.set(flag, "pending");
+  mergeFlagDetail(flag, meta);
+  refreshFlagItem(item, flag);
 }
 
-function setFlagStatus(flag, status) {
+function setFlagStatus(flag, status, meta = null) {
   const displayFlag = knownFlagFor(flag) || flag;
+  if (meta) mergeFlagDetail(displayFlag, meta);
   foundFlags.set(displayFlag, status);
   const wanted = flagLookupKey(flag);
   const items = document.querySelectorAll(".flag-item");
@@ -1886,24 +2744,30 @@ function setFlagStatus(flag, status) {
     item.classList.remove("flag-correct", "flag-wrong");
     if (status === "correct") item.classList.add("flag-correct");
     else if (status === "wrong") item.classList.add("flag-wrong");
+    refreshFlagItem(item, item.dataset.flag);
   });
 }
 
 // === Timer ===
 function startTimer() {
-  stopTimer();
-  timerStart = Date.now();
+  syncRunTimerState();
+  if (timerInterval) clearInterval(timerInterval);
   timerInterval = setInterval(updateTimer, 1000);
   updateTimer();
 }
 
 function stopTimer() {
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  for (const run of currentRuns) freezeRunTimer(run);
+  updateTimer();
 }
 
 function updateTimer() {
-  if (!timerStart) return;
-  const elapsed = Math.floor((Date.now() - timerStart) / 1000);
+  const elapsed = Math.floor(currentChallengeTimerMs() / 1000);
+  if (!elapsed) {
+    $("#detail-timer").textContent = "";
+    return;
+  }
   const m = Math.floor(elapsed / 60);
   const s = elapsed % 60;
   const h = Math.floor(m / 60);
@@ -1962,13 +2826,16 @@ function renderRunEvent(runId, event) {
   if (event.type === "run_status") {
     const rid = event.run_id || runId;
     updateRunTabDot(rid, event.status);
-    const run = currentRuns.find(r => r.id === rid);
-    if (run) run.status = event.status;
+    applyRunStatusEvent(event, rid);
+    if (event.duration_ms !== undefined && event.duration_ms !== null) {
+      getRunStats(rid).durationMs = durationMs(event.duration_ms);
+    }
     if (event.error) {
       $("#error-banner").textContent = event.error;
       $("#error-banner").classList.remove("hidden");
     }
     renderStats();
+    updateTimer();
     return;
   }
 
@@ -1977,9 +2844,16 @@ function renderRunEvent(runId, event) {
     const r = event.run;
     if (currentRuns.some((x) => x.id === r.id)) return;
     currentRuns.push(r);
+    if (r.status === "solving") activateRunTimer(r);
     addRunTab(r);
     if (currentChallengeId) {
-      connectRunWS(currentChallengeId, r.id, r.agent);
+      runHistoryState.set(r.id, {
+        total: 0,
+        nextBefore: null,
+        hasMore: false,
+        loading: false,
+      });
+      connectRunWS(currentChallengeId, r.id, r.agent, { history: false });
     }
     // Refresh selectors and header with new run
     updateSteerRunSelect();
@@ -2238,7 +3112,8 @@ function renderAssistant(feed, msg, runId, eventTs) {
       const toolEl = buildToolUse(block);
       _pendingToolEls.push(toolEl);
       pendingTools.set(block.id, toolEl);
-      if (runId) { getRunStats(runId).toolCalls++; renderStats(); }
+      if (runId && !statsUseSnapshot) { getRunStats(runId).toolCalls++; renderStats(); }
+      else if (runId && historyRenderDepth === 0) scheduleStatsSnapshotRefresh();
     }
   }
 
@@ -2299,6 +3174,34 @@ function buildToolUse(block) {
   return wrapper;
 }
 
+function setToolOutput(toolEl, output, isError) {
+  const hasOutput = !!output;
+  const fullOutput = hasOutput ? output : "(no output)";
+  const truncated = hasOutput && output.length > MAX_TOOL_OUTPUT_DISPLAY_CHARS;
+  const visibleOutput = truncated
+    ? `${output.slice(0, MAX_TOOL_OUTPUT_DISPLAY_CHARS)}\n\n[Output truncated in the UI: ${output.length - MAX_TOOL_OUTPUT_DISPLAY_CHARS} more characters. Copy still uses the full output.]`
+    : fullOutput;
+
+  toolEl._outputEl.textContent = visibleOutput;
+  toolEl._outputEl.classList.toggle("tool-output-error", !!isError);
+  if (!hasOutput) return;
+
+  toolEl._outputEl.style.position = "relative";
+  toolEl._outputEl.appendChild(makeCopyBtn(output));
+  if (truncated) {
+    const fullBtn = document.createElement("button");
+    fullBtn.type = "button";
+    fullBtn.className = "btn-xs tool-output-full";
+    fullBtn.textContent = "Show full output";
+    fullBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toolEl._outputEl.textContent = fullOutput;
+      toolEl._outputEl.appendChild(makeCopyBtn(output));
+    });
+    toolEl._outputEl.appendChild(fullBtn);
+  }
+}
+
 function renderToolResults(event, feed) {
   const msg = event.message;
   if (!msg || !msg.content) return;
@@ -2338,58 +3241,217 @@ function renderToolResults(event, feed) {
     const isError = block.is_error === true;
     toolEl._statusEl.className = `tool-status ${isError ? "tool-status-error" : "tool-status-done"}`;
     toolEl._statusEl.textContent = isError ? "error" : "done";
-    toolEl._outputEl.textContent = output || "(no output)";
-    if (isError) toolEl._outputEl.classList.add("tool-output-error");
-
-    // Add copy button to output
-    if (output) {
-      const copyBtn = makeCopyBtn(output);
-      toolEl._outputEl.style.position = "relative";
-      toolEl._outputEl.appendChild(copyBtn);
-    }
+    setToolOutput(toolEl, output, isError);
 
     pendingTools.delete(block.tool_use_id);
   }
 }
 
 // === Stats Sidebar ===
+function emptyRunStatsState() {
+  return {
+    inputTokens: 0, outputTokens: 0,
+    cacheReadTokens: 0, cacheCreationTokens: 0,
+    toolCalls: 0, turns: 0,
+    costUsd: 0, durationMs: 0, durationApiMs: 0,
+    modelUsage: null,
+    resultSeen: false,
+    codexSeen: false,
+    lastResultUsage: null,
+    lastCodexUsage: null,
+    lastResultCostUsd: null,
+    lastResultTurns: null,
+    lastDurationApiMs: null,
+    lastModelUsage: {},
+  };
+}
+
 function getRunStats(runId) {
   if (!runStats.has(runId)) {
-    runStats.set(runId, {
-      inputTokens: 0, outputTokens: 0,
-      cacheReadTokens: 0, cacheCreationTokens: 0,
-      toolCalls: 0, turns: 0,
-      costUsd: 0, durationMs: 0, durationApiMs: 0,
-      modelUsage: null,
-    });
+    runStats.set(runId, emptyRunStatsState());
   }
   return runStats.get(runId);
 }
 
+function statNumber(obj, ...keys) {
+  if (!obj || typeof obj !== "object") return 0;
+  for (const key of keys) {
+    const value = obj[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+
+function normalizeUsage(raw) {
+  const details = raw?.input_token_details || raw?.inputTokenDetails || {};
+  return {
+    inputTokens: statNumber(raw, "input_tokens", "inputTokens", "prompt_tokens", "promptTokens"),
+    outputTokens: statNumber(raw, "output_tokens", "outputTokens", "completion_tokens", "completionTokens"),
+    cacheReadTokens: statNumber(
+      raw,
+      "cache_read_input_tokens",
+      "cacheReadInputTokens",
+      "cached_input_tokens",
+      "cachedInputTokens"
+    ) || statNumber(details, "cached_tokens", "cachedTokens"),
+    cacheCreationTokens: statNumber(raw, "cache_creation_input_tokens", "cacheCreationInputTokens"),
+  };
+}
+
+function usageDelta(current, previous) {
+  const prev = previous || {};
+  const delta = {};
+  for (const [key, value] of Object.entries(current)) {
+    const prior = prev[key] || 0;
+    delta[key] = value <= 0 ? 0 : value >= prior ? value - prior : value;
+  }
+  return delta;
+}
+
+function addUsageToStats(s, usage) {
+  s.inputTokens += usage.inputTokens || 0;
+  s.outputTokens += usage.outputTokens || 0;
+  s.cacheReadTokens += usage.cacheReadTokens || 0;
+  s.cacheCreationTokens += usage.cacheCreationTokens || 0;
+}
+
+function positiveDelta(current, previous) {
+  if (!current || current <= 0) return 0;
+  if (previous == null) return current;
+  return current >= previous ? current - previous : current;
+}
+
+function normalizeModelUsage(raw) {
+  const normalized = {};
+  if (!raw || typeof raw !== "object") return normalized;
+  for (const [model, usage] of Object.entries(raw)) {
+    if (!usage || typeof usage !== "object") continue;
+    normalized[model] = {
+      inputTokens: statNumber(usage, "inputTokens", "input_tokens"),
+      outputTokens: statNumber(usage, "outputTokens", "output_tokens"),
+      cacheReadInputTokens: statNumber(
+        usage,
+        "cacheReadInputTokens",
+        "cache_read_input_tokens",
+        "cachedInputTokens",
+        "cached_input_tokens"
+      ),
+      cacheCreationInputTokens: statNumber(
+        usage,
+        "cacheCreationInputTokens",
+        "cache_creation_input_tokens"
+      ),
+      costUSD: statNumber(usage, "costUSD", "cost_usd"),
+      webSearchRequests: statNumber(usage, "webSearchRequests", "web_search_requests"),
+    };
+  }
+  return normalized;
+}
+
+function addModelUsageDelta(s, current) {
+  if (!current || !Object.keys(current).length) return;
+  if (!s.modelUsage) s.modelUsage = {};
+  if (!s.lastModelUsage) s.lastModelUsage = {};
+  for (const [model, usage] of Object.entries(current)) {
+    const prev = s.lastModelUsage[model] || {};
+    const target = s.modelUsage[model] || {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      costUSD: 0,
+      webSearchRequests: 0,
+    };
+    for (const [key, value] of Object.entries(usage)) {
+      target[key] = (target[key] || 0) + positiveDelta(value, prev[key]);
+    }
+    s.modelUsage[model] = target;
+    s.lastModelUsage[model] = usage;
+  }
+}
+
+function normalizeStatsSnapshot(raw) {
+  return {
+    ...emptyRunStatsState(),
+    inputTokens: Number(raw?.inputTokens || 0),
+    outputTokens: Number(raw?.outputTokens || 0),
+    cacheReadTokens: Number(raw?.cacheReadTokens || 0),
+    cacheCreationTokens: Number(raw?.cacheCreationTokens || 0),
+    toolCalls: Number(raw?.toolCalls || 0),
+    turns: Number(raw?.turns || 0),
+    costUsd: Number(raw?.costUsd || 0),
+    durationMs: Number(raw?.durationMs || 0),
+    durationApiMs: Number(raw?.durationApiMs || 0),
+    modelUsage: raw?.modelUsage && Object.keys(raw.modelUsage).length ? raw.modelUsage : null,
+  };
+}
+
+async function loadChallengeStatsSnapshot(challengeId, options = {}) {
+  const res = await api(`/api/challenges/${encodeURIComponent(challengeId)}/stats`).catch(() => null);
+  if (!res || !res.ok) {
+    if (!options.silent) console.warn("Failed to load challenge stats snapshot");
+    return;
+  }
+  const data = await res.json();
+  if (currentChallengeId !== challengeId) return;
+
+  runStats.clear();
+  for (const [runId, stats] of Object.entries(data.runs || {})) {
+    runStats.set(runId, normalizeStatsSnapshot(stats));
+  }
+  statsUseSnapshot = true;
+  renderStats();
+}
+
+function scheduleStatsSnapshotRefresh(delay = 5000) {
+  if (!statsUseSnapshot || !currentChallengeId || statsRefreshTimer) return;
+  const challengeId = currentChallengeId;
+  statsRefreshTimer = setTimeout(() => {
+    statsRefreshTimer = null;
+    if (currentChallengeId === challengeId) {
+      loadChallengeStatsSnapshot(challengeId, { silent: true });
+    }
+  }, delay);
+}
+
 function updateRunStats(runId, event) {
   const s = getRunStats(runId);
+  if (statsUseSnapshot) {
+    if (historyRenderDepth === 0) scheduleStatsSnapshotRefresh();
+    return;
+  }
+
   if (event.type === "result") {
+    s.resultSeen = true;
     if (event.usage) {
-      s.inputTokens = event.usage.input_tokens || 0;
-      s.outputTokens = event.usage.output_tokens || 0;
-      s.cacheReadTokens = event.usage.cache_read_input_tokens || 0;
-      s.cacheCreationTokens = event.usage.cache_creation_input_tokens || 0;
+      const usage = normalizeUsage(event.usage);
+      addUsageToStats(s, usageDelta(usage, s.lastResultUsage));
+      s.lastResultUsage = usage;
     }
-    if (event.total_cost_usd) s.costUsd = event.total_cost_usd;
-    if (event.num_turns) s.turns = event.num_turns;
-    if (event.duration_ms) s.durationMs = event.duration_ms;
-    if (event.duration_api_ms) s.durationApiMs = event.duration_api_ms;
-    if (event.model_usage) s.modelUsage = event.model_usage;
+    const cost = statNumber(event, "total_cost_usd", "costUsd");
+    if (cost) {
+      s.costUsd += positiveDelta(cost, s.lastResultCostUsd);
+      s.lastResultCostUsd = cost;
+    }
+    const turns = statNumber(event, "num_turns", "turns");
+    if (turns) {
+      s.turns += positiveDelta(turns, s.lastResultTurns);
+      s.lastResultTurns = turns;
+    }
+    if (event.duration_ms) s.durationMs = Math.max(s.durationMs || 0, event.duration_ms);
+    const durationApiMs = statNumber(event, "duration_api_ms");
+    if (durationApiMs) {
+      s.durationApiMs += positiveDelta(durationApiMs, s.lastDurationApiMs);
+      s.lastDurationApiMs = durationApiMs;
+    }
+    if (event.model_usage) addModelUsageDelta(s, normalizeModelUsage(event.model_usage));
   } else if (event.type === "codex_usage" && event.usage) {
-    s.inputTokens += event.usage.input_tokens || 0;
-    s.outputTokens += event.usage.output_tokens || 0;
-    s.cacheReadTokens += event.usage.cached_input_tokens || 0;
-  } else if (event.type === "assistant" && event.message?.usage) {
-    const u = event.message.usage;
-    s.inputTokens += u.input_tokens || 0;
-    s.outputTokens += u.output_tokens || 0;
-    s.cacheReadTokens += u.cache_read_input_tokens || 0;
-    s.cacheCreationTokens += u.cache_creation_input_tokens || 0;
+    s.codexSeen = true;
+    const usage = normalizeUsage(event.usage);
+    addUsageToStats(s, usageDelta(usage, s.lastCodexUsage));
+    s.lastCodexUsage = usage;
+  } else if (event.type === "assistant" && event.message?.usage && !s.resultSeen && !s.codexSeen) {
+    addUsageToStats(s, normalizeUsage(event.message.usage));
   }
   renderStats();
 }
@@ -2413,7 +3475,17 @@ function fmtCost(usd) {
   return "$" + usd.toFixed(4);
 }
 
+function flushDeferredStats() {
+  if (historyRenderDepth > 0 || !statsRenderPending) return;
+  statsRenderPending = false;
+  renderStats();
+}
+
 function renderStats() {
+  if (historyRenderDepth > 0) {
+    statsRenderPending = true;
+    return;
+  }
   const panel = $("#stats-panel");
   if (!panel) return;
   panel.innerHTML = "";
@@ -2525,6 +3597,8 @@ function renderStats() {
         if (mu.inputTokens) mstats.push(["Input", fmtTokens(mu.inputTokens)]);
         if (mu.outputTokens) mstats.push(["Output", fmtTokens(mu.outputTokens)]);
         if (mu.cacheReadInputTokens) mstats.push(["Cache read", fmtTokens(mu.cacheReadInputTokens)]);
+        if (mu.cacheCreationInputTokens) mstats.push(["Cache write", fmtTokens(mu.cacheCreationInputTokens)]);
+        if (mu.webSearchRequests) mstats.push(["Web searches", String(mu.webSearchRequests)]);
         if (mu.costUSD != null) mstats.push(["Cost", fmtCost(mu.costUSD)]);
         for (const [lbl, val] of mstats) {
           const item = document.createElement("div");
@@ -2922,6 +3996,17 @@ $("#btn-toggle-tools").addEventListener("click", () => {
   $("#btn-toggle-tools").textContent = anyOpen ? "Expand all" : "Collapse all";
 });
 
+$("#btn-transcript-search").addEventListener("click", searchTranscript);
+$("#btn-transcript-search-clear").addEventListener("click", clearTranscriptSearch);
+$("#transcript-search-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    searchTranscript();
+  } else if (e.key === "Escape") {
+    clearTranscriptSearch();
+  }
+});
+
 // === Export Report ===
 $("#btn-export").addEventListener("click", async () => {
   if (!currentChallengeId) return;
@@ -2966,6 +4051,7 @@ async function sendSteerToRun(runId, inputEl) {
     body: JSON.stringify({ message: msg, run_id: runId }),
   });
   if (res && res.ok) {
+    markRunsSolving(runId);
     updateStatusBadge("solving");
     updateButtons("solving");
     startTimer();
@@ -2990,6 +4076,7 @@ async function sendSteer() {
     body: JSON.stringify(body),
   });
   if (res && res.ok) {
+    markRunsSolving(body.run_id || "");
     updateStatusBadge("solving");
     updateButtons("solving");
     startTimer();
@@ -3700,4 +4787,5 @@ window.addEventListener("hashchange", () => {
   connectGlobalWS();
   await handleDeepLink();
   loadDefaultAgent();
+  loadConnections();
 })();

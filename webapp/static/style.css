@@ -185,6 +185,11 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 .sync-notify-close:hover { opacity: 1; }
 .sync-notify-bar:hover { opacity: 0.85; }
+.metadata-sync-age {
+  padding: 0.35rem 0.85rem 0;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
 @keyframes sync-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.7; }
@@ -644,6 +649,9 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   color: var(--text-muted);
 }
 .tool-output-error { color: var(--red); }
+.tool-output-full {
+  display: block; margin-top: 0.45rem;
+}
 
 /* === Stats Sidebar === */
 .stats-run-section {
@@ -846,6 +854,10 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   position: absolute; inset: 0; padding: 0.5rem 0.75rem;
 }
 .run-feed.active { display: block; }
+.history-load-controls {
+  display: flex; justify-content: center; gap: 0.4rem;
+  margin: 0.25rem auto 0.75rem;
+}
 
 /* Split view */
 .agent-feeds.split-mode {
@@ -1037,7 +1049,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   border-radius: 6px; padding: 0.4rem 0.6rem; font-family: var(--mono);
 }
 .flag-item {
-  display: flex; align-items: center; gap: 0.5rem;
+  display: flex; align-items: flex-start; gap: 0.5rem;
   padding: 0.4rem 0.6rem; margin-bottom: 0.35rem;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 6px; font-family: var(--mono); font-size: 0.8rem;
@@ -1053,7 +1065,25 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   background: var(--red-dim); border-color: var(--red);
   color: var(--red);
 }
-.flag-item .flag-text { flex: 1; }
+.flag-main {
+  min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 0.18rem;
+}
+.flag-item .flag-text { overflow-wrap: anywhere; }
+.flag-source,
+.flag-submit-meta {
+  font-family: var(--sans); font-size: 0.62rem; color: var(--text-muted);
+  word-break: normal; overflow-wrap: anywhere;
+}
+.flag-actions {
+  flex-shrink: 0; display: flex; flex-wrap: wrap; justify-content: flex-end;
+  gap: 0.25rem; max-width: 12rem;
+}
+.flag-target-select {
+  min-width: 7.5rem; max-width: 12rem; font-size: 0.62rem;
+  background: var(--bg-input); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 0.15rem 0.25rem; font-family: var(--sans);
+}
 .flag-item .btn-flag-action {
   flex-shrink: 0; position: static; opacity: 1;
   background: var(--surface); border: 1px solid var(--border);
@@ -1127,7 +1157,45 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 
 /* === Panel Header Actions === */
 .panel-header-actions {
-  display: flex; gap: 0.3rem; margin-left: auto;
+  display: flex; align-items: center; gap: 0.3rem; margin-left: auto;
+}
+.transcript-search {
+  position: relative; display: flex; align-items: center; gap: 0.25rem;
+}
+.transcript-search-input {
+  width: 180px; height: 24px; padding: 0.2rem 0.45rem;
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); font-size: 0.72rem;
+  outline: none;
+}
+.transcript-search-input:focus { border-color: var(--accent); }
+.transcript-search-results {
+  position: absolute; top: calc(100% + 0.35rem); right: 0; z-index: 40;
+  width: min(560px, 80vw); max-height: 360px; overflow-y: auto;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,0.35);
+  padding: 0.35rem;
+}
+.transcript-search-summary {
+  padding: 0.35rem 0.45rem; color: var(--text-muted);
+  font-size: 0.72rem; border-bottom: 1px solid var(--border);
+}
+.transcript-search-result {
+  display: block; width: 100%; text-align: left; padding: 0.45rem;
+  background: transparent; border: none; border-radius: 6px; color: var(--text);
+  font-weight: 400; cursor: pointer;
+}
+.transcript-search-result:hover { background: var(--bg-hover); filter: none; }
+.transcript-search-result-meta {
+  display: block; color: var(--accent); font-size: 0.65rem;
+  font-weight: 700; margin-bottom: 0.2rem;
+}
+.transcript-search-result-preview {
+  display: block; color: var(--text-muted); font-size: 0.72rem;
+  line-height: 1.4;
+}
+.transcript-search-hit {
+  outline: 2px solid var(--accent); outline-offset: 2px;
 }
 .btn-xs {
   font-size: 0.65rem; padding: 0.15rem 0.45rem;

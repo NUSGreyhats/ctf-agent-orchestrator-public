@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CTF Solver</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260418p">
+  <link rel="stylesheet" href="/static/style.css?v=20260418r">
 </head>
 <body>
   <!-- Login -->
@@ -42,6 +42,7 @@
       </div>
     </header>
     <div id="sync-notify-bar" class="sync-notify-bar hidden"></div>
+    <div id="metadata-sync-age" class="metadata-sync-age">Metadata not synced</div>
     <div id="challenges-list"></div>
     <div id="export-bar" class="export-bar hidden">
       <span id="export-count">0 selected</span>
@@ -343,6 +344,12 @@
           <span id="ws-status" class="ws-indicator ws-disconnected" title="Disconnected"></span>
           <span id="step-counter" class="step-counter"></span>
           <div class="panel-header-actions">
+            <div class="transcript-search">
+              <input id="transcript-search-input" class="transcript-search-input" type="search" placeholder="Search transcript" autocomplete="off">
+              <button id="btn-transcript-search" class="btn-ghost btn-xs" title="Search transcript">Search</button>
+              <button id="btn-transcript-search-clear" class="btn-ghost btn-xs hidden" title="Clear transcript search">&times;</button>
+              <div id="transcript-search-results" class="transcript-search-results hidden"></div>
+            </div>
             <button id="btn-toggle-tools" class="btn-ghost btn-xs" title="Expand/collapse all tools">Expand all</button>
             <button id="btn-export" class="btn-ghost btn-xs" title="Export as zip (streams, files, viewer)">Export</button>
           </div>
@@ -522,6 +529,6 @@
   </div>
 
   <div id="toast-container" class="toast-container"></div>
-  <script src="/static/app.js?v=20260418p"></script>
+  <script src="/static/app.js?v=20260418r"></script>
 </body>
 </html>
