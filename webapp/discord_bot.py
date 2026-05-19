@@ -67,6 +67,10 @@ SLASH_COMMANDS = [
         "description": "Show overall CTF status — all challenges grouped by category",
     },
     {
+        "name": "help",
+        "description": "Show how to use the CTF solver Discord bot",
+    },
+    {
         "name": "files",
         "description": "List files or fetch a file from agent working directories",
         "options": [{

@@ -7066,6 +7066,29 @@ def _discord_category_choices() -> str:
     return f"Available categories: {preview}"
 
 
+def _discord_help_message() -> str:
+    return _truncate(
+        "**CTF Solver Bot Help**\n\n"
+        "**Works anywhere**\n"
+        "`/ctf` — show all challenges grouped by category.\n"
+        "`/add category:<name>` — add yourself to every challenge thread in a category.\n"
+        "`/add category:all` — add yourself to all challenge threads.\n"
+        "`/help` — show this help message.\n\n"
+        "**Use inside a challenge thread**\n"
+        "`/status` — show challenge and agent run status.\n"
+        "`/flags` — list detected flags and submission state.\n"
+        "`/broadcast message:<text>` — send a breakthrough or instruction to running agents.\n"
+        "`/submit flag:<flag>` — submit a flag to the connected CTF platform.\n"
+        "`/solved flag:<flag>` — manually mark the challenge solved; flag is optional.\n"
+        "`/stop` — stop currently running agents for this challenge.\n"
+        "`/resume` — resume failed or completed agents.\n"
+        "`/files` — list files in agent work directories.\n"
+        "`/files path:<path>` — print a small file from an agent work directory.\n"
+        "`/files path:<path> agent:<claude|codex>` — fetch from a specific agent run.\n\n"
+        f"{_discord_category_choices()}"
+    )
+
+
 async def _handle_discord_interaction(interaction: dict) -> None:
     """Handle a Discord slash command interaction."""
     try:
@@ -7090,6 +7113,15 @@ async def _handle_discord_interaction(interaction: dict) -> None:
 
     bot = get_bot(load_settings())
     if not bot:
+        return
+
+    if cmd == "help":
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            _discord_help_message(),
+            flags=64,
+        )
         return
 
     # /ctf works from any channel
