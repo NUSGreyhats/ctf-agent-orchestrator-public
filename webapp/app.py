@@ -1483,6 +1483,23 @@ async def discord_notify(challenge: dict, content: str = "", embed: dict | None 
     await bot.send_message(thread_id, content, embed)
 
 
+def _discord_fenced_text(text: str, available_chars: int) -> str:
+    overhead = len("```text\n\n```")
+    body_limit = max(0, available_chars - overhead)
+    body = str(text or "").replace("```", "'''")
+    if len(body) > body_limit:
+        body = body[: max(0, body_limit - 4)].rstrip() + "\n..."
+    return f"```text\n{body}\n```"
+
+
+def _discord_resume_prompt_message(run: dict, prompt: str) -> str:
+    model_info = run.get("model", "") or "provider default"
+    if run.get("effort"):
+        model_info += f", {run['effort']}"
+    header = f"**{run.get('agent', 'agent')}** ({model_info}) resume prompt:\n"
+    return header + _discord_fenced_text(prompt, 2000 - len(header))
+
+
 def save_settings(settings: dict) -> None:
     """Persist global settings to disk."""
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
@@ -4989,6 +5006,11 @@ async def run_agent_task(
     run["output_lines"].append(prompt_event)
     append_output_event(challenge_id, run_id, prompt_event)
     await broadcast(challenge_id, run_id, prompt_event)
+    if continue_msg:
+        await discord_notify(
+            challenge,
+            _discord_resume_prompt_message(run, prompt),
+        )
 
     # --- SDK path: use provider's run_agent if available ---
     if provider.supports_sdk:
