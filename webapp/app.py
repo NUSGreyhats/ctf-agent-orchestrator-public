@@ -2851,6 +2851,37 @@ async def broadcast_to_agents(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "sent_to": count})
 
 
+async def _steer_run_with_message(
+    challenge_id: str,
+    target_run_id: str,
+    run: dict,
+    message: str,
+    *,
+    display_message: str | None = None,
+    stop_reason: str = "steer",
+) -> None:
+    """Stop a run immediately and resume it with a continuation message."""
+    await stop_run(run, stop_reason)
+    finish_run_timer(run)
+
+    steer_event = {
+        "type": "user_steer",
+        "message": display_message or message,
+    }
+    run["output_lines"].append(steer_event)
+    append_output_event(challenge_id, target_run_id, steer_event)
+    await broadcast(challenge_id, target_run_id, steer_event)
+
+    run["status"] = "solving"
+    run["error"] = None
+    run.pop("_stop_reason", None)
+    run["task"] = asyncio.create_task(
+        run_agent_task(
+            challenge_id, target_run_id, continue_msg=message
+        )
+    )
+
+
 async def steer_challenge(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
@@ -2898,22 +2929,11 @@ async def steer_challenge(request: Request) -> JSONResponse:
                 {"error": "no run to steer"}, status_code=404
             )
 
-    # Stop current run (process or SDK task)
-    await stop_run(run, "steer")
-    finish_run_timer(run)
-
-    steer_event = {"type": "user_steer", "message": message}
-    run["output_lines"].append(steer_event)
-    append_output_event(challenge_id, target_run_id, steer_event)
-    await broadcast(challenge_id, target_run_id, steer_event)
-
-    run["status"] = "solving"
-    run["error"] = None
-    run.pop("_stop_reason", None)
-    run["task"] = asyncio.create_task(
-        run_agent_task(
-            challenge_id, target_run_id, continue_msg=message
-        )
+    await _steer_run_with_message(
+        challenge_id,
+        target_run_id,
+        run,
+        message,
     )
 
     challenge["status"] = derive_challenge_status(challenge)
@@ -7297,6 +7317,67 @@ def _discord_tail_message(
     return _truncate("\n".join(out))
 
 
+def _discord_select_run(
+    challenge: dict,
+    selector: str,
+) -> tuple[str | None, dict | None, str]:
+    selector_key = str(selector or "").strip().casefold()
+    if not selector_key:
+        return None, None, "Agent or run id required."
+
+    scored = []
+    for run_id, run in challenge.get("runs", {}).items():
+        fields = {
+            "run_id": run_id,
+            "agent": str(run.get("agent", "")),
+            "model": str(run.get("model", "")),
+            "notes": str(run.get("notes_label", "")),
+        }
+        exact = [
+            key for key, value in fields.items()
+            if value.casefold() == selector_key
+        ]
+        prefix = [
+            key for key, value in fields.items()
+            if value.casefold().startswith(selector_key)
+        ]
+        contains = [
+            key for key, value in fields.items()
+            if selector_key in value.casefold()
+        ]
+        if exact:
+            score = 3
+        elif prefix:
+            score = 2
+        elif contains:
+            score = 1
+        else:
+            continue
+        running_bonus = 0.1 if run.get("status") == "solving" else 0
+        scored.append((score + running_bonus, run_id, run))
+
+    if not scored:
+        return None, None, f"No run matched `{selector}`."
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    top_score = int(scored[0][0])
+    tied = [item for item in scored if int(item[0]) == top_score]
+    if len(tied) > 1:
+        choices = "\n".join(
+            f"- `{run_id}` `{run.get('agent', '?')}` "
+            f"({run.get('model', '')}) — {run.get('status', '?')}"
+            for _, run_id, run in tied[:8]
+        )
+        return (
+            None,
+            None,
+            f"`{selector}` matched multiple runs. Use a run id:\n{choices}",
+        )
+
+    _, run_id, run = scored[0]
+    return run_id, run, ""
+
+
 def _discord_help_message() -> str:
     return _truncate(
         "**CTF Solver Bot Help**\n\n"
@@ -7312,7 +7393,8 @@ def _discord_help_message() -> str:
         "`/tail agent:<name> lines:<n>` — show recent transcript events.\n"
         "`/flags` — list detected flags and submission state.\n"
         "`/flags add:<flag>` — manually add a detected flag candidate.\n"
-        "`/broadcast message:<text>` — steer all active agents with a breakthrough or instruction.\n"
+        "`/broadcast message:<text>` — inject a message into all active agents.\n"
+        "`/steer agent:<name|run_id> message:<text>` — stop one agent now and resume it with a message.\n"
         "`/submit flag:<flag>` — submit a flag to the connected CTF platform.\n"
         "`/solved flag:<flag>` — manually mark the challenge solved; flag is optional.\n"
         "`/stop` — stop currently running agents for this challenge.\n"
@@ -7534,6 +7616,42 @@ async def _handle_discord_interaction(interaction: dict) -> None:
         await bot.respond_to_interaction(
             interaction_id, interaction_token,
             f"Broadcast sent to {len(q)} agent(s): {message}")
+
+    elif cmd == "steer":
+        selector = str(options.get("agent", "") or "").strip()
+        message = str(options.get("message", "") or "").strip()
+        if not message:
+            await bot.respond_to_interaction(
+                interaction_id, interaction_token, "Message required.", flags=64)
+            return
+
+        target_run_id, target_run, error = _discord_select_run(
+            challenge, selector
+        )
+        if error or not target_run_id or not target_run:
+            await bot.respond_to_interaction(
+                interaction_id,
+                interaction_token,
+                error or "Agent run not found.",
+                flags=64,
+            )
+            return
+
+        steer_message = f"[{author} via Discord]: {message}"
+        await _steer_run_with_message(
+            ch_id,
+            target_run_id,
+            target_run,
+            steer_message,
+            stop_reason="discord_steer",
+        )
+        challenge["status"] = derive_challenge_status(challenge)
+        save_metadata(challenge)
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            f"Steered `{target_run.get('agent', '?')}` (`{target_run_id}`): {message}",
+        )
 
     elif cmd == "submit":
         flag = options.get("flag", "")

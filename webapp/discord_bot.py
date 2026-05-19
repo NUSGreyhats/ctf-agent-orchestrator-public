@@ -37,6 +37,21 @@ SLASH_COMMANDS = [
         }],
     },
     {
+        "name": "steer",
+        "description": "Stop one agent immediately and resume it with a message",
+        "options": [{
+            "name": "agent",
+            "description": "Agent name or run id",
+            "type": 3,
+            "required": True,
+        }, {
+            "name": "message",
+            "description": "The message to send when resuming",
+            "type": 3,
+            "required": True,
+        }],
+    },
+    {
         "name": "submit",
         "description": "Submit a flag to the CTF platform",
         "options": [{
