@@ -82,6 +82,16 @@ SLASH_COMMANDS = [
         }],
     },
     {
+        "name": "add",
+        "description": "Add yourself to challenge threads by category",
+        "options": [{
+            "name": "category",
+            "description": "Category to join, or all",
+            "type": 3,
+            "required": True,
+        }],
+    },
+    {
         "name": "solved",
         "description": "Mark this challenge as solved",
         "options": [{
@@ -284,6 +294,20 @@ class DiscordBot:
         except Exception as exc:
             log.error("Discord rename_thread error: %s", exc)
             return False
+
+    async def add_thread_member(self, thread_id: str, user_id: str) -> tuple[bool, str]:
+        """Add a guild member to a thread."""
+        try:
+            resp = await self._request(
+                "PUT",
+                f"/channels/{thread_id}/thread-members/{user_id}",
+            )
+            if resp.status_code in (200, 201, 204):
+                return True, ""
+            return False, f"{resp.status_code}: {resp.text[:200]}"
+        except Exception as exc:
+            log.error("Discord add_thread_member error: %s", exc)
+            return False, str(exc)
 
     async def list_active_threads(self, channel_id: str = "") -> list[dict]:
         """List active threads in a channel (or the bot's default channel)."""
