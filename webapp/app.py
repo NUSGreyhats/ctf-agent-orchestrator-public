@@ -3985,7 +3985,12 @@ renderFileList();
 
 
 def _export_challenge_to_zip(
-    zf: zipfile.ZipFile, challenge: dict, prefix: str,
+    zf: zipfile.ZipFile,
+    challenge: dict,
+    prefix: str,
+    *,
+    include_streams: bool = True,
+    include_files: bool = True,
 ) -> None:
     """Write a single challenge's data + viewer into an open ZipFile."""
     from html import escape as _esc
@@ -4004,6 +4009,10 @@ def _export_challenge_to_zip(
         "detected_flags": challenge.get("detected_flags", {}),
         "detected_flag_meta": challenge.get("detected_flag_meta", {}),
         "flag_questions": challenge.get("_flag_questions", []),
+        "export": {
+            "streams": include_streams,
+            "files": include_files,
+        },
         "runs": {},
     }
     for run_id, run in challenge["runs"].items():
@@ -4020,66 +4029,76 @@ def _export_challenge_to_zip(
     zf.writestr(f"{prefix}/challenge.json", json.dumps(meta, indent=2))
 
     stream_data: dict[str, list[dict]] = {}
-    for run_id in challenge["runs"]:
-        events = load_output_log(challenge_id, run_id)
-        stream_data[run_id] = events
-        jsonl = "\n".join(json.dumps(ev) for ev in events)
-        zf.writestr(f"{prefix}/streams/{run_id}.jsonl", jsonl)
+    if include_streams:
+        for run_id in challenge["runs"]:
+            events = load_output_log(challenge_id, run_id)
+            stream_data[run_id] = events
+            jsonl = "\n".join(json.dumps(ev) for ev in events)
+            zf.writestr(f"{prefix}/streams/{run_id}.jsonl", jsonl)
 
     file_entries: dict[str, dict] = {}
-    files_dir = CHALLENGES_DIR / challenge_id / "_files"
-    if files_dir.is_dir():
-        for p in sorted(files_dir.rglob("*")):
-            if not p.is_file():
-                continue
-            rel = str(p.relative_to(files_dir))
-            data = p.read_bytes()
-            zf.writestr(f"{prefix}/files/{rel}", data)
-            ftype = classify_file(p)
-            if ftype == "image":
-                mime = mimetypes.guess_type(str(p))[0] or "image/png"
-                file_entries[rel] = {
-                    "encoding": "base64",
-                    "mime": mime,
-                    "data": base64.b64encode(data).decode("ascii"),
-                    "size": len(data),
-                }
-            elif ftype == "text":
-                try:
-                    text = data.decode("utf-8")
-                except UnicodeDecodeError:
-                    text = data.decode("utf-8", errors="replace")
-                file_entries[rel] = {"encoding": "utf-8", "data": text, "size": len(data)}
-            else:
-                file_entries[rel] = {
-                    "encoding": "base64",
-                    "mime": "application/octet-stream",
-                    "data": base64.b64encode(data[:64 * 1024]).decode("ascii"),
-                    "size": len(data),
-                }
+    if include_files:
+        files_dir = CHALLENGES_DIR / challenge_id / "_files"
+        if files_dir.is_dir():
+            for p in sorted(files_dir.rglob("*")):
+                if not p.is_file():
+                    continue
+                rel = str(p.relative_to(files_dir))
+                data = p.read_bytes()
+                zf.writestr(f"{prefix}/files/{rel}", data)
+                ftype = classify_file(p)
+                if ftype == "image":
+                    mime = mimetypes.guess_type(str(p))[0] or "image/png"
+                    file_entries[rel] = {
+                        "encoding": "base64",
+                        "mime": mime,
+                        "data": base64.b64encode(data).decode("ascii"),
+                        "size": len(data),
+                    }
+                elif ftype == "text":
+                    try:
+                        text = data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        text = data.decode("utf-8", errors="replace")
+                    file_entries[rel] = {
+                        "encoding": "utf-8",
+                        "data": text,
+                        "size": len(data),
+                    }
+                else:
+                    file_entries[rel] = {
+                        "encoding": "base64",
+                        "mime": "application/octet-stream",
+                        "data": base64.b64encode(data[:64 * 1024]).decode("ascii"),
+                        "size": len(data),
+                    }
 
-    for run_id in challenge["runs"]:
-        run_dir = CHALLENGES_DIR / challenge_id / "_runs" / run_id
-        if not run_dir.is_dir():
-            continue
-        for p in sorted(run_dir.rglob("*")):
-            if not p.is_file():
+        for run_id in challenge["runs"]:
+            run_dir = CHALLENGES_DIR / challenge_id / "_runs" / run_id
+            if not run_dir.is_dir():
                 continue
-            if p.is_symlink():
-                continue
-            rel = str(p.relative_to(run_dir))
-            if rel.startswith("challenge_files"):
-                continue
-            data = p.read_bytes()
-            zf.writestr(f"{prefix}/run_files/{run_id}/{rel}", data)
-            ftype = classify_file(p)
-            viewer_key = f"[{run_id}] {rel}"
-            if ftype == "text":
-                try:
-                    text = data.decode("utf-8")
-                except UnicodeDecodeError:
-                    text = data.decode("utf-8", errors="replace")
-                file_entries[viewer_key] = {"encoding": "utf-8", "data": text, "size": len(data)}
+            for p in sorted(run_dir.rglob("*")):
+                if not p.is_file():
+                    continue
+                if p.is_symlink():
+                    continue
+                rel = str(p.relative_to(run_dir))
+                if rel.startswith("challenge_files"):
+                    continue
+                data = p.read_bytes()
+                zf.writestr(f"{prefix}/run_files/{run_id}/{rel}", data)
+                ftype = classify_file(p)
+                viewer_key = f"[{run_id}] {rel}"
+                if ftype == "text":
+                    try:
+                        text = data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        text = data.decode("utf-8", errors="replace")
+                    file_entries[viewer_key] = {
+                        "encoding": "utf-8",
+                        "data": text,
+                        "size": len(data),
+                    }
 
     detected = challenge.get("detected_flags", {})
     detected_html = ""
@@ -4115,6 +4134,32 @@ def _safe_challenge_prefix(challenge: dict) -> str:
     return (name or challenge["id"]).replace(" ", "_")
 
 
+def _truthy_export_option(value, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _export_options_from_query(request: Request) -> tuple[bool, bool]:
+    include_streams = _truthy_export_option(
+        request.query_params.get("streams"), True
+    )
+    include_files = _truthy_export_option(
+        request.query_params.get("files"), True
+    )
+    return include_streams, include_files
+
+
+def _export_options_from_body(body: dict) -> tuple[bool, bool]:
+    include_streams = _truthy_export_option(body.get("streams"), True)
+    include_files = _truthy_export_option(body.get("files"), True)
+    return include_streams, include_files
+
+
 async def export_challenge(request: Request) -> Response:
     if err := require_auth(request):
         return err
@@ -4126,8 +4171,15 @@ async def export_challenge(request: Request) -> Response:
 
     buf = io.BytesIO()
     prefix = _safe_challenge_prefix(challenge)
+    include_streams, include_files = _export_options_from_query(request)
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        _export_challenge_to_zip(zf, challenge, prefix)
+        _export_challenge_to_zip(
+            zf,
+            challenge,
+            prefix,
+            include_streams=include_streams,
+            include_files=include_files,
+        )
 
     return Response(
         content=buf.getvalue(),
@@ -4146,6 +4198,7 @@ async def export_challenges_bulk(request: Request) -> Response:
     ids = body.get("ids", [])
     if not isinstance(ids, list) or not ids:
         return JSONResponse({"error": "ids required"}, status_code=400)
+    include_streams, include_files = _export_options_from_body(body)
 
     found = []
     for cid in ids:
@@ -4164,7 +4217,13 @@ async def export_challenges_bulk(request: Request) -> Response:
             seen_prefixes[prefix] = count + 1
             if count:
                 prefix = f"{prefix}_{count}"
-            _export_challenge_to_zip(zf, c, prefix)
+            _export_challenge_to_zip(
+                zf,
+                c,
+                prefix,
+                include_streams=include_streams,
+                include_files=include_files,
+            )
 
     filename = f"ctf_export_{len(found)}_challenges.zip"
     return Response(

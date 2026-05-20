@@ -498,6 +498,8 @@ setInterval(() => {
 // === Export Mode ===
 let exportMode = false;
 const exportSelected = new Set();
+let pendingExportIds = [];
+let pendingExportFromSelection = false;
 
 function enterExportMode() {
   exportMode = true;
@@ -561,43 +563,92 @@ $("#btn-export-select-all").addEventListener("click", () => {
   updateExportCount();
 });
 
-$("#btn-export-download").addEventListener("click", async () => {
-  if (!exportSelected.size) return;
-  const ids = [...exportSelected];
+function openExportOptions(ids, fromSelection = false) {
+  pendingExportIds = ids;
+  pendingExportFromSelection = fromSelection;
+  const count = ids.length;
+  $("#export-options-summary").textContent =
+    `${count} challenge${count !== 1 ? "s" : ""} selected`;
+  $("#export-include-streams").checked = true;
+  $("#export-include-files").checked = true;
+  $("#export-options-overlay").classList.remove("hidden");
+}
+
+function closeExportOptions() {
+  $("#export-options-overlay").classList.add("hidden");
+  pendingExportIds = [];
+  pendingExportFromSelection = false;
+}
+
+function selectedExportOptions() {
+  return {
+    streams: $("#export-include-streams").checked,
+    files: $("#export-include-files").checked,
+  };
+}
+
+function exportOptionsParams(options) {
+  const params = new URLSearchParams();
+  params.set("streams", options.streams ? "1" : "0");
+  params.set("files", options.files ? "1" : "0");
+  return params.toString();
+}
+
+async function downloadExport(ids, options) {
   showToast(`Exporting ${ids.length} challenge${ids.length > 1 ? "s" : ""}...`);
-  try {
-    if (ids.length === 1) {
-      const resp = await fetch(`/api/challenges/${ids[0]}/export`, { credentials: "same-origin" });
-      if (!resp.ok) { showToast("Export failed"); return; }
-      const blob = await resp.blob();
-      const cd = resp.headers.get("content-disposition") || "";
-      const m = cd.match(/filename="([^"]+)"/);
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = m ? m[1] : "export.zip";
-      a.click();
-      URL.revokeObjectURL(a.href);
-    } else {
-      const resp = await api("/api/challenges/export", {
-        method: "POST",
-        body: JSON.stringify({ ids }),
-      });
-      if (!resp || !resp.ok) { showToast("Export failed"); return; }
-      const blob = await resp.blob();
-      const cd = resp.headers.get("content-disposition") || "";
-      const m = cd.match(/filename="([^"]+)"/);
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = m ? m[1] : "ctf_export.zip";
-      a.click();
-      URL.revokeObjectURL(a.href);
-    }
-    showToast("Export downloaded");
-    exitExportMode();
-  } catch (e) {
-    showToast("Export failed: " + e.message);
+  if (ids.length === 1) {
+    const qs = exportOptionsParams(options);
+    return fetch(`/api/challenges/${ids[0]}/export?${qs}`, {
+      credentials: "same-origin",
+    });
   }
+  return api("/api/challenges/export", {
+    method: "POST",
+    body: JSON.stringify({ ids, ...options }),
+  });
+}
+
+async function runPendingExport() {
+  if (!pendingExportIds.length) return;
+  const options = selectedExportOptions();
+  if (!options.streams && !options.files) {
+    showToast("Select at least one export content type", "error");
+    return;
+  }
+  const ids = [...pendingExportIds];
+  const shouldExitExportMode = pendingExportFromSelection;
+  $("#btn-export-confirm").disabled = true;
+  try {
+    const resp = await downloadExport(ids, options);
+    if (!resp || !resp.ok) { showToast("Export failed"); return; }
+    const blob = await resp.blob();
+    const cd = resp.headers.get("content-disposition") || "";
+    const m = cd.match(/filename="([^"]+)"/);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? m[1] : (ids.length === 1 ? "export.zip" : "ctf_export.zip");
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showToast("Export downloaded");
+    closeExportOptions();
+    if (shouldExitExportMode) exitExportMode();
+  } catch (e) {
+    showToast("Export failed: " + e.message, "error");
+  } finally {
+    $("#btn-export-confirm").disabled = false;
+  }
+}
+
+$("#btn-export-download").addEventListener("click", () => {
+  if (!exportSelected.size) return;
+  openExportOptions([...exportSelected], true);
 });
+
+$("#export-options-close").addEventListener("click", closeExportOptions);
+$("#export-options-overlay").addEventListener("click", (e) => {
+  if (e.target === $("#export-options-overlay")) closeExportOptions();
+});
+$("#btn-export-confirm").addEventListener("click", runPendingExport);
 
 // === Agent list for New Challenge ===
 $("#btn-add-challenge-agent").addEventListener("click", () => {
@@ -4097,29 +4148,7 @@ $("#transcript-search-input").addEventListener("keydown", (e) => {
 // === Export Report ===
 $("#btn-export").addEventListener("click", async () => {
   if (!currentChallengeId) return;
-  showToast("Preparing export...");
-  try {
-    const resp = await fetch(`/api/challenges/${currentChallengeId}/export`, {
-      credentials: "same-origin",
-    });
-    if (!resp.ok) {
-      showToast("Export failed");
-      return;
-    }
-    const blob = await resp.blob();
-    const cd = resp.headers.get("content-disposition") || "";
-    const match = cd.match(/filename="([^"]+)"/);
-    const filename = match ? match[1] : `${currentChallengeId}.zip`;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast("Export downloaded");
-  } catch (e) {
-    showToast("Export failed: " + e.message);
-  }
+  openExportOptions([currentChallengeId], false);
 });
 
 // === Mobile Sidebar Toggle ===

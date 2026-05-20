@@ -57,6 +57,28 @@
     </div>
   </div>
 
+  <!-- Export Options Modal -->
+  <div id="export-options-overlay" class="modal-overlay hidden">
+    <div class="modal export-options-modal">
+      <div class="modal-header">
+        <h2>Export</h2>
+        <button id="export-options-close" class="btn-icon">&times;</button>
+      </div>
+      <p id="export-options-summary" class="modal-subtitle"></p>
+      <div class="export-option-list">
+        <label class="checkbox-label export-option-row">
+          <input type="checkbox" id="export-include-streams" checked>
+          <span>Agent streams</span>
+        </label>
+        <label class="checkbox-label export-option-row">
+          <input type="checkbox" id="export-include-files" checked>
+          <span>Challenge and workspace files</span>
+        </label>
+      </div>
+      <button id="btn-export-confirm" class="btn-primary btn-full">Download Zip</button>
+    </div>
+  </div>
+
   <!-- Usage View -->
   <div id="usage-view" class="view hidden">
     <header>

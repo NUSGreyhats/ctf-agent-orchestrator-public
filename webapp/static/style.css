@@ -294,6 +294,15 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 .export-mode .challenge-card .btn-card-delete,
 .export-mode .challenge-card .btn-card-start { display: none; }
+.export-options-modal { max-width: 420px; }
+.export-option-list {
+  display: flex; flex-direction: column; gap: 0.55rem;
+  margin: 0.8rem 0 1rem;
+}
+.export-option-row {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.65rem 0.75rem;
+}
 
 /* === Modal === */
 .modal-overlay {
@@ -311,6 +320,9 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   margin-bottom: 0.75rem;
 }
 .modal-header h2 { font-size: 1rem; font-weight: 700; }
+.modal-subtitle {
+  color: var(--text-muted); font-size: 0.78rem; margin-bottom: 0.4rem;
+}
 
 .form-group { margin-top: 0.6rem; }
 .form-row { display: flex; gap: 0.6rem; }
