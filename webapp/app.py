@@ -4135,6 +4135,148 @@ def _safe_challenge_prefix(challenge: dict) -> str:
     return (name or challenge["id"]).replace(" ", "_")
 
 
+def _format_export_duration(ms: int) -> str:
+    if not ms:
+        return ""
+    total_sec = int(ms // 1000)
+    minutes = total_sec // 60
+    seconds = total_sec % 60
+    if minutes >= 60:
+        hours = minutes // 60
+        return f"{hours}h {minutes % 60}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def _bulk_export_index_html(
+    entries: list[tuple[str, dict]],
+    *,
+    include_streams: bool,
+    include_files: bool,
+) -> str:
+    """Build a self-contained landing page for a multi-challenge export."""
+    from html import escape as _esc
+
+    grouped: dict[str, list[tuple[str, dict]]] = {}
+    for prefix, challenge in entries:
+        category = challenge.get("category", "") or "Uncategorized"
+        grouped.setdefault(category, []).append((prefix, challenge))
+
+    total = len(entries)
+    solved = sum(1 for _, c in entries if c.get("status") == "solved")
+    generated_at = utc_now_iso()[:19].replace("T", " ")
+    export_bits = []
+    if include_streams:
+        export_bits.append("streams")
+    if include_files:
+        export_bits.append("files")
+    if not export_bits:
+        export_bits.append("metadata only")
+
+    category_html = []
+    for category in sorted(grouped):
+        cards = []
+        for prefix, challenge in sorted(
+            grouped[category], key=lambda item: item[1].get("name", "").casefold()
+        ):
+            runs = challenge.get("runs", {})
+            run_count = len(runs)
+            total_duration = sum(
+                effective_run_duration_ms(run)
+                for run in runs.values()
+            )
+            duration = _format_export_duration(total_duration)
+            mode = str(challenge.get("mode", "single")).replace("_", " ")
+            points = challenge.get("_points", 0)
+            solves = challenge.get("_solves", 0)
+            file_count = len(challenge.get("files", []))
+            status = str(challenge.get("status", "pending"))
+            run_info = (
+                f"{run_count} run{'s' if run_count != 1 else ''}"
+                if run_count
+                else "no runs"
+            )
+            info = " | ".join(
+                item for item in [
+                    f"{points} pts" if points else "",
+                    f"{solves} solve{'s' if solves != 1 else ''}",
+                    mode,
+                    run_info,
+                    f"{file_count} file{'s' if file_count != 1 else ''}",
+                    duration,
+                ] if item
+            )
+            cards.append(f"""
+        <a class="challenge-card status-{_esc(status)}" href="{_esc(prefix)}/viewer.html">
+          <span class="badge badge-{_esc(status)}">{_esc(status)}</span>
+          <span class="card-name">{_esc(challenge.get("name", "?"))}</span>
+          <span class="card-info">{_esc(info)}</span>
+        </a>""")
+        category_html.append(f"""
+    <section class="category">
+      <h2>{_esc(category)}</h2>
+      <div class="grid">
+        {''.join(cards)}
+      </div>
+    </section>""")
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CTF Export</title>
+<style>
+*{{box-sizing:border-box}}
+:root{{
+  --bg:#212121;--bg-card:#292929;--bg-hover:#3c3c3c;--border:#424242;
+  --text:#eeffff;--muted:#b0bec5;--dim:#78909c;--accent:#89ddff;
+  --green:#c3e88d;--yellow:#ffcb6b;--red:#f07178;--blue:#82aaff;
+  --green-dim:rgba(195,232,141,.12);--yellow-dim:rgba(255,203,107,.12);
+  --red-dim:rgba(240,113,120,.12);--blue-dim:rgba(130,170,255,.12);
+  --mono:"SF Mono","Cascadia Code",monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+}}
+body{{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans)}}
+header{{padding:1rem 1.25rem;border-bottom:1px solid var(--border);display:flex;gap:.75rem;align-items:flex-end;flex-wrap:wrap}}
+h1{{font-size:1.1rem;margin:0;font-weight:700}}
+.summary{{color:var(--muted);font-size:.78rem;font-family:var(--mono)}}
+main{{padding:1rem;display:flex;flex-direction:column;gap:1rem}}
+.category h2{{font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;color:var(--accent);border-bottom:1px solid var(--border);padding-bottom:.3rem;margin:.2rem 0 .55rem}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:.55rem}}
+.challenge-card{{position:relative;display:flex;flex-direction:column;gap:.4rem;min-height:5.1rem;text-decoration:none;color:inherit;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:.65rem .75rem;transition:.15s}}
+.challenge-card:hover{{background:var(--bg-hover);border-color:var(--accent);transform:translateY(-1px)}}
+.challenge-card.status-solving{{border-left:3px solid var(--yellow)}}
+.challenge-card.status-solved{{border-left:3px solid var(--green);background:var(--green-dim);border-color:var(--green)}}
+.challenge-card.status-failed{{border-left:3px solid var(--red)}}
+.challenge-card.status-completed{{border-left:3px solid var(--blue)}}
+.challenge-card.status-pending{{border-left:3px solid var(--dim)}}
+.badge{{position:absolute;top:.45rem;right:.45rem;padding:.14rem .45rem;border-radius:6px;font-size:.58rem;font-weight:800;text-transform:uppercase;letter-spacing:.05em}}
+.badge-solving{{background:var(--yellow-dim);color:var(--yellow)}}
+.badge-solved{{background:var(--green-dim);color:var(--green)}}
+.badge-failed{{background:var(--red-dim);color:var(--red)}}
+.badge-completed{{background:var(--blue-dim);color:var(--blue)}}
+.badge-pending{{background:#383838;color:var(--muted)}}
+.card-name{{font-size:.84rem;font-weight:700;padding-right:4.2rem;line-height:1.3}}
+.card-info{{font:.68rem var(--mono);color:var(--muted);line-height:1.45}}
+.hint{{font-size:.72rem;color:var(--dim)}}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>CTF Export</h1>
+    <div class="summary">{solved}/{total} solved &middot; {_esc(", ".join(export_bits))} &middot; generated {_esc(generated_at)} UTC</div>
+  </div>
+  <div class="hint">Open any card to view its transcript and exported files.</div>
+</header>
+<main>
+  {''.join(category_html)}
+</main>
+</body>
+</html>"""
+
+
 def _truthy_export_option(value, default: bool = True) -> bool:
     if value is None:
         return default
@@ -4211,6 +4353,7 @@ async def export_challenges_bulk(request: Request) -> Response:
 
     buf = io.BytesIO()
     seen_prefixes: dict[str, int] = {}
+    exported_entries: list[tuple[str, dict]] = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for c in found:
             prefix = _safe_challenge_prefix(c)
@@ -4225,6 +4368,15 @@ async def export_challenges_bulk(request: Request) -> Response:
                 include_streams=include_streams,
                 include_files=include_files,
             )
+            exported_entries.append((prefix, c))
+        zf.writestr(
+            "index.html",
+            _bulk_export_index_html(
+                exported_entries,
+                include_streams=include_streams,
+                include_files=include_files,
+            ),
+        )
 
     filename = f"ctf_export_{len(found)}_challenges.zip"
     return Response(
