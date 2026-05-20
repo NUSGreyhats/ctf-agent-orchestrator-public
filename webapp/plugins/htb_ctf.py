@@ -374,11 +374,12 @@ class HTBCTFPlugin(CTFPlatformPlugin):
             return results
 
     async def download_file(
-        self, config: dict, file: RemoteFile, max_bytes: int | None = None
+        self, config: dict, file: RemoteFile, max_bytes: int | None = None,
+        progress_cb=None,
     ) -> bytes:
         async with _client(config) as client:
             async with client.stream("GET", file.url) as resp:
-                return await read_limited_response(resp, max_bytes)
+                return await read_limited_response(resp, max_bytes, progress_cb)
 
     async def start_instance(
         self, config: dict, remote_id: str

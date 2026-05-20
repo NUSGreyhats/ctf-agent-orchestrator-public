@@ -442,6 +442,7 @@ OUTPUT_FILE = "output.jsonl"
 SETTINGS_FILE = CHALLENGES_DIR / "settings.json"
 _PREVIEW_TTL = 3600
 _bulk_previews: dict[str, dict] = {}
+_platform_import_progress: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -5921,6 +5922,34 @@ async def plugin_fetch_challenges(request: Request) -> JSONResponse:
         )
 
 
+def _set_import_progress(progress_id: str, **fields) -> None:
+    if not progress_id:
+        return
+    state = _platform_import_progress.setdefault(progress_id, {
+        "id": progress_id,
+        "status": "running",
+        "started_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+        "events": [],
+    })
+    message = fields.get("message")
+    if message and (not state.get("events") or state["events"][-1] != message):
+        state.setdefault("events", []).append(str(message))
+        del state["events"][:-20]
+    state.update(fields)
+    state["updated_at"] = utc_now_iso()
+
+
+async def plugin_import_progress(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    progress_id = request.path_params["progress_id"]
+    state = _platform_import_progress.get(progress_id)
+    if not state:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(state)
+
+
 async def plugin_import_challenges(request: Request) -> JSONResponse:
     """Download files and create challenges from a plugin fetch."""
     if err := require_auth(request):
@@ -5951,9 +5980,36 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
     autonomous = bool(body.get("autonomous", False))
     flag_format = str_field(body.get("flag_format", "")).strip()
     paused = bool(body.get("paused", False))
+    progress_id = str_field(body.get("progress_id", "")).strip()
+    enabled_selected = [
+        item for item in selected
+        if isinstance(item, dict) and item.get("enabled", True)
+    ]
+    total_enabled = len(enabled_selected)
+    _set_import_progress(
+        progress_id,
+        status="running",
+        phase="starting",
+        total_challenges=total_enabled,
+        completed_challenges=0,
+        current_challenge="",
+        current_file="",
+        file_index=0,
+        file_count=0,
+        file_downloaded=0,
+        file_total=None,
+        overall_percent=0,
+        message=f"Starting import for {total_enabled} challenge(s)",
+    )
 
     plugin = get_plugin(plugin_name)
     if not plugin:
+        _set_import_progress(
+            progress_id,
+            status="failed",
+            phase="error",
+            message=f"Unknown plugin: {plugin_name}",
+        )
         return JSONResponse(
             {"error": f"Unknown plugin: {plugin_name}"},
             status_code=404,
@@ -5972,12 +6028,14 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
     max_import_bytes = platform_import_limit_bytes()
 
     created = []
+    processed_enabled = 0
     for ch_cfg in selected:
         if not isinstance(ch_cfg, dict):
             continue
         if not ch_cfg.get("enabled", True):
             continue
 
+        processed_enabled += 1
         ch_name = str_field(ch_cfg.get("name", ""))
         ch_description = str_field(ch_cfg.get("description", ""))
         ch_remote_id = str_field(ch_cfg.get("remote_id", ""))
@@ -5988,6 +6046,24 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         remote_files = ch_cfg.get("files", [])
         if not isinstance(remote_files, list):
             remote_files = []
+        _set_import_progress(
+            progress_id,
+            phase="challenge",
+            current_challenge=ch_name,
+            challenge_index=processed_enabled,
+            total_challenges=total_enabled,
+            file_index=0,
+            file_count=len(remote_files),
+            file_downloaded=0,
+            file_total=None,
+            overall_percent=(
+                int(((processed_enabled - 1) / max(1, total_enabled)) * 100)
+            ),
+            message=(
+                f"Importing {ch_name} "
+                f"({processed_enabled}/{total_enabled})"
+            ),
+        )
 
         # Download files (preserve paths, report failures). Enforce a
         # per-challenge aggregate cap to avoid unbounded platform imports.
@@ -5995,7 +6071,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         download_errors: list[str] = []
         downloaded_bytes = 0
         skip_reason = ""
-        for rf in remote_files:
+        for file_idx, rf in enumerate(remote_files, 1):
             if not isinstance(rf, dict):
                 download_errors.append("invalid file entry")
                 continue
@@ -6012,11 +6088,61 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                 )
                 file_data = {}
                 break
+            _set_import_progress(
+                progress_id,
+                phase="download",
+                current_challenge=ch_name,
+                current_file=raw_name,
+                file_index=file_idx,
+                file_count=len(remote_files),
+                file_downloaded=0,
+                file_total=None,
+                overall_percent=(
+                    int(((processed_enabled - 1) / max(1, total_enabled)) * 100)
+                ),
+                message=(
+                    f"Downloading {raw_name} for {ch_name} "
+                    f"({file_idx}/{len(remote_files)})"
+                ),
+            )
+
+            async def _download_progress(
+                downloaded: int,
+                expected: int | None,
+                *,
+                _file_idx: int = file_idx,
+                _raw_name: str = raw_name,
+            ) -> None:
+                file_fraction = 0.0
+                if expected:
+                    file_fraction = min(1.0, downloaded / max(1, expected))
+                elif remote_files:
+                    file_fraction = min(0.95, downloaded / max(1, remaining_bytes))
+                challenge_fraction = (
+                    ((_file_idx - 1) + file_fraction) / max(1, len(remote_files))
+                )
+                overall = (
+                    ((processed_enabled - 1) + challenge_fraction)
+                    / max(1, total_enabled)
+                )
+                _set_import_progress(
+                    progress_id,
+                    phase="download",
+                    current_challenge=ch_name,
+                    current_file=_raw_name,
+                    file_index=_file_idx,
+                    file_count=len(remote_files),
+                    file_downloaded=downloaded,
+                    file_total=expected,
+                    overall_percent=int(max(0, min(100, overall * 100))),
+                )
+
             try:
                 data = await plugin.download_file(
                     config,
                     RemoteFile(name=raw_name, url=raw_url),
                     max_bytes=remaining_bytes,
+                    progress_cb=_download_progress,
                 )
                 if downloaded_bytes + len(data) > max_import_bytes:
                     raise RemoteFileTooLarge(
@@ -6069,6 +6195,16 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                 "status": "skipped",
                 "error": skip_reason,
             })
+            _set_import_progress(
+                progress_id,
+                phase="skipped",
+                current_challenge=ch_name,
+                completed_challenges=processed_enabled,
+                overall_percent=int(
+                    (processed_enabled / max(1, total_enabled)) * 100
+                ),
+                message=f"Skipped {ch_name}: {skip_reason}",
+            )
             continue
 
         if not file_data and download_errors:
@@ -6078,6 +6214,19 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
                 "status": "error",
                 "error": f"All downloads failed: {'; '.join(download_errors)}",
             })
+            _set_import_progress(
+                progress_id,
+                phase="error",
+                current_challenge=ch_name,
+                completed_challenges=processed_enabled,
+                overall_percent=int(
+                    (processed_enabled / max(1, total_enabled)) * 100
+                ),
+                message=(
+                    f"Failed to import {ch_name}: "
+                    f"{'; '.join(download_errors)}"
+                ),
+            )
             continue
 
         partial_warning = ""
@@ -6178,6 +6327,21 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         if partial_warning:
             entry["warning"] = partial_warning
         created.append(entry)
+        _set_import_progress(
+            progress_id,
+            phase="created",
+            current_challenge=ch_name,
+            current_file="",
+            file_index=len(remote_files),
+            file_count=len(remote_files),
+            file_downloaded=0,
+            file_total=None,
+            completed_challenges=processed_enabled,
+            overall_percent=int(
+                (processed_enabled / max(1, total_enabled)) * 100
+            ),
+            message=f"Created {ch_name}",
+        )
 
     # Save connection for future syncs
     if created:
@@ -6209,6 +6373,17 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             })
         save_connections(connections)
 
+    _set_import_progress(
+        progress_id,
+        status="done",
+        phase="done",
+        completed_challenges=processed_enabled,
+        overall_percent=100 if total_enabled else 0,
+        current_file="",
+        file_downloaded=0,
+        file_total=None,
+        message=f"Import complete: {len(created)} item(s) processed",
+    )
     return JSONResponse({"created": created}, status_code=201)
 
 
@@ -6682,8 +6857,21 @@ async def sync_connection(request: Request) -> JSONResponse:
     try:
         remote_challenges = await plugin.fetch_challenges(config)
     except Exception as exc:
+        conn["last_error"] = str(exc)
+        conn["last_error_at"] = utc_now_iso()
+        save_connections(connections)
         return JSONResponse(
-            {"error": str(exc)}, status_code=400
+            {
+                "error": str(exc),
+                "connection": {
+                    "id": conn["id"],
+                    "plugin": conn["plugin"],
+                    "label": conn["label"],
+                },
+                "last_error": conn["last_error"],
+                "last_error_at": conn["last_error_at"],
+            },
+            status_code=400,
         )
 
     # Filter out already-imported challenges, while refreshing metadata for
@@ -6730,6 +6918,8 @@ async def sync_connection(request: Request) -> JSONResponse:
 
     # Update last_sync
     conn["last_sync"] = utc_now_iso()
+    conn.pop("last_error", None)
+    conn.pop("last_error_at", None)
     save_connections(connections)
 
     return JSONResponse({
@@ -6775,6 +6965,7 @@ async def poll_connections(request: Request) -> JSONResponse:
 
     new_total = 0
     updates = []
+    errors = []
     last_sync = ""
     connections_changed = False
 
@@ -6786,7 +6977,16 @@ async def poll_connections(request: Request) -> JSONResponse:
             continue
         try:
             remote_challenges = await plugin.fetch_challenges(config)
-        except Exception:
+        except Exception as exc:
+            conn["last_error"] = str(exc)
+            conn["last_error_at"] = utc_now_iso()
+            connections_changed = True
+            errors.append({
+                "id": conn.get("id", ""),
+                "label": conn.get("label", ""),
+                "error": conn["last_error"],
+                "at": conn["last_error_at"],
+            })
             continue
 
         imported_ids = _imported_remote_ids(
@@ -6798,6 +6998,8 @@ async def poll_connections(request: Request) -> JSONResponse:
         )
         new_total += new_count
         conn["last_sync"] = utc_now_iso()
+        conn.pop("last_error", None)
+        conn.pop("last_error_at", None)
         last_sync = conn["last_sync"]
         connections_changed = True
 
@@ -6834,6 +7036,7 @@ async def poll_connections(request: Request) -> JSONResponse:
         "new_total": new_total,
         "updates": updates,
         "last_sync": last_sync,
+        "errors": errors,
     })
 
 
@@ -8168,6 +8371,11 @@ routes = [
     Route("/api/plugins/test", plugin_test_connection, methods=["POST"]),
     Route("/api/plugins/fetch", plugin_fetch_challenges, methods=["POST"]),
     Route("/api/plugins/import", plugin_import_challenges, methods=["POST"]),
+    Route(
+        "/api/plugins/import/progress/{progress_id}",
+        plugin_import_progress,
+        methods=["GET"],
+    ),
     Route("/api/plugins/submit-flag", plugin_submit_flag, methods=["POST"]),
     Route("/api/agent/submit-answer", agent_submit_answer, methods=["POST"]),
     Route("/api/connections", list_connections, methods=["GET"]),

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CTF Solver</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260519a">
+  <link rel="stylesheet" href="/static/style.css?v=20260520a">
 </head>
 <body>
   <!-- Login -->
@@ -493,7 +493,20 @@
         </div>
       </div>
 
-      <!-- Phase 3: Preview and select (mirrors bulk upload) -->
+      <!-- Phase 3: Import progress -->
+      <div id="import-phase-progress" class="hidden">
+        <div class="import-progress-panel">
+          <div class="import-progress-title" id="import-progress-title">Importing challenges...</div>
+          <div class="import-progress-bar">
+            <div id="import-progress-bar-fill"></div>
+          </div>
+          <div class="import-progress-meta" id="import-progress-meta"></div>
+          <div class="import-progress-detail" id="import-progress-detail"></div>
+          <div class="import-progress-log" id="import-progress-log"></div>
+        </div>
+      </div>
+
+      <!-- Phase 4: Preview and select (mirrors bulk upload) -->
       <div id="import-phase-preview" class="hidden">
         <div class="bulk-global-bar">
           <div class="form-group">
@@ -552,6 +565,6 @@
   </div>
 
   <div id="toast-container" class="toast-container"></div>
-  <script src="/static/app.js?v=20260519a"></script>
+  <script src="/static/app.js?v=20260520a"></script>
 </body>
 </html>

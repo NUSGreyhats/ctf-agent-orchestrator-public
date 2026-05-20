@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
+from typing import Callable
 
 
 @dataclass
@@ -63,25 +65,34 @@ def format_bytes(num_bytes: int) -> str:
     return f"{int(num_bytes)} B"
 
 
-async def read_limited_response(resp, max_bytes: int | None = None) -> bytes:
+async def read_limited_response(
+    resp,
+    max_bytes: int | None = None,
+    progress_cb: Callable[[int, int | None], object] | None = None,
+) -> bytes:
     """Read an httpx streaming response with an optional byte cap."""
     resp.raise_for_status()
+    expected = None
+    content_length = resp.headers.get("content-length")
+    if content_length:
+        try:
+            expected = int(content_length)
+        except ValueError:
+            expected = None
     if max_bytes is not None:
         max_bytes = max(0, int(max_bytes))
-        content_length = resp.headers.get("content-length")
-        if content_length:
-            try:
-                expected = int(content_length)
-            except ValueError:
-                expected = None
-            if expected is not None and expected > max_bytes:
-                raise RemoteFileTooLarge(
-                    f"remote file is {format_bytes(expected)}, exceeding "
-                    f"remaining limit {format_bytes(max_bytes)}"
-                )
+        if expected is not None and expected > max_bytes:
+            raise RemoteFileTooLarge(
+                f"remote file is {format_bytes(expected)}, exceeding "
+                f"remaining limit {format_bytes(max_bytes)}"
+            )
 
     chunks: list[bytes] = []
     total = 0
+    if progress_cb:
+        result = progress_cb(0, expected)
+        if inspect.isawaitable(result):
+            await result
     async for chunk in resp.aiter_bytes():
         if not chunk:
             continue
@@ -91,6 +102,10 @@ async def read_limited_response(resp, max_bytes: int | None = None) -> bytes:
                 f"download exceeded remaining limit {format_bytes(max_bytes)}"
             )
         chunks.append(chunk)
+        if progress_cb:
+            result = progress_cb(total, expected)
+            if inspect.isawaitable(result):
+                await result
     return b"".join(chunks)
 
 
@@ -131,7 +146,8 @@ class CTFPlatformPlugin:
         raise NotImplementedError
 
     async def download_file(
-        self, config: dict, file: RemoteFile, max_bytes: int | None = None
+        self, config: dict, file: RemoteFile, max_bytes: int | None = None,
+        progress_cb: Callable[[int, int | None], object] | None = None,
     ) -> bytes:
         """Download a challenge file.
 

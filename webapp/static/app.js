@@ -44,6 +44,7 @@ let renderedEventNodes = new Map();
 let transcriptSearchResults = [];
 let transcriptSearchActiveIndex = -1;
 let metadataLastSyncAt = null;
+let metadataSyncError = null;
 let metadataSyncTimer = null;
 let fileBrowserPath = "";
 let fileBrowserRequestToken = 0;
@@ -248,6 +249,23 @@ function newestConnectionSync(connections) {
   return newest;
 }
 
+function newestConnectionError(connections) {
+  let newest = null;
+  for (const conn of connections || []) {
+    if (!conn.last_error) continue;
+    const ts = parseServerTimestamp(conn.last_error_at || "");
+    if (Number.isNaN(ts.getTime())) continue;
+    if (!newest || ts > newest.at) {
+      newest = {
+        label: conn.label || conn.id || "connection",
+        error: conn.last_error,
+        at: ts,
+      };
+    }
+  }
+  return newest;
+}
+
 function parseServerTimestamp(value) {
   if (value instanceof Date) return value;
   if (typeof value !== "string") return new Date(value);
@@ -263,6 +281,14 @@ function setMetadataLastSync(value) {
   const ts = parseServerTimestamp(value);
   if (Number.isNaN(ts.getTime())) return;
   metadataLastSyncAt = ts;
+  renderMetadataSyncAge();
+  if (!metadataSyncTimer) {
+    metadataSyncTimer = setInterval(renderMetadataSyncAge, 30 * 1000);
+  }
+}
+
+function setMetadataSyncError(error) {
+  metadataSyncError = error || null;
   renderMetadataSyncAge();
   if (!metadataSyncTimer) {
     metadataSyncTimer = setInterval(renderMetadataSyncAge, 30 * 1000);
@@ -286,6 +312,17 @@ function formatRelativeTime(ts) {
 function renderMetadataSyncAge() {
   const el = $("#metadata-sync-age");
   if (!el) return;
+  if (metadataSyncError) {
+    const failed = `CTF metadata sync failed ${formatRelativeTime(metadataSyncError.at)}`;
+    const lastGood = metadataLastSyncAt
+      ? ` Last successful update ${formatRelativeTime(metadataLastSyncAt)}.`
+      : "";
+    el.textContent = `${failed}: ${metadataSyncError.label}: ${metadataSyncError.error}.${lastGood}`;
+    el.title = metadataSyncError.at.toLocaleString();
+    el.classList.add("metadata-sync-error");
+    return;
+  }
+  el.classList.remove("metadata-sync-error");
   if (!metadataLastSyncAt) {
     el.textContent = "CTF metadata not synced yet";
     return;
@@ -663,6 +700,7 @@ async function loadConnections() {
   if (!res) return;
   savedConnections = await res.json();
   setMetadataLastSync(newestConnectionSync(savedConnections));
+  setMetadataSyncError(newestConnectionError(savedConnections));
   renderSyncConnections();
 }
 
@@ -698,13 +736,24 @@ async function triggerSync(connId) {
   if (!res) return;
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
+    const savedConn = savedConnections.find((c) => c.id === connId);
+    if (savedConn) {
+      savedConn.last_error = err.last_error || err.error || "Sync failed";
+      savedConn.last_error_at = err.last_error_at || new Date().toISOString();
+      setMetadataSyncError(newestConnectionError(savedConnections));
+    }
     showToast(err.error || "Sync failed", "error");
     return;
   }
   const data = await res.json();
   setMetadataLastSync(data.last_sync);
   const savedConn = savedConnections.find((c) => c.id === connId);
-  if (savedConn && data.last_sync) savedConn.last_sync = data.last_sync;
+  if (savedConn && data.last_sync) {
+    savedConn.last_sync = data.last_sync;
+    delete savedConn.last_error;
+    delete savedConn.last_error_at;
+    setMetadataSyncError(newestConnectionError(savedConnections));
+  }
   if (!data.challenges.length) {
     showToast(`No new challenges (${data.total} total on platform)`, "info");
     return;
@@ -728,9 +777,7 @@ async function triggerSync(connId) {
   const pluginSel = $("#import-plugin");
   pluginSel.value = pluginName;
 
-  $("#import-phase-config").classList.add("hidden");
-  $("#import-phase-loading").classList.add("hidden");
-  $("#import-phase-preview").classList.remove("hidden");
+  importPhase("preview");
 
   // Set up preview controls using saved agent settings
   populateAgentList($("#import-agent-list"));
@@ -751,6 +798,21 @@ async function pollConnections() {
     const data = await res.json();
     const bar = $("#sync-notify-bar");
     setMetadataLastSync(data.last_sync);
+    if (data.errors && data.errors.length) {
+      const newest = data.errors
+        .map((err) => ({ ...err, atDate: parseServerTimestamp(err.at) }))
+        .filter((err) => !Number.isNaN(err.atDate.getTime()))
+        .sort((a, b) => b.atDate - a.atDate)[0];
+      if (newest) {
+        setMetadataSyncError({
+          label: newest.label || newest.id || "connection",
+          error: newest.error || "Sync failed",
+          at: newest.atDate,
+        });
+      }
+    } else if (data.last_sync) {
+      setMetadataSyncError(null);
+    }
 
     if (data.new_total > 0) {
       bar.innerHTML = `<span class="sync-notify-text">!! ${data.new_total} new challenge${data.new_total !== 1 ? "s" : ""} to sync !!</span><button class="sync-notify-close" title="Dismiss">&times;</button>`;
@@ -4325,6 +4387,64 @@ function renderDailyChart(activity) {
 let importPlugins = [];
 let importPluginConfig = {};
 let importFetchedChallenges = [];
+let importProgressTimer = null;
+
+function importPhase(name) {
+  ["config", "loading", "preview", "progress"].forEach((phase) => {
+    const el = $(`#import-phase-${phase}`);
+    if (el) el.classList.toggle("hidden", phase !== name);
+  });
+}
+
+function makeClientId(prefix) {
+  if (window.crypto?.randomUUID) return `${prefix}-${crypto.randomUUID()}`;
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function renderImportProgress(state = {}) {
+  const percent = Math.max(0, Math.min(100, Number(state.overall_percent || 0)));
+  $("#import-progress-bar-fill").style.width = `${percent}%`;
+  $("#import-progress-title").textContent = state.message || "Importing challenges...";
+  const completed = state.completed_challenges ?? 0;
+  const total = state.total_challenges ?? 0;
+  const parts = [`${percent}%`, `${completed}/${total} challenges`];
+  if (state.file_count) parts.push(`${state.file_index || 0}/${state.file_count} files`);
+  $("#import-progress-meta").textContent = parts.join(" · ");
+
+  const detail = [];
+  if (state.current_challenge) detail.push(`Challenge: ${state.current_challenge}`);
+  if (state.current_file) {
+    const size = state.file_total
+      ? `${formatSize(state.file_downloaded || 0)} / ${formatSize(state.file_total)}`
+      : `${formatSize(state.file_downloaded || 0)}`;
+    detail.push(`File: ${state.current_file} (${size})`);
+  }
+  $("#import-progress-detail").textContent = detail.join(" · ");
+
+  const events = state.events || [];
+  $("#import-progress-log").innerHTML = events
+    .slice(-12)
+    .map((event) => `<div>${esc(event)}</div>`)
+    .join("");
+}
+
+function stopImportProgressPolling() {
+  if (importProgressTimer) clearInterval(importProgressTimer);
+  importProgressTimer = null;
+}
+
+function startImportProgressPolling(progressId) {
+  stopImportProgressPolling();
+  const poll = async () => {
+    const res = await api(`/api/plugins/import/progress/${encodeURIComponent(progressId)}`);
+    if (!res || !res.ok) return;
+    const data = await res.json();
+    renderImportProgress(data);
+    if (["done", "failed"].includes(data.status)) stopImportProgressPolling();
+  };
+  poll();
+  importProgressTimer = setInterval(poll, 500);
+}
 
 async function loadPlugins() {
   const res = await api("/api/plugins");
@@ -4380,9 +4500,8 @@ $("#btn-import").addEventListener("click", async () => {
   }
   // Reset state
   importFetchedChallenges = [];
-  $("#import-phase-config").classList.remove("hidden");
-  $("#import-phase-loading").classList.add("hidden");
-  $("#import-phase-preview").classList.add("hidden");
+  stopImportProgressPolling();
+  importPhase("config");
   $("#import-status").classList.add("hidden");
   // Set up preview controls using saved agent settings
   populateAgentList($("#import-agent-list"));
@@ -4392,10 +4511,14 @@ $("#btn-import").addEventListener("click", async () => {
 });
 
 $("#import-close").addEventListener("click", () => {
+  stopImportProgressPolling();
   $("#import-overlay").classList.add("hidden");
 });
 $("#import-overlay").addEventListener("click", (e) => {
-  if (e.target === $("#import-overlay")) $("#import-overlay").classList.add("hidden");
+  if (e.target === $("#import-overlay")) {
+    stopImportProgressPolling();
+    $("#import-overlay").classList.add("hidden");
+  }
 });
 
 $("#import-plugin").addEventListener("change", () => {
@@ -4429,8 +4552,7 @@ $("#btn-import-test").addEventListener("click", async () => {
 
 $("#btn-import-fetch").addEventListener("click", async () => {
   importPluginConfig = getImportConfig();
-  $("#import-phase-config").classList.add("hidden");
-  $("#import-phase-loading").classList.remove("hidden");
+  importPhase("loading");
 
   const res = await api("/api/plugins/fetch", {
     method: "POST",
@@ -4443,15 +4565,13 @@ $("#btn-import-fetch").addEventListener("click", async () => {
   if (!res || !res.ok) {
     const err = res ? await res.json().catch(() => ({})) : {};
     showToast(err.error || "Fetch failed", "error");
-    $("#import-phase-loading").classList.add("hidden");
-    $("#import-phase-config").classList.remove("hidden");
+    importPhase("config");
     return;
   }
 
   importFetchedChallenges = await res.json();
   renderImportPreview();
-  $("#import-phase-loading").classList.add("hidden");
-  $("#import-phase-preview").classList.remove("hidden");
+  importPhase("preview");
 });
 
 function renderImportPreview() {
@@ -4565,6 +4685,17 @@ $("#btn-import-submit").addEventListener("click", async () => {
   const btn = $("#btn-import-submit");
   btn.disabled = true;
   btn.textContent = "Importing...";
+  const progressId = makeClientId("platform-import");
+  renderImportProgress({
+    status: "running",
+    overall_percent: 0,
+    completed_challenges: 0,
+    total_challenges: selected.filter((c) => c.enabled).length,
+    message: "Starting import...",
+    events: ["Starting import..."],
+  });
+  importPhase("progress");
+  startImportProgressPolling(progressId);
 
   try {
     const agentRows = getAgentRows($("#import-agent-list"));
@@ -4582,12 +4713,21 @@ $("#btn-import-submit").addEventListener("click", async () => {
         flag_format: $("#import-flag").value.trim(),
         autonomous: $("#import-autonomous").checked,
         paused: $("#import-paused").checked,
+        progress_id: progressId,
       }),
     });
+    stopImportProgressPolling();
+    const finalProgress = await api(
+      `/api/plugins/import/progress/${encodeURIComponent(progressId)}`
+    );
+    if (finalProgress && finalProgress.ok) {
+      renderImportProgress(await finalProgress.json());
+    }
 
     if (!res || !res.ok) {
       const err = res ? await res.json().catch(() => ({})) : {};
       showToast(err.error || "Import failed", "error");
+      importPhase("preview");
       return;
     }
     const data = await res.json();
@@ -4614,6 +4754,7 @@ $("#btn-import-submit").addEventListener("click", async () => {
     $("#import-overlay").classList.add("hidden");
     loadChallenges();
   } finally {
+    stopImportProgressPolling();
     btn.disabled = false;
     btn.textContent = "Import Selected";
   }

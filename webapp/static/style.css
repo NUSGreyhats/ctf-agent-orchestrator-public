@@ -190,6 +190,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   font-size: 0.72rem;
   color: var(--text-muted);
 }
+.metadata-sync-age.metadata-sync-error { color: var(--red); }
 @keyframes sync-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.7; }
@@ -1379,6 +1380,35 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 .daily-value {
   font-size: 0.55rem; color: var(--text-muted); font-family: var(--mono);
+}
+
+.import-progress-panel {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.9rem;
+}
+.import-progress-title {
+  font-size: 0.9rem; font-weight: 700; margin-bottom: 0.7rem;
+}
+.import-progress-bar {
+  height: 0.55rem; background: var(--bg-input);
+  border-radius: 999px; overflow: hidden; border: 1px solid var(--border);
+}
+#import-progress-bar-fill {
+  height: 100%; width: 0; background: var(--accent);
+  transition: width 0.2s ease;
+}
+.import-progress-meta {
+  margin-top: 0.55rem; color: var(--text-muted);
+  font: 0.72rem var(--mono);
+}
+.import-progress-detail {
+  margin-top: 0.45rem; color: var(--text);
+  font-size: 0.78rem; word-break: break-word;
+}
+.import-progress-log {
+  margin-top: 0.75rem; max-height: 9rem; overflow-y: auto;
+  color: var(--text-dim); font: 0.68rem var(--mono);
+  display: flex; flex-direction: column; gap: 0.25rem;
 }
 
 /* Manager */

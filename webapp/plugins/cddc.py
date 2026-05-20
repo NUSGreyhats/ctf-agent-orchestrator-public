@@ -360,7 +360,8 @@ class CDDCPlugin(CTFPlatformPlugin):
             await client.aclose()
 
     async def download_file(
-        self, config: dict, file: RemoteFile, max_bytes: int | None = None
+        self, config: dict, file: RemoteFile, max_bytes: int | None = None,
+        progress_cb=None,
     ) -> bytes:
         url = file.url
         if _is_google_drive_view_url(url):
@@ -378,7 +379,7 @@ class CDDCPlugin(CTFPlatformPlugin):
             try:
                 target = urljoin(_base_url(config), url)
                 async with client.stream("GET", target) as resp:
-                    return await read_limited_response(resp, max_bytes)
+                    return await read_limited_response(resp, max_bytes, progress_cb)
             finally:
                 await client.aclose()
 
@@ -390,7 +391,7 @@ class CDDCPlugin(CTFPlatformPlugin):
             headers={"User-Agent": "ctf-solver/1.0"},
         ) as client:
             async with client.stream("GET", url) as resp:
-                data = await read_limited_response(resp, max_bytes)
+                data = await read_limited_response(resp, max_bytes, progress_cb)
                 content_type = resp.headers.get("content-type", "")
                 content_disposition = resp.headers.get("content-disposition", "")
 
@@ -404,7 +405,9 @@ class CDDCPlugin(CTFPlatformPlugin):
                 )
                 if confirm_url:
                     async with client.stream("GET", confirm_url) as resp:
-                        return await read_limited_response(resp, max_bytes)
+                        return await read_limited_response(
+                            resp, max_bytes, progress_cb
+                        )
             return data
 
     async def submit_flag(
