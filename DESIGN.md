@@ -185,6 +185,8 @@ CTFd and rCTF verify TLS by default. They expose an explicit `insecure_tls` chec
 
 HTB challenges with Docker/machine instances are started at solve time, not import time, to respect concurrent instance limits. Connection info (`url`, `host`, `port`, `connection`) is injected into the agent prompt.
 
+HTB multi-answer challenge metadata (`flagsInfo`) is preserved as `_flag_questions`. The prompt lists each question and run workspaces include `submit_answer.py`, which calls a local token-protected endpoint to submit arbitrary answers by question number or platform `flag_id`.
+
 Connections are persisted to `state/connections.json` and can be synced to fetch new challenges from already-imported platforms.
 
 ## Discord Integration
@@ -243,7 +245,7 @@ DigitalOcean and GCP provisioners include a `sync_hash` trigger so runtime chang
 
 ## Environment Setup
 
-Environment scripts remain numbered and executable by `environment/run.sh`, but share common helper functions from `environment/lib/common.sh` for logging, retries, package installs, downloads, package-manager locks, and shell-profile updates. By default, `run.sh` uses a dependency-aware parallel plan: the base bootstrap runs first, independent tooling categories run concurrently, agent registration runs after the IDA/MCP tooling is available, and validation runs last. Set `ENVIRONMENT_PARALLEL=0` to force the old sequential order.
+Environment scripts remain numbered and executable by `environment/run.sh`, but share common helper functions from `environment/lib/common.sh` for logging, retries, package installs, downloads, package-manager locks, and shell-profile updates. By default, `run.sh` uses a dependency-aware parallel plan: the base bootstrap runs first, independent tooling categories run concurrently, agent registration runs after the local MCP tooling is available, and validation runs last. Set `ENVIRONMENT_PARALLEL=0` to force the old sequential order.
 
 Most Python dependencies are installed with:
 
@@ -284,6 +286,7 @@ Settings persist to `challenges/settings.json`.
 | `enabled_agents` | empty | Which agents appear in the agent selector; empty means default behavior |
 | `agent_models` | `{}` | Per-agent default model overrides |
 | `agent_efforts` | `{}` | Per-agent default effort overrides |
+| `max_platform_import_size_gb` | `2.0` | Per-challenge cap for platform-imported files; challenges exceeding it are skipped |
 | `discord_enabled` | `false` | Enable Discord bot integration |
 | `discord_bot_token` | empty | Discord bot token |
 | `discord_channel_id` | empty | Discord channel for challenge threads |

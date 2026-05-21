@@ -43,6 +43,7 @@ All four agents run through their provider integration paths. Multiple agents ca
 - **Single challenges** — Create with name, description, flag format, agent/model/effort choices, and file uploads.
 - **Bulk upload** — Upload `.zip` or `.7z` archives with one folder per challenge. Preview and edit metadata before importing.
 - **Platform import** — Fetch challenges directly from CTFd, rCTF, or Hack The Box CTF instances. Saves connections for future syncs with automatic points/solves updates. HTB challenges with on-demand instances are started automatically at solve time.
+- **Multi-answer HTB support** — HTB `flagsInfo` questions are injected into the agent prompt, and agents get a `submit_answer.py` helper for answer-checking when there is no fixed flag format.
 - **Auto-submit** — Detected flags can be automatically submitted to the connected CTF platform. Correct submissions mark the challenge solved and stop other active runs.
 - **TLS verification by default** — CTFd and rCTF verify TLS certificates by default and expose an explicit “Disable TLS certificate verification” checkbox for self-signed/local events. HTB uses normal TLS verification.
 
@@ -97,7 +98,7 @@ Optional Discord bot for team coordination:
 - **Runtime allowlist deploy** — Deploys copy only runtime project files (`environment`, `webapp`, `skills`, `mcps`, `hooks`, `README.md`, `DESIGN.md`) instead of the whole repo. Local `.git/`, `infra/`, Terraform state/vars, and local caches are not copied to the VM.
 - **Runtime data preservation** — Deploy sync preserves `/root/ctf-agent-wrapper/challenges` and `/root/ctf-agent-wrapper/state` on the VM.
 - **GDB MCP server** — Persistent GDB session for kernel/binary debugging, registered for Claude, Codex, and OpenCode.
-- **IDA MCP server** — Headless IDA Pro analysis via [ida-mcp-rs](https://github.com/blacktop/ida-mcp-rs). Provides function listing, disassembly, decompilation, string extraction, and IDAPython scripting through MCP tools.
+- **IDA Pro skill** — Headless static analysis through the `analyze-with-ida-domain-api` skill, backed by IDA Pro's Python Domain API.
 - **WireGuard VPN** — Built-in VPN management for challenges that require network access to a CTF infrastructure. Configure, start/stop, and generate client configs from the web UI.
 - **uv-based Python installs** — Environment scripts install most Python dependencies with `uv pip install --system` for faster provisioning while keeping `pip` available for vendor-local wheels.
 - **Parallel environment setup** — `environment/run.sh` runs independent tooling categories concurrently with package-manager locks; set `ENVIRONMENT_PARALLEL=0` for sequential setup.
@@ -214,6 +215,6 @@ webapp/         Starlette/ASGI app for challenge management and agent streaming
   static/       Frontend (vanilla JS, CSS)
 skills/         Agent skills (methodology, forensics, tool-specific, community)
 hooks/          Agent hook/tool files, including OpenCode collaboration tool
-mcps/           MCP servers (GDB debugger, IDA Pro via ida-mcp-rs)
+mcps/           MCP servers (GDB debugger)
 state/          Runtime state on the VM: metadata, output logs, connections
 ```

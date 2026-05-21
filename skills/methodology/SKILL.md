@@ -43,7 +43,7 @@ Load tool skills when needed:
 
 | Tool | Skill |
 |---|---|
-| IDA Pro | Use `ida` MCP tools directly (ida_open_idb, ida_list_functions, ida_decompile, etc.) |
+| IDA Pro | `analyze-with-ida-domain-api` |
 | libdebug | `libdebug-debugging` |
 | GDB + GEF | `kernel-gef-debugging` |
 | APK analysis | `apk-analysis` |

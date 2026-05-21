@@ -37,6 +37,21 @@ SLASH_COMMANDS = [
         }],
     },
     {
+        "name": "steer",
+        "description": "Stop one agent immediately and resume it with a message",
+        "options": [{
+            "name": "agent",
+            "description": "Agent name or run id",
+            "type": 3,
+            "required": True,
+        }, {
+            "name": "message",
+            "description": "The message to send when resuming",
+            "type": 3,
+            "required": True,
+        }],
+    },
+    {
         "name": "submit",
         "description": "Submit a flag to the CTF platform",
         "options": [{
@@ -53,6 +68,12 @@ SLASH_COMMANDS = [
     {
         "name": "flags",
         "description": "List all detected flags for this challenge",
+        "options": [{
+            "name": "add",
+            "description": "Manually add a flag candidate",
+            "type": 3,
+            "required": False,
+        }],
     },
     {
         "name": "stop",
@@ -67,6 +88,39 @@ SLASH_COMMANDS = [
         "description": "Show overall CTF status — all challenges grouped by category",
     },
     {
+        "name": "help",
+        "description": "Show how to use the CTF solver Discord bot",
+    },
+    {
+        "name": "join",
+        "description": "Add yourself to one challenge thread by fuzzy name",
+        "options": [{
+            "name": "challenge",
+            "description": "Challenge name to join",
+            "type": 3,
+            "required": True,
+        }],
+    },
+    {
+        "name": "stats",
+        "description": "Show agent runtime and token stats for this challenge",
+    },
+    {
+        "name": "tail",
+        "description": "Show recent transcript messages for this challenge",
+        "options": [{
+            "name": "agent",
+            "description": "Agent name or run id to filter",
+            "type": 3,
+            "required": False,
+        }, {
+            "name": "lines",
+            "description": "Number of recent events to show",
+            "type": 4,
+            "required": False,
+        }],
+    },
+    {
         "name": "files",
         "description": "List files or fetch a file from agent working directories",
         "options": [{
@@ -79,6 +133,16 @@ SLASH_COMMANDS = [
             "description": "Agent name (claude/codex, defaults to all)",
             "type": 3,
             "required": False,
+        }],
+    },
+    {
+        "name": "add",
+        "description": "Add yourself to challenge threads by category",
+        "options": [{
+            "name": "category",
+            "description": "Category to join, or all",
+            "type": 3,
+            "required": True,
         }],
     },
     {
@@ -284,6 +348,20 @@ class DiscordBot:
         except Exception as exc:
             log.error("Discord rename_thread error: %s", exc)
             return False
+
+    async def add_thread_member(self, thread_id: str, user_id: str) -> tuple[bool, str]:
+        """Add a guild member to a thread."""
+        try:
+            resp = await self._request(
+                "PUT",
+                f"/channels/{thread_id}/thread-members/{user_id}",
+            )
+            if resp.status_code in (200, 201, 204):
+                return True, ""
+            return False, f"{resp.status_code}: {resp.text[:200]}"
+        except Exception as exc:
+            log.error("Discord add_thread_member error: %s", exc)
+            return False, str(exc)
 
     async def list_active_threads(self, channel_id: str = "") -> list[dict]:
         """List active threads in a channel (or the bot's default channel)."""

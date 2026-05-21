@@ -330,12 +330,154 @@ def _decode_exec_chunk(payload: dict) -> str:
         return ""
 
 
+def _usage_number(usage: dict, *keys: str) -> int:
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return int(value)
+    return 0
+
+
+def _normalize_token_usage(usage: dict | None) -> dict | None:
+    if not isinstance(usage, dict):
+        return None
+
+    input_details = (
+        usage.get("input_token_details")
+        or usage.get("inputTokenDetails")
+        or {}
+    )
+    if not isinstance(input_details, dict):
+        input_details = {}
+
+    normalized = {
+        "input_tokens": _usage_number(
+            usage, "input_tokens", "inputTokens",
+            "prompt_tokens", "promptTokens",
+        ),
+        "output_tokens": _usage_number(
+            usage, "output_tokens", "outputTokens",
+            "completion_tokens", "completionTokens",
+        ),
+        "cached_input_tokens": _usage_number(
+            usage, "cached_input_tokens", "cachedInputTokens",
+            "cache_read_input_tokens", "cacheReadInputTokens",
+        ) or _usage_number(
+            input_details, "cached_tokens", "cachedTokens"
+        ),
+        "reasoning_output_tokens": _usage_number(
+            usage, "reasoning_output_tokens", "reasoningOutputTokens",
+        ),
+        "total_tokens": _usage_number(
+            usage, "total_tokens", "totalTokens",
+        ),
+    }
+    if not any(normalized.values()):
+        return None
+    return normalized
+
+
+def _extract_token_usage(*containers: dict) -> dict | None:
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for key in ("token_usage", "tokenUsage"):
+            token_usage = container.get(key)
+            if not isinstance(token_usage, dict):
+                continue
+            for nested_key in (
+                "total",
+                "total_token_usage",
+                "totalTokenUsage",
+                "last",
+                "last_token_usage",
+                "lastTokenUsage",
+            ):
+                normalized = _normalize_token_usage(
+                    token_usage.get(nested_key)
+                )
+                if normalized:
+                    return normalized
+            normalized = _normalize_token_usage(token_usage)
+            if normalized:
+                return normalized
+        for key in (
+            "usage",
+            "token_usage",
+            "tokenUsage",
+            "last_token_usage",
+            "lastTokenUsage",
+            "total_token_usage",
+            "totalTokenUsage",
+        ):
+            normalized = _normalize_token_usage(container.get(key))
+            if normalized:
+                return normalized
+        normalized = _normalize_token_usage(container)
+        if normalized:
+            return normalized
+    return None
+
+
+def _codex_session_path(thread_id: str) -> Path | None:
+    thread_id = (thread_id or "").strip()
+    if not thread_id or not CODEX_SESSIONS_DIR.is_dir():
+        return None
+    matches = [
+        path for path in CODEX_SESSIONS_DIR.rglob(f"*{thread_id}.jsonl")
+        if path.is_file()
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda path: path.stat().st_mtime)
+
+
+def get_thread_token_usage(thread_id: str) -> dict | None:
+    """Return the latest persisted token totals for a Codex thread."""
+    path = _codex_session_path(thread_id)
+    if not path:
+        return None
+
+    latest: dict | None = None
+    try:
+        with path.open(errors="replace") as f:
+            for line in f:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("type") != "token_count":
+                    continue
+                info = payload.get("info")
+                if not isinstance(info, dict):
+                    continue
+                total = _normalize_token_usage(info.get("total_token_usage"))
+                if total:
+                    latest = total
+    except OSError:
+        return None
+    return latest
+
+
 def _normalize_live_event(event: dict, challenge: dict) -> dict | None:
     event_type, payload = _get_event_type(event)
     if not event_type:
         return None
 
     tool_output = challenge.setdefault("_codex_tool_output", {})
+
+    if event_type == "token_count":
+        info = payload.get("info")
+        if isinstance(info, dict):
+            usage = _normalize_token_usage(info.get("last_token_usage"))
+            if usage:
+                return {"type": "codex_usage", "usage": usage}
+        return None
 
     if event_type in {"agent_reasoning", "agent_reasoning_delta"}:
         text = payload.get("text") or payload.get("content", "")
@@ -568,7 +710,6 @@ def _normalize_live_event(event: dict, challenge: dict) -> dict | None:
         "thread.updated",
         "task_started",
         "turn_started",
-        "token_count",
         "stream_info",
     }:
         return None
@@ -1538,15 +1679,11 @@ async def _run_agent_sdk(
                         "message": f"Codex turn error: "
                                    f"{json.dumps(error_info)}",
                     }
-                usage = params.get("usage") or turn.get("usage")
-                if isinstance(usage, dict):
+                usage = _extract_token_usage(params, turn)
+                if usage:
                     yield {
                         "type": "codex_usage",
-                        "usage": {
-                            "input_tokens": usage.get("input_tokens", 0),
-                            "output_tokens": usage.get("output_tokens", 0),
-                            "cached_input_tokens": usage.get("cached_input_tokens", 0),
-                        },
+                        "usage": usage,
                     }
                 log.info(
                     "Turn completed (status=%s)", status
@@ -1565,17 +1702,11 @@ async def _run_agent_sdk(
                     turn_done = True
 
             if method == "thread/tokenUsage/updated":
-                usage = params.get("usage") or params
-                if isinstance(usage, dict) and any(
-                    usage.get(k) for k in ("input_tokens", "output_tokens")
-                ):
+                usage = _extract_token_usage(params)
+                if usage:
                     yield {
                         "type": "codex_usage",
-                        "usage": {
-                            "input_tokens": usage.get("input_tokens", 0),
-                            "output_tokens": usage.get("output_tokens", 0),
-                            "cached_input_tokens": usage.get("cached_input_tokens", 0),
-                        },
+                        "usage": usage,
                     }
                 if turn_done:
                     break
@@ -1682,17 +1813,11 @@ async def _run_agent_sdk(
                 continue
 
             if method == "thread/tokenUsage/updated":
-                usage = params.get("usage") or params
-                if isinstance(usage, dict) and any(
-                    usage.get(k) for k in ("input_tokens", "output_tokens")
-                ):
+                usage = _extract_token_usage(params)
+                if usage:
                     yield {
                         "type": "codex_usage",
-                        "usage": {
-                            "input_tokens": usage.get("input_tokens", 0),
-                            "output_tokens": usage.get("output_tokens", 0),
-                            "cached_input_tokens": usage.get("cached_input_tokens", 0),
-                        },
+                        "usage": usage,
                     }
                 continue
 

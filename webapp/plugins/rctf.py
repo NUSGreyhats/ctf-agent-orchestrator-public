@@ -10,6 +10,7 @@ from .base import (
     RemoteChallenge,
     RemoteFile,
     SubmitResult,
+    read_limited_response,
 )
 
 try:
@@ -196,7 +197,8 @@ class RCTFPlugin(CTFPlatformPlugin):
             return results
 
     async def download_file(
-        self, config: dict, file: RemoteFile
+        self, config: dict, file: RemoteFile, max_bytes: int | None = None,
+        progress_cb=None,
     ) -> bytes:
         base = _base_url(config)
         file_url = urlparse(file.url)
@@ -212,17 +214,16 @@ class RCTFPlugin(CTFPlatformPlugin):
             async with httpx.AsyncClient(
                 verify=_verify_tls(config), follow_redirects=True, timeout=30
             ) as plain_client:
-                resp = await plain_client.get(file.url)
-                resp.raise_for_status()
-                return resp.content
+                async with plain_client.stream("GET", file.url) as resp:
+                    return await read_limited_response(resp, max_bytes, progress_cb)
         client, _ = await _client(config)
         async with client:
-            resp = await client.get(file.url)
-            resp.raise_for_status()
-            return resp.content
+            async with client.stream("GET", file.url) as resp:
+                return await read_limited_response(resp, max_bytes, progress_cb)
 
     async def submit_flag(
-        self, config: dict, remote_id: str, flag: str
+        self, config: dict, remote_id: str, flag: str,
+        flag_id: str | int | None = None,
     ) -> SubmitResult:
         client, _ = await _client(config)
         async with client:

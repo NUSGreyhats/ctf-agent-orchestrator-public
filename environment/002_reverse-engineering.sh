@@ -49,19 +49,8 @@ fi
 uv_pip_install keystone-engine ropper
 
 #
-# ida-mcp-rs (IDA Pro MCP server)
-#
-
-if ! have_cmd ida-mcp || ! have_cmd ida-mcp-bin; then
-  IDA_MCP_TAG=$(curl -fsI https://github.com/blacktop/ida-mcp-rs/releases/latest | grep -i '^location:' | grep -oP 'v[0-9.]+' | head -n1)
-  curl -fsSL "https://github.com/blacktop/ida-mcp-rs/releases/download/${IDA_MCP_TAG}/ida-mcp_${IDA_MCP_TAG#v}_Linux_x86_64.tar.gz" \
-    | tar xz -C /usr/local/bin ida-mcp ida-mcp-bin
-  chmod +x /usr/local/bin/ida-mcp /usr/local/bin/ida-mcp-bin
-fi
-
-#
-# Python packages for skills: libdebug
+# Python packages for skills: ida-domain, libdebug
 #
 
 uv_pip_install --reinstall typing-extensions
-uv_pip_install libdebug
+uv_pip_install ida-domain libdebug

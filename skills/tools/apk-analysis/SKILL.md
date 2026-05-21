@@ -172,7 +172,7 @@ When reviewing code, pay attention to:
 
 **Only proceed here if Step 1c identified interesting .so files AND the user wants deeper native analysis.**
 
-Use the `ida` MCP tools for native library analysis. The general workflow is:
+For native library analysis, consult the `analyze-with-ida-domain-api` skill which provides instructions for automated IDA Pro analysis. The general workflow is:
 
 1. Extract the target .so file(s) from the APK:
    ```bash
@@ -200,9 +200,9 @@ Use the `ida` MCP tools for native library analysis. The general workflow is:
    - `Java_com_example_app_ClassName_methodName` maps to `com.example.app.ClassName.methodName()` in Java
    - Check the jadx output for `native` method declarations that match
 
-4. Use the `ida` MCP tools for full disassembly and decompilation. Call `ida_open_idb` on the .so file, then use `ida_list_functions`, `ida_decompile`, and `ida_disasm_by_name` to analyze the native code.
+4. Hand off to the `analyze-with-ida-domain-api` skill for full disassembly and decompilation. That skill handles the IDA Pro interaction, function analysis, and decompiled pseudocode review. Read that skill's SKILL.md for the exact invocation steps.
 
-5. If the `ida` MCP tools are **not available**, report your `readelf` and `strings` findings to the user and let them know full binary analysis would require IDA Pro or Ghidra, which aren't currently configured.
+5. If the `analyze-with-ida-domain-api` skill is **not available**, report your `readelf` and `strings` findings to the user and let them know full binary analysis would require IDA Pro or Ghidra, which aren't currently configured.
 
 ## Step 4: Produce the Report
 

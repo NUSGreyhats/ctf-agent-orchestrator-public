@@ -15,9 +15,9 @@ webapp/
     style.css          # Dark theme UI
 ```
 
-The backend spawns provider-specific CLI processes in non-interactive mode, normalizes their JSON or JSONL event streams into a shared UI format, and persists challenge state to `/root/.ctf-solver-state` so solver metadata stays out of challenge working directories.
+The backend runs provider-specific SDK/CLI integrations, normalizes their event streams into a shared UI format, and persists challenge state to `/root/ctf-agent-wrapper/state` so solver metadata stays out of challenge working directories.
 
-Methodology and domain skills are read directly from `/root/ctf-agent-wrapper/skills/<skill>/` on the VM (e.g. `SKILL.md`), as configured in the backend catalog. The app no longer relies on provider-specific skill copies.
+Methodology and domain skills live in `/root/ctf-agent-wrapper/skills/` and are installed into supported provider skill directories by `environment/013_install-skills.sh`.
 
 ## Setup
 
@@ -98,7 +98,7 @@ A checkbox (default on for Copilot) that appends instructions telling the agent 
 
 ### Flag Detection
 
-Automatically scans agent output for flag patterns (`flag{...}`, `CTF{...}`, `HTB{...}`, `picoCTF{...}`, and custom formats). Displays a banner with copy button when a flag is found.
+Automatically scans agent output for flag patterns (`flag{...}`, `CTF{...}`, `HTB{...}`, `picoCTF{...}`, and custom formats). Displays a banner with copy button when a flag is found. HTB multi-answer imports also list each `flagsInfo` question in the prompt and provide `submit_answer.py` so agents can check arbitrary answers.
 
 ### File Browser
 
@@ -133,7 +133,7 @@ Accessible via the "Usage" button in the dashboard header. Shows per-agent stats
 | POST | `/api/logout` | Clear session |
 | GET | `/api/usage` | Agent auth status and usage stats |
 | GET | `/api/settings` | Get global settings |
-| PUT | `/api/settings` | Update global settings (default agent) |
+| PUT | `/api/settings` | Update global settings (agents, theme, import size cap, Discord) |
 | GET | `/api/challenges` | List all challenges |
 | POST | `/api/challenges` | Create challenge (multipart form) |
 | POST | `/api/challenges/{id}/solve` | Retry solving |

@@ -17,8 +17,9 @@ curl -fsSL https://claude.ai/install.sh | bash
 # Install GDB MCP server dependency.
 uv_pip_install --reinstall 'mcp[cli]'
 
-# Register MCP servers via claude mcp add (stores in ~/.claude.json).
+# Register GDB MCP server via claude mcp add (stores in ~/.claude.json).
+# IDA Pro is exposed through the analyze-with-ida-domain-api skill, not MCP.
+~/.local/bin/claude mcp remove ida || true
 ~/.local/bin/claude mcp add --transport stdio --scope user gdb -- python3 /root/ctf-agent-wrapper/mcps/gdb_mcp.py || true
-~/.local/bin/claude mcp add --transport stdio --scope user ida -e IDADIR=/opt/ida-pro-9.3 -- ida-mcp || true
 
 append_bashrc_line "alias yolo='IS_SANDBOX=1 claude --dangerously-skip-permissions'"

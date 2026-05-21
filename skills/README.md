@@ -7,32 +7,38 @@ Skills come from two sources:
 
 ## This Repo
 
+The repository groups skills by source domain for maintainability. During
+environment setup, `environment/013_install-skills.sh` installs each directory
+that contains a `SKILL.md` as a top-level skill directory named from its
+frontmatter `name:` field.
+
 ### Methodology
 
 | Skill | Description |
 |---|---|
-| [methodology](methodology/SKILL.md) | CTF workflow, triage, ctfgrep, flag-search techniques |
+| [ctf-methodology](methodology/SKILL.md) | CTF workflow, triage, ctfgrep, flag-search techniques |
 
 ### Forensics
 
 | Skill | Domain | Key Tools |
 |---|---|---|
-| [forensics/disk](forensics/disk/SKILL.md) | Disk image analysis | TSK (mmls, fls, icat, fsstat), foremost, photorec, bulk_extractor |
-| [forensics/file](forensics/file/SKILL.md) | File analysis & steganography | exiftool, binwalk, zsteg, steghide, stegseek, olevba, oledump |
-| [forensics/memory](forensics/memory/SKILL.md) | Memory dump analysis | Volatility 3, mquire |
-| [forensics/network](forensics/network/SKILL.md) | Packet capture analysis | tshark, tcpflow, scapy, ngrep, chaosreader |
+| [disk-forensics](forensics/disk/SKILL.md) | Disk image analysis | TSK (mmls, fls, icat, fsstat), foremost, photorec, bulk_extractor |
+| [file-forensics](forensics/file/SKILL.md) | File analysis & steganography | exiftool, binwalk, zsteg, steghide, stegseek, olevba, oledump |
+| [memory-forensics](forensics/memory/SKILL.md) | Memory dump analysis | Volatility 3, mquire |
+| [network-forensics](forensics/network/SKILL.md) | Packet capture analysis | tshark, tcpflow, scapy, ngrep, chaosreader |
 
 ### Tools
 
 | Skill | Domain | Key Tools |
 |---|---|---|
 | [apk-analysis](tools/apk-analysis/SKILL.md) | Android reverse engineering | jadx, apktool, IDA Pro |
-| [kernel-gef](tools/kernel-gef/SKILL.md) | Kernel debugging | GDB + GEF via MCP |
-| [libdebug](tools/libdebug/SKILL.md) | Dynamic binary analysis | libdebug (ptrace-based scriptable debugging) |
+| [analyze-with-ida-domain-api](tools/ida/SKILL.md) | Static binary analysis | IDA Pro Domain API (idalib, headless mode) |
+| [kernel-gef-debugging](tools/kernel-gef/SKILL.md) | Kernel debugging | GDB + GEF via MCP |
+| [libdebug-debugging](tools/libdebug/SKILL.md) | Dynamic binary analysis | libdebug (ptrace-based scriptable debugging) |
 
 ## External (ljagiello/ctf-skills)
 
-Installed to `~/.claude/skills/` by `environment/003_install-claude-code.sh`.
+Installed to agent skill directories by `environment/013_install-skills.sh`.
 
 | Skill | Category |
 |---|---|

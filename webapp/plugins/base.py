@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
+from typing import Callable
 
 
 @dataclass
@@ -30,6 +32,7 @@ class RemoteChallenge:
     solves: int = 0
     solved: bool = False
     tags: list[str] = field(default_factory=list)
+    flag_questions: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -46,6 +49,64 @@ class SubmitResult:
 
     correct: bool
     message: str = ""
+
+
+class RemoteFileTooLarge(ValueError):
+    """Raised when a remote challenge file exceeds the configured limit."""
+
+
+def format_bytes(num_bytes: int) -> str:
+    """Format byte counts for operator-facing messages."""
+    value = float(max(0, int(num_bytes)))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{int(num_bytes)} B"
+
+
+async def read_limited_response(
+    resp,
+    max_bytes: int | None = None,
+    progress_cb: Callable[[int, int | None], object] | None = None,
+) -> bytes:
+    """Read an httpx streaming response with an optional byte cap."""
+    resp.raise_for_status()
+    expected = None
+    content_length = resp.headers.get("content-length")
+    if content_length:
+        try:
+            expected = int(content_length)
+        except ValueError:
+            expected = None
+    if max_bytes is not None:
+        max_bytes = max(0, int(max_bytes))
+        if expected is not None and expected > max_bytes:
+            raise RemoteFileTooLarge(
+                f"remote file is {format_bytes(expected)}, exceeding "
+                f"remaining limit {format_bytes(max_bytes)}"
+            )
+
+    chunks: list[bytes] = []
+    total = 0
+    if progress_cb:
+        result = progress_cb(0, expected)
+        if inspect.isawaitable(result):
+            await result
+    async for chunk in resp.aiter_bytes():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if max_bytes is not None and total > max_bytes:
+            raise RemoteFileTooLarge(
+                f"download exceeded remaining limit {format_bytes(max_bytes)}"
+            )
+        chunks.append(chunk)
+        if progress_cb:
+            result = progress_cb(total, expected)
+            if inspect.isawaitable(result):
+                await result
+    return b"".join(chunks)
 
 
 class CTFPlatformPlugin:
@@ -85,7 +146,8 @@ class CTFPlatformPlugin:
         raise NotImplementedError
 
     async def download_file(
-        self, config: dict, file: RemoteFile
+        self, config: dict, file: RemoteFile, max_bytes: int | None = None,
+        progress_cb: Callable[[int, int | None], object] | None = None,
     ) -> bytes:
         """Download a challenge file.
 
@@ -119,10 +181,13 @@ class CTFPlatformPlugin:
         pass
 
     async def submit_flag(
-        self, config: dict, remote_id: str, flag: str
+        self, config: dict, remote_id: str, flag: str,
+        flag_id: str | int | None = None,
     ) -> SubmitResult:
-        """Submit a flag to the platform.
+        """Submit a flag/answer to the platform.
 
+        `flag_id` is optional platform metadata for multi-answer challenges
+        where a candidate answer must be tied to a specific question.
         Returns a SubmitResult indicating whether the flag was correct.
         """
         raise NotImplementedError

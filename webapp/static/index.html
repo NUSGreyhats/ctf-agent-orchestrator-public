@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CTF Solver</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260418m">
+  <link rel="stylesheet" href="/static/style.css?v=20260520a">
 </head>
 <body>
   <!-- Login -->
@@ -42,6 +42,7 @@
       </div>
     </header>
     <div id="sync-notify-bar" class="sync-notify-bar hidden"></div>
+    <div id="metadata-sync-age" class="metadata-sync-age">Metadata not synced</div>
     <div id="challenges-list"></div>
     <div id="export-bar" class="export-bar hidden">
       <span id="export-count">0 selected</span>
@@ -53,6 +54,28 @@
       <div class="empty-icon">?</div>
       <p>No challenges yet</p>
       <p class="text-muted">Click "+ Add Challenge" to get started</p>
+    </div>
+  </div>
+
+  <!-- Export Options Modal -->
+  <div id="export-options-overlay" class="modal-overlay hidden">
+    <div class="modal export-options-modal">
+      <div class="modal-header">
+        <h2>Export</h2>
+        <button id="export-options-close" class="btn-icon">&times;</button>
+      </div>
+      <p id="export-options-summary" class="modal-subtitle"></p>
+      <div class="export-option-list">
+        <label class="checkbox-label export-option-row">
+          <input type="checkbox" id="export-include-streams" checked>
+          <span>Agent streams</span>
+        </label>
+        <label class="checkbox-label export-option-row">
+          <input type="checkbox" id="export-include-files" checked>
+          <span>Challenge and workspace files</span>
+        </label>
+      </div>
+      <button id="btn-export-confirm" class="btn-primary btn-full">Download Zip</button>
     </div>
   </div>
 
@@ -109,6 +132,11 @@
               <option value="split">Split View</option>
               <option value="tabbed">Tabbed View</option>
             </select>
+          </div>
+          <div class="form-group flex-1">
+            <label for="settings-max-platform-import-size">Max Platform Import / Challenge (GiB)</label>
+            <input type="number" id="settings-max-platform-import-size" min="0.001" step="0.001" placeholder="2">
+            <span class="checkbox-hint">Skip platform imports whose attached files exceed this total.</span>
           </div>
         </div>
         <div class="form-group form-group-inline">
@@ -338,6 +366,12 @@
           <span id="ws-status" class="ws-indicator ws-disconnected" title="Disconnected"></span>
           <span id="step-counter" class="step-counter"></span>
           <div class="panel-header-actions">
+            <div class="transcript-search">
+              <input id="transcript-search-input" class="transcript-search-input" type="search" placeholder="Search transcript" autocomplete="off">
+              <button id="btn-transcript-search" class="btn-ghost btn-xs" title="Search transcript">Search</button>
+              <button id="btn-transcript-search-clear" class="btn-ghost btn-xs hidden" title="Clear transcript search">&times;</button>
+              <div id="transcript-search-results" class="transcript-search-results hidden"></div>
+            </div>
             <button id="btn-toggle-tools" class="btn-ghost btn-xs" title="Expand/collapse all tools">Expand all</button>
             <button id="btn-export" class="btn-ghost btn-xs" title="Export as zip (streams, files, viewer)">Export</button>
           </div>
@@ -367,7 +401,22 @@
           <div class="panel-body panel-body-compact">
             <div id="detail-desc" class="info-desc"></div>
             <div id="detail-flag-format" class="info-meta"></div>
+            <div class="flag-format-section">
+              <div class="flags-header">Flag Formats</div>
+              <div id="flag-format-list" class="flag-format-list"></div>
+              <div class="flag-format-add">
+                <input type="text" id="flag-format-input" placeholder="e.g. HTB{...}">
+                <button id="btn-add-flag-format" class="btn-ghost btn-sm">Add &amp; Scan</button>
+              </div>
+            </div>
             <div id="detail-files" class="info-meta"></div>
+            <div class="manual-flag-section">
+              <div class="flags-header">Manual Flag</div>
+              <div class="manual-flag-add">
+                <input type="text" id="manual-flag-input" placeholder="Paste a candidate flag">
+                <button id="btn-add-manual-flag" class="btn-ghost btn-sm">Add</button>
+              </div>
+            </div>
             <div id="flags-section" class="flags-section hidden">
               <div class="flags-header">Flags Found</div>
               <div id="flags-list"></div>
@@ -392,6 +441,7 @@
               <select id="files-run-select" class="hidden"></select>
               <button id="btn-refresh-files" class="btn-ghost btn-sm">Refresh</button>
             </div>
+            <div id="files-breadcrumb" class="files-breadcrumb"></div>
             <div id="files-tree"></div>
           </div>
         </div>
@@ -443,7 +493,20 @@
         </div>
       </div>
 
-      <!-- Phase 3: Preview and select (mirrors bulk upload) -->
+      <!-- Phase 3: Import progress -->
+      <div id="import-phase-progress" class="hidden">
+        <div class="import-progress-panel">
+          <div class="import-progress-title" id="import-progress-title">Importing challenges...</div>
+          <div class="import-progress-bar">
+            <div id="import-progress-bar-fill"></div>
+          </div>
+          <div class="import-progress-meta" id="import-progress-meta"></div>
+          <div class="import-progress-detail" id="import-progress-detail"></div>
+          <div class="import-progress-log" id="import-progress-log"></div>
+        </div>
+      </div>
+
+      <!-- Phase 4: Preview and select (mirrors bulk upload) -->
       <div id="import-phase-preview" class="hidden">
         <div class="bulk-global-bar">
           <div class="form-group">
@@ -502,6 +565,6 @@
   </div>
 
   <div id="toast-container" class="toast-container"></div>
-  <script src="/static/app.js?v=20260418m"></script>
+  <script src="/static/app.js?v=20260520a"></script>
 </body>
 </html>

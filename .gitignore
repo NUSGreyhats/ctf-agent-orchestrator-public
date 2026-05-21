@@ -19,3 +19,5 @@ infra/terraform.tfstate.backup
 infra/terraform.tfvars
 .claude/
 challenges/
+state/
+token

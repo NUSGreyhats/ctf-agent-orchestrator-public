@@ -68,8 +68,6 @@ check_cmd codex codex --version
 check_cmd copilot copilot --version
 check_cmd opencode opencode --version
 
-check_cmd ida-mcp ida-mcp --help
-check_cmd ida-mcp-bin ida-mcp-bin --help
 check_cmd apktool apktool --version
 check_cmd jadx jadx --version
 check_cmd sage sage --version
@@ -80,12 +78,17 @@ check_cmd vol vol --help
 
 check_py_import starlette
 check_py_import uvicorn
+check_py_import multipart
+check_py_import itsdangerous
 check_py_import httpx
+check_py_import requests
 check_py_import websockets
 check_py_import claude_agent_sdk
 check_py_import copilot
 check_py_import opencode_sdk
 check_py_import mcp.server.fastmcp
+check_py_import idapro
+check_py_import ida_domain
 check_py_import pwn
 check_py_import angr
 check_py_import volatility3
