@@ -25,7 +25,7 @@ REASONING_LABELS = {
     "high": "High",
     "xhigh": "XHigh",
 }
-DEFAULT_COMMON_REASONING_LEVELS = {"medium", "high"}
+DEFAULT_COMMON_REASONING_LEVELS = {"low", "medium", "high", "xhigh"}
 
 
 def _model_reasoning_map() -> dict[str, set[str]]:
