@@ -935,28 +935,216 @@ _V1_DECISION_METHODS = {
 }
 
 
-def _make_approval_result(method: str) -> dict:
+def _json_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, indent=2, default=str)
+    except TypeError:
+        return str(value)
+
+
+def _content_items_text(items: object) -> str:
+    if not isinstance(items, list):
+        return ""
+    parts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text") or item.get("content")
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def _decode_base64_text(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        return ""
+    try:
+        return base64.b64decode(value).decode("utf-8", errors="replace")
+    except (ValueError, TypeError):
+        return ""
+
+
+def _stream_buffer_text(streams: dict | None) -> str:
+    if not isinstance(streams, dict):
+        return ""
+    stdout = streams.get("stdout", "")
+    stderr = streams.get("stderr", "")
+    if stdout and stderr:
+        return f"{stdout}\n{stderr}"
+    return stdout or stderr or ""
+
+
+def _append_stream_buffer(
+    buffers: dict[str, dict[str, str]],
+    key: str,
+    stream: object,
+    text: str,
+) -> None:
+    if not key or not text:
+        return
+    stream_name = stream if isinstance(stream, str) and stream else "stdout"
+    bucket = buffers.setdefault(key, {"stdout": "", "stderr": ""})
+    bucket[stream_name] = bucket.get(stream_name, "") + text
+
+
+def _format_patch_changes(changes: object) -> str:
+    if not isinstance(changes, list):
+        return ""
+    diffs = []
+    fallback = []
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        diff = change.get("diff")
+        if isinstance(diff, str) and diff:
+            diffs.append(diff)
+            continue
+        path = change.get("path")
+        kind = change.get("kind")
+        if isinstance(kind, dict):
+            kind = kind.get("type")
+        if path:
+            fallback.append(f"{path} ({kind or 'changed'})")
+    return "\n".join(diffs or fallback)
+
+
+def _format_plan_update(params: dict) -> str:
+    explanation = params.get("explanation")
+    plan = params.get("plan")
+    lines: list[str] = []
+    if isinstance(explanation, str) and explanation.strip():
+        lines.append(explanation.strip())
+    if isinstance(plan, list):
+        for step in plan:
+            if not isinstance(step, dict):
+                continue
+            text = step.get("step")
+            if not isinstance(text, str) or not text:
+                continue
+            status = step.get("status") or "pending"
+            lines.append(f"[{status}] {text}")
+    return "\n".join(lines)
+
+
+def _format_goal(goal: object) -> str:
+    if not isinstance(goal, dict):
+        return ""
+    objective = goal.get("objective")
+    status = goal.get("status")
+    parts = []
+    if isinstance(status, str) and status:
+        parts.append(status)
+    if isinstance(objective, str) and objective:
+        parts.append(objective)
+    token_budget = goal.get("tokenBudget")
+    tokens_used = goal.get("tokensUsed")
+    if isinstance(token_budget, (int, float)):
+        parts.append(f"{int(tokens_used or 0)}/{int(token_budget)} tokens")
+    elif isinstance(tokens_used, (int, float)) and tokens_used:
+        parts.append(f"{int(tokens_used)} tokens")
+    return " - ".join(parts)
+
+
+def _copy_permission_profile(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    granted: dict = {}
+    network = value.get("network")
+    if isinstance(network, dict):
+        granted["network"] = network
+    file_system = value.get("fileSystem")
+    if isinstance(file_system, dict):
+        granted["fileSystem"] = file_system
+    return granted
+
+
+def _make_approval_result(method: str, params: dict | None = None) -> dict:
     """Build the JSON-RPC result payload to auto-approve a server request."""
+    params = params if isinstance(params, dict) else {}
     if method in _V2_DECISION_METHODS:
         return {"decision": "accept"}
     if method in _V1_DECISION_METHODS:
         return {"decision": "approved"}
     if method == "item/permissions/requestApproval":
+        permissions = _copy_permission_profile(params.get("permissions"))
+        if not permissions:
+            permissions = _copy_permission_profile(
+                params.get("additionalPermissions")
+            )
         return {
-            "permissions": {"type": "dangerFullAccess"},
+            "permissions": permissions,
             "scope": "session",
+            "strictAutoReview": False,
         }
     # Default: empty result (best-effort approve)
     return {}
 
 
-def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
+def _make_user_input_result(params: dict) -> dict:
+    answers: dict[str, dict[str, list[str]]] = {}
+    questions = params.get("questions") if isinstance(params, dict) else None
+    if isinstance(questions, list):
+        for question in questions:
+            if not isinstance(question, dict):
+                continue
+            qid = question.get("id")
+            if isinstance(qid, str) and qid:
+                answers[qid] = {"answers": []}
+    return {"answers": answers}
+
+
+def _make_elicitation_result() -> dict:
+    return {"action": "accept", "content": {}, "_meta": None}
+
+
+def _make_token_refresh_result(params: dict) -> dict | None:
+    if not CODEX_AUTH_FILE.exists():
+        return None
+    try:
+        auth = json.loads(CODEX_AUTH_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    tokens = auth.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    access_token = tokens.get("access_token")
+    account_id = (
+        tokens.get("account_id")
+        or params.get("previousAccountId")
+        or auth.get("chatgpt_account_id")
+    )
+    if not isinstance(access_token, str) or not access_token:
+        return None
+    if not isinstance(account_id, str) or not account_id:
+        return None
+    plan_type = auth.get("plan_type")
+    if not isinstance(plan_type, str):
+        plan_type = None
+    return {
+        "accessToken": access_token,
+        "chatgptAccountId": account_id,
+        "chatgptPlanType": plan_type,
+    }
+
+
+def _normalize_thread_item(
+    item: dict,
+    item_event_type: str,
+    *,
+    agent_texts: dict[str, str] | None = None,
+    command_outputs: dict[str, dict[str, str]] | None = None,
+    file_patches: dict[str, str] | None = None,
+) -> dict | None:
     """Normalize a ThreadItem from item/started or item/completed."""
     item_type = item.get("type", "")
     item_id = item.get("id", "")
 
     if item_type == "agentMessage":
         text = item.get("text", "")
+        if not text and agent_texts is not None:
+            text = agent_texts.get(item_id, "")
         if not text:
             return None
         return {
@@ -994,6 +1182,8 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
             }
         # completed
         output = item.get("aggregatedOutput", "") or ""
+        if not output and command_outputs is not None:
+            output = _stream_buffer_text(command_outputs.get(item_id))
         exit_code = item.get("exitCode")
         status = item.get("status", "")
         is_error = status != "completed" or (
@@ -1003,6 +1193,7 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
             "status": status,
             "exit_code": exit_code,
             "output": output,
+            "duration_ms": item.get("durationMs"),
         }
         return {
             "type": "user",
@@ -1024,6 +1215,8 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
             kind_str = kind_str.get("type", "")
         file_path = paths[0] if paths else ""
         diff = "\n".join(diffs)
+        if not diff and file_patches is not None:
+            diff = file_patches.get(item_id, "")
         if item_event_type == "started":
             return {
                 "type": "assistant",
@@ -1114,6 +1307,8 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
         }
 
     if item_type == "webSearch":
+        action = item.get("action")
+        query = item.get("query", "")
         if item_event_type == "started":
             return {
                 "type": "assistant",
@@ -1121,7 +1316,10 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
                     "type": "tool_use",
                     "id": item_id,
                     "name": "web_search",
-                    "input": {},
+                    "input": {
+                        "query": query,
+                        "action": action,
+                    },
                 }]},
             }
         return {
@@ -1149,6 +1347,9 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
     if item_type == "dynamicToolCall":
         # Spec: tool, arguments, status, contentItems, success, durationMs
         tool_name = item.get("tool", "tool")
+        namespace = item.get("namespace")
+        if isinstance(namespace, str) and namespace:
+            tool_name = f"{namespace}:{tool_name}"
         arguments = item.get("arguments", {})
         if isinstance(arguments, str):
             try:
@@ -1183,6 +1384,33 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
             }]},
         }
 
+    if item_type == "collabAgentToolCall":
+        tool_name = item.get("tool", "agent")
+        if item_event_type == "started":
+            return {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": item_id,
+                    "name": f"agent:{tool_name}",
+                    "input": {
+                        "prompt": item.get("prompt"),
+                        "model": item.get("model"),
+                        "receiver_thread_ids": item.get("receiverThreadIds", []),
+                    },
+                }]},
+            }
+        status = item.get("status", "")
+        return {
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": item_id,
+                "content": json.dumps(item, indent=2, default=str),
+                "is_error": status == "failed",
+            }]},
+        }
+
     if item_type == "imageView":
         path = item.get("path", "") or item.get("url", "")
         if item_event_type == "started":
@@ -1205,15 +1433,177 @@ def _normalize_thread_item(item: dict, item_event_type: str) -> dict | None:
             }]},
         }
 
+    if item_type == "imageGeneration":
+        if item_event_type == "started":
+            return {
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": item_id,
+                    "name": "image_generation",
+                    "input": {
+                        "status": item.get("status", ""),
+                        "revised_prompt": item.get("revisedPrompt"),
+                    },
+                }]},
+            }
+        result = {
+            "status": item.get("status", ""),
+            "revised_prompt": item.get("revisedPrompt"),
+            "result": item.get("result", ""),
+            "saved_path": item.get("savedPath"),
+        }
+        return {
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": item_id,
+                "content": json.dumps(result, indent=2, default=str),
+                "is_error": item.get("status") == "failed",
+            }]},
+        }
+
     if item_type == "contextCompaction":
         if item_event_type == "started":
             return {"type": "system", "message": "Context compaction in progress..."}
         return {"type": "system", "message": "Context compacted"}
 
+    if item_type == "hookPrompt":
+        fragments = item.get("fragments", [])
+        text = _content_items_text(fragments)
+        if text:
+            return {"type": "system", "message": f"Hook prompt: {text}"}
+        return None
+
+    if item_type == "enteredReviewMode":
+        review = item.get("review", "")
+        return {"type": "system", "message": f"Entered review mode: {review}"}
+
+    if item_type == "exitedReviewMode":
+        review = item.get("review", "")
+        return {"type": "system", "message": f"Exited review mode: {review}"}
+
     if item_type == "userMessage":
         return None
 
     log.debug("Unrecognized item type: %s (%s): %s", item_type, item_event_type, json.dumps(item, default=str)[:300])
+    return None
+
+
+def _normalize_raw_response_item(item: dict) -> dict | None:
+    item_type = item.get("type", "")
+
+    if item_type == "message":
+        if item.get("role") != "assistant":
+            return None
+        text = _content_items_text(item.get("content", []))
+        if not text:
+            return None
+        return {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": text}]},
+        }
+
+    if item_type == "reasoning":
+        parts = []
+        for key in ("summary", "content"):
+            value = item.get(key)
+            if not isinstance(value, list):
+                continue
+            for block in value:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict):
+                    text = block.get("text") or block.get("content")
+                    if isinstance(text, str):
+                        parts.append(text)
+        text = "\n".join(part for part in parts if part)
+        if not text:
+            return None
+        return {
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "thinking",
+                "thinking": text,
+            }]},
+        }
+
+    if item_type in {
+        "function_call",
+        "custom_tool_call",
+        "tool_search_call",
+        "web_search_call",
+        "image_generation_call",
+    }:
+        call_id = item.get("call_id") or item.get("id") or item_type
+        name = (
+            item.get("name")
+            or item.get("execution")
+            or item_type.removesuffix("_call")
+        )
+        arguments = item.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {"input": arguments}
+        if arguments is None:
+            arguments = item.get("action") or {}
+        return {
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use",
+                "id": str(call_id),
+                "name": str(name),
+                "input": arguments if isinstance(arguments, dict) else {
+                    "input": arguments
+                },
+            }]},
+        }
+
+    if item_type in {
+        "function_call_output",
+        "custom_tool_call_output",
+        "tool_search_output",
+    }:
+        call_id = item.get("call_id") or item.get("id") or item_type
+        output = item.get("output")
+        return {
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": str(call_id),
+                "content": _json_text(output),
+                "is_error": item.get("status") == "failed",
+            }]},
+        }
+
+    if item_type == "local_shell_call":
+        action = item.get("action", {})
+        call_id = item.get("call_id") or "local_shell_call"
+        if item.get("status") in {"completed", "incomplete"}:
+            return {
+                "type": "user",
+                "message": {"content": [{
+                    "type": "tool_result",
+                    "tool_use_id": str(call_id),
+                    "content": json.dumps(item, indent=2, default=str),
+                    "is_error": item.get("status") == "incomplete",
+                }]},
+            }
+        return {
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use",
+                "id": str(call_id),
+                "name": "exec",
+                "input": action if isinstance(action, dict) else {},
+            }]},
+        }
+
+    if item_type in {"compaction", "compaction_trigger", "context_compaction"}:
+        return {"type": "system", "message": "Context compaction completed"}
+
     return None
 
 
@@ -1248,6 +1638,15 @@ async def _run_agent_sdk(
         limit=2 ** 24,  # 16 MB — default 64 KB is too small for large JSON-RPC messages
     )
 
+    async def _drain_stderr() -> None:
+        if proc.stderr is None:
+            return
+        async for raw in proc.stderr:
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if line:
+                log.debug("codex app-server stderr: %s", line[:2000])
+
+    _stderr_task = asyncio.create_task(_drain_stderr())
     request_id = 0
 
     def _next_id() -> int:
@@ -1326,15 +1725,68 @@ async def _run_agent_sdk(
             "result": result,
         })
 
+    async def _respond_error(rid, message: str, code: int = -32000) -> None:
+        await _send({
+            "jsonrpc": "2.0",
+            "id": rid,
+            "error": {"code": code, "message": message},
+        })
+
     # Messages received during handshake that need processing later
     deferred_msgs: list[dict] = []
 
     # Accumulator for agent message deltas
     delta_texts: dict[str, str] = {}
-    last_yielded_text = ""
+    completed_item_ids: set[str] = set()
+    command_output_buffers: dict[str, dict[str, str]] = {}
+    process_output_buffers: dict[str, dict[str, str]] = {}
+    file_patch_buffers: dict[str, str] = {}
+    last_turn_diff = ""
+    emitted_file_change = False
     # Accumulator for reasoning deltas — flush as one block
     reasoning_buffer: list[str] = []
     _inject_task: asyncio.Task | None = None
+
+    def _flush_reasoning_event() -> dict | None:
+        if not reasoning_buffer:
+            return None
+        combined = "".join(reasoning_buffer)
+        reasoning_buffer.clear()
+        if not combined.strip():
+            return None
+        return {
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "thinking",
+                "thinking": combined,
+            }]},
+        }
+
+    def _flush_agent_delta_events() -> list[dict]:
+        events = []
+        for item_id, text in list(delta_texts.items()):
+            if item_id in completed_item_ids:
+                continue
+            if text.strip():
+                events.append({
+                    "type": "assistant",
+                    "message": {"content": [{
+                        "type": "text",
+                        "text": text,
+                    }]},
+                })
+            completed_item_ids.add(item_id)
+        delta_texts.clear()
+        return events
+
+    def _flush_turn_diff_event() -> dict | None:
+        nonlocal emitted_file_change, last_turn_diff
+        if not last_turn_diff or emitted_file_change:
+            return None
+        diff = last_turn_diff
+        last_turn_diff = ""
+        emitted_file_change = True
+        return {"type": "system", "message": f"Turn diff:\n{diff}"}
 
     try:
         # --- Handshake (sequential request/response) ---
@@ -1343,9 +1795,11 @@ async def _run_agent_sdk(
                 "name": "ctf-agent-wrapper",
                 "version": "1.0.0",
             },
+            "capabilities": {
+                "experimentalApi": True,
+                "requestAttestation": False,
+            },
         }
-        if challenge_id and run_id:
-            init_params["capabilities"] = {"experimentalApi": True}
         rid = await _send_request("initialize", init_params)
         init_result = await _read_response(rid)
         log.info("Codex app-server initialized: %s",
@@ -1530,6 +1984,8 @@ async def _run_agent_sdk(
         # Move any deferred messages from handshake into a queue
         msg_queue: list[dict] = list(deferred_msgs)
         deferred_msgs.clear()
+        done_seen = False
+        done_drain_seconds = 0.5
 
         while True:
             # Drain broadcast UI events from inject task
@@ -1540,20 +1996,34 @@ async def _run_agent_sdk(
             if msg_queue:
                 msg = msg_queue.pop(0)
             else:
-                raw_line = await proc.stdout.readline()
+                try:
+                    if done_seen:
+                        raw_line = await asyncio.wait_for(
+                            proc.stdout.readline(),
+                            timeout=done_drain_seconds,
+                        )
+                    else:
+                        raw_line = await proc.stdout.readline()
+                except asyncio.TimeoutError:
+                    event = _flush_reasoning_event()
+                    if event:
+                        yield event
+                    for event in _flush_agent_delta_events():
+                        yield event
+                    event = _flush_turn_diff_event()
+                    if event:
+                        yield event
+                    break
                 if not raw_line:
                     # Process exited or stdout closed — flush reasoning
-                    if reasoning_buffer:
-                        combined = "".join(reasoning_buffer)
-                        reasoning_buffer.clear()
-                        if combined.strip():
-                            yield {
-                                "type": "assistant",
-                                "message": {"content": [{
-                                    "type": "thinking",
-                                    "thinking": combined,
-                                }]},
-                            }
+                    event = _flush_reasoning_event()
+                    if event:
+                        yield event
+                    for event in _flush_agent_delta_events():
+                        yield event
+                    event = _flush_turn_diff_event()
+                    if event:
+                        yield event
                     log.info("Codex app-server stdout closed")
                     break
 
@@ -1586,6 +2056,9 @@ async def _run_agent_sdk(
             if "id" in msg and "method" in msg:
                 server_method = msg["method"]
                 server_id = msg["id"]
+                server_params = msg.get("params", {})
+                if not isinstance(server_params, dict):
+                    server_params = {}
 
                 if server_method in _APPROVAL_METHODS:
                     # Auto-approve
@@ -1593,7 +2066,7 @@ async def _run_agent_sdk(
                               server_method, server_id)
                     await _respond(
                         server_id,
-                        _make_approval_result(server_method),
+                        _make_approval_result(server_method, server_params),
                     )
                     # Yield a system note about the approval
                     yield {
@@ -1604,9 +2077,10 @@ async def _run_agent_sdk(
                     }
                 elif server_method == "item/tool/call":
                     # Dynamic tool call
-                    tc_params = msg.get("params", {})
-                    tc_tool = tc_params.get("tool", "")
-                    tc_args = tc_params.get("arguments", {})
+                    tc_tool = server_params.get("tool", "")
+                    tc_args = server_params.get("arguments", {})
+                    if not isinstance(tc_args, dict):
+                        tc_args = {}
 
                     if tc_tool == "notify_teammates" and challenge_id and run_id:
                         from .broadcast import broadcast_to_teammates
@@ -1623,20 +2097,44 @@ async def _run_agent_sdk(
                         })
                     else:
                         await _respond(server_id, {
-                            "error": f"Unknown dynamic tool: {tc_tool}",
+                            "contentItems": [{
+                                "type": "inputText",
+                                "text": f"Unknown dynamic tool: {tc_tool}",
+                            }],
+                            "success": False,
                         })
                 elif server_method == "item/tool/requestUserInput":
                     # Tool requesting user input — auto-respond empty
-                    await _respond(server_id, {"input": ""})
+                    await _respond(
+                        server_id,
+                        _make_user_input_result(server_params),
+                    )
                 elif server_method == "mcpServer/elicitation/request":
                     # MCP elicitation — auto-confirm
-                    await _respond(server_id, {"action": "confirm"})
+                    await _respond(server_id, _make_elicitation_result())
+                elif server_method == "account/chatgptAuthTokens/refresh":
+                    token_result = _make_token_refresh_result(server_params)
+                    if token_result:
+                        await _respond(server_id, token_result)
+                    else:
+                        await _respond_error(
+                            server_id,
+                            "Unable to refresh ChatGPT tokens from local Codex auth",
+                        )
+                elif server_method == "attestation/generate":
+                    await _respond_error(
+                        server_id,
+                        "Client attestation is not supported by ctf-agent-wrapper",
+                    )
                 else:
                     # Unknown server request — respond with empty result
                     log.warning(
                         "Unknown server request: %s", server_method
                     )
-                    await _respond(server_id, {})
+                    await _respond_error(
+                        server_id,
+                        f"Unsupported Codex server request: {server_method}",
+                    )
                 continue
 
             # --- Server Notification (has method, no id) ---
@@ -1647,38 +2145,55 @@ async def _run_agent_sdk(
             if reasoning_buffer and method not in (
                 "item/reasoning/textDelta",
                 "item/reasoning/summaryTextDelta",
+                "item/reasoning/summaryPartAdded",
             ):
-                combined = "".join(reasoning_buffer)
-                reasoning_buffer.clear()
-                if combined.strip():
-                    yield {
-                        "type": "assistant",
-                        "message": {"content": [{
-                            "type": "thinking",
-                            "thinking": combined,
-                        }]},
-                    }
+                event = _flush_reasoning_event()
+                if event:
+                    yield event
 
-            # Detect turn completion — v0.118+ uses thread/status/changed
-            # with status.type=="idle", older versions use turn/completed
-            turn_done = False
+            # Detect turn completion. We keep draining briefly after a done
+            # signal because Codex may send final items/usage just after idle.
             if method == "turn/completed":
                 turn = params.get("turn", {})
+                if not isinstance(turn, dict):
+                    turn = {}
                 status = turn.get("status", "")
-                error_info = turn.get("codexErrorInfo")
-                if isinstance(error_info, str) and error_info not in {
-                    "", "other"
-                }:
+                error = turn.get("error")
+                if isinstance(error, dict):
+                    message = error.get("message") or "Codex turn error"
+                    info = error.get("codexErrorInfo")
+                    details = error.get("additionalDetails")
+                    suffix = ""
+                    if info and info != "other":
+                        suffix = f" ({_json_text(info)})"
+                    if details:
+                        suffix += f": {details}"
                     yield {
                         "type": "error",
-                        "message": f"Codex turn error: {error_info}",
+                        "message": f"{message}{suffix}",
                     }
-                elif isinstance(error_info, dict):
-                    yield {
-                        "type": "error",
-                        "message": f"Codex turn error: "
-                                   f"{json.dumps(error_info)}",
-                    }
+                for item in turn.get("items", []) or []:
+                    if not isinstance(item, dict):
+                        continue
+                    item_id = item.get("id", "")
+                    if item_id and item_id in completed_item_ids:
+                        continue
+                    if item.get("type") == "fileChange":
+                        emitted_file_change = True
+                    event = _normalize_thread_item(
+                        item,
+                        "completed",
+                        agent_texts=delta_texts,
+                        command_outputs=command_output_buffers,
+                        file_patches=file_patch_buffers,
+                    )
+                    if event:
+                        yield event
+                    if item_id:
+                        completed_item_ids.add(item_id)
+                        delta_texts.pop(item_id, None)
+                        command_output_buffers.pop(item_id, None)
+                        file_patch_buffers.pop(item_id, None)
                 usage = _extract_token_usage(params, turn)
                 if usage:
                     yield {
@@ -1688,7 +2203,7 @@ async def _run_agent_sdk(
                 log.info(
                     "Turn completed (status=%s)", status
                 )
-                turn_done = True
+                done_seen = True
 
             elif method == "thread/status/changed":
                 status_obj = params.get("status", {})
@@ -1699,7 +2214,12 @@ async def _run_agent_sdk(
                 )
                 if status_type == "idle":
                     log.info("Turn completed (thread idle)")
-                    turn_done = True
+                    done_seen = True
+                elif status_type == "systemError":
+                    yield {
+                        "type": "error",
+                        "message": "Codex thread entered systemError state",
+                    }
 
             if method == "thread/tokenUsage/updated":
                 usage = _extract_token_usage(params)
@@ -1708,35 +2228,43 @@ async def _run_agent_sdk(
                         "type": "codex_usage",
                         "usage": usage,
                     }
-                if turn_done:
-                    break
                 continue
 
-            if turn_done:
-                break
+            if method == "turn/completed":
+                continue
 
             if method == "item/started":
                 item = params.get("item", {})
-                event = _normalize_thread_item(item, "started")
+                event = _normalize_thread_item(
+                    item,
+                    "started",
+                    agent_texts=delta_texts,
+                    command_outputs=command_output_buffers,
+                    file_patches=file_patch_buffers,
+                )
                 if event:
                     yield event
                 continue
 
             if method == "item/completed":
                 item = params.get("item", {})
-                event = _normalize_thread_item(item, "completed")
+                if item.get("type") == "fileChange":
+                    emitted_file_change = True
+                event = _normalize_thread_item(
+                    item,
+                    "completed",
+                    agent_texts=delta_texts,
+                    command_outputs=command_output_buffers,
+                    file_patches=file_patch_buffers,
+                )
                 if event:
-                    # Track last assistant text for dedup
-                    if event.get("type") == "assistant":
-                        content = event.get("message", {}).get(
-                            "content", []
-                        )
-                        for block in content:
-                            if block.get("type") == "text":
-                                last_yielded_text = block.get(
-                                    "text", ""
-                                )
                     yield event
+                item_id = item.get("id", "")
+                if item_id:
+                    completed_item_ids.add(item_id)
+                    delta_texts.pop(item_id, None)
+                    command_output_buffers.pop(item_id, None)
+                    file_patch_buffers.pop(item_id, None)
                 continue
 
             if method == "item/agentMessage/delta":
@@ -1758,43 +2286,116 @@ async def _run_agent_sdk(
                     reasoning_buffer.append(delta)
                 continue
 
+            if method == "item/reasoning/summaryPartAdded":
+                continue
+
             if method == "item/commandExecution/outputDelta":
-                # Streaming command output — accumulate but don't yield
-                # (will come in item/completed)
+                item_id = params.get("itemId", "")
+                delta = params.get("delta", "")
+                _append_stream_buffer(
+                    command_output_buffers,
+                    item_id,
+                    "stdout",
+                    delta if isinstance(delta, str) else "",
+                )
                 continue
 
             if method == "item/commandExecution/terminalInteraction":
                 call_id = params.get("itemId", "")
-                interaction = params.get("interaction", {})
-                content = interaction.get("content", "")
-                itype = interaction.get("type", "")
+                content = params.get("stdin", "")
                 if content:
-                    label = "stdin" if itype == "stdin" else itype or "terminal"
                     yield {
                         "type": "user",
                         "message": {"content": [{
                             "type": "tool_result",
                             "tool_use_id": call_id,
-                            "content": f"[{label}] {content}",
+                            "content": f"[stdin] {content}",
                             "is_error": False,
                         }]},
                     }
                 continue
 
             if method == "item/fileChange/outputDelta":
-                # Streaming file change diff output — accumulate
+                item_id = params.get("itemId", "")
+                delta = params.get("delta", "")
+                if item_id and isinstance(delta, str) and delta:
+                    file_patch_buffers[item_id] = (
+                        file_patch_buffers.get(item_id, "") + delta
+                    )
+                continue
+
+            if method == "item/fileChange/patchUpdated":
+                item_id = params.get("itemId", "")
+                diff = _format_patch_changes(params.get("changes", []))
+                if item_id and diff:
+                    file_patch_buffers[item_id] = diff
                 continue
 
             if method == "command/exec/outputDelta":
-                # Legacy command output delta
+                process_id = params.get("processId", "")
+                text = _decode_base64_text(params.get("deltaBase64"))
+                _append_stream_buffer(
+                    process_output_buffers,
+                    process_id,
+                    params.get("stream", "stdout"),
+                    text,
+                )
+                continue
+
+            if method == "process/outputDelta":
+                process_handle = params.get("processHandle", "")
+                text = _decode_base64_text(params.get("deltaBase64"))
+                _append_stream_buffer(
+                    process_output_buffers,
+                    process_handle,
+                    params.get("stream", "stdout"),
+                    text,
+                )
+                continue
+
+            if method == "process/exited":
+                process_handle = params.get("processHandle", "")
+                stdout = params.get("stdout", "")
+                stderr = params.get("stderr", "")
+                buffered = process_output_buffers.pop(process_handle, {})
+                result = {
+                    "exit_code": params.get("exitCode"),
+                    "stdout": stdout or buffered.get("stdout", ""),
+                    "stderr": stderr or buffered.get("stderr", ""),
+                    "stdout_cap_reached": params.get("stdoutCapReached", False),
+                    "stderr_cap_reached": params.get("stderrCapReached", False),
+                }
+                yield {
+                    "type": "user",
+                    "message": {"content": [{
+                        "type": "tool_result",
+                        "tool_use_id": process_handle or "process",
+                        "content": json.dumps(result, indent=2, default=str),
+                        "is_error": params.get("exitCode") not in (None, 0),
+                    }]},
+                }
                 continue
 
             if method == "error":
-                err_msg = params.get("message", "")
-                code = params.get("code", "")
+                error = params.get("error")
+                if isinstance(error, dict):
+                    err_msg = error.get("message", "")
+                    info = error.get("codexErrorInfo")
+                    details = error.get("additionalDetails")
+                    if info and info != "other":
+                        err_msg = f"{err_msg} ({_json_text(info)})"
+                    if details:
+                        err_msg = f"{err_msg}: {details}"
+                else:
+                    err_msg = params.get("message", "")
+                will_retry = params.get("willRetry")
                 yield {
                     "type": "error",
-                    "message": err_msg or f"Codex error: {code}",
+                    "message": (
+                        f"{err_msg} (will retry)"
+                        if err_msg and will_retry
+                        else err_msg or "Codex error"
+                    ),
                 }
                 continue
 
@@ -1828,6 +2429,32 @@ async def _run_agent_sdk(
                 log.info("Thread closed notification received")
                 break
 
+            if method == "rawResponseItem/completed":
+                item = params.get("item", {})
+                if isinstance(item, dict):
+                    event = _normalize_raw_response_item(item)
+                    if event:
+                        yield event
+                continue
+
+            if method == "turn/diff/updated":
+                diff = params.get("diff", "")
+                if isinstance(diff, str):
+                    last_turn_diff = diff
+                continue
+
+            if method == "turn/plan/updated":
+                text = _format_plan_update(params)
+                if text:
+                    yield {
+                        "type": "assistant",
+                        "message": {"content": [{
+                            "type": "thinking",
+                            "thinking": text,
+                        }]},
+                    }
+                continue
+
             if method == "item/plan/delta":
                 delta = params.get("delta", "")
                 if delta:
@@ -1840,25 +2467,205 @@ async def _run_agent_sdk(
                     }
                 continue
 
+            if method == "thread/goal/updated":
+                text = _format_goal(params.get("goal"))
+                if text:
+                    yield {
+                        "type": "system",
+                        "subtype": "codex_goal",
+                        "message": f"Goal updated: {text}",
+                    }
+                continue
+
+            if method == "thread/goal/cleared":
+                yield {
+                    "type": "system",
+                    "subtype": "codex_goal",
+                    "message": "Goal cleared",
+                }
+                continue
+
+            if method in {"warning", "guardianWarning"}:
+                message = params.get("message", "")
+                if message:
+                    yield {
+                        "type": "system",
+                        "subtype": "codex_warning",
+                        "message": message,
+                    }
+                continue
+
+            if method == "configWarning":
+                summary = params.get("summary", "")
+                details = params.get("details")
+                path = params.get("path")
+                message = summary or "Codex config warning"
+                if details:
+                    message = f"{message}: {details}"
+                if path:
+                    message = f"{message} ({path})"
+                yield {
+                    "type": "system",
+                    "subtype": "codex_warning",
+                    "message": message,
+                }
+                continue
+
+            if method == "deprecationNotice":
+                summary = params.get("summary", "")
+                details = params.get("details")
+                message = summary or "Codex deprecation notice"
+                if details:
+                    message = f"{message}: {details}"
+                yield {
+                    "type": "system",
+                    "subtype": "codex_warning",
+                    "message": message,
+                }
+                continue
+
+            if method == "model/rerouted":
+                yield {
+                    "type": "system",
+                    "subtype": "codex_model",
+                    "message": (
+                        "Model rerouted: "
+                        f"{params.get('fromModel', '')} -> "
+                        f"{params.get('toModel', '')} "
+                        f"({params.get('reason', 'unknown')})"
+                    ),
+                }
+                continue
+
+            if method == "model/verification":
+                verifications = params.get("verifications", [])
+                if verifications:
+                    yield {
+                        "type": "system",
+                        "subtype": "codex_model",
+                        "message": (
+                            "Model verification: "
+                            + ", ".join(str(v) for v in verifications)
+                        ),
+                    }
+                continue
+
+            if method == "item/mcpToolCall/progress":
+                message = params.get("message", "")
+                if message:
+                    yield {
+                        "type": "system",
+                        "subtype": "codex_tool_progress",
+                        "message": f"MCP progress: {message}",
+                    }
+                continue
+
+            if method == "thread/compacted":
+                yield {"type": "system", "message": "Context compacted"}
+                continue
+
+            if method == "mcpServer/oauthLogin/completed":
+                if not params.get("success", False):
+                    yield {
+                        "type": "error",
+                        "message": (
+                            f"MCP OAuth login failed for {params.get('name', '')}: "
+                            f"{params.get('error', '')}"
+                        ),
+                    }
+                continue
+
+            if method == "account/login/completed":
+                if not params.get("success", False):
+                    yield {
+                        "type": "error",
+                        "message": (
+                            "Codex account login failed: "
+                            f"{params.get('error', '')}"
+                        ),
+                    }
+                continue
+
+            if method == "windows/worldWritableWarning":
+                paths = params.get("samplePaths", [])
+                if not isinstance(paths, list):
+                    paths = []
+                extra = params.get("extraCount", 0)
+                yield {
+                    "type": "system",
+                    "subtype": "codex_warning",
+                    "message": (
+                        "World-writable Windows paths detected: "
+                        + ", ".join(str(p) for p in paths[:5])
+                        + (f" (+{extra} more)" if extra else "")
+                    ),
+                }
+                continue
+
+            if method == "windowsSandbox/setupCompleted":
+                if not params.get("success", False):
+                    yield {
+                        "type": "error",
+                        "message": (
+                            "Windows sandbox setup failed: "
+                            f"{params.get('error', '')}"
+                        ),
+                    }
+                continue
+
+            if method == "thread/realtime/transcript/delta":
+                delta = params.get("delta", "")
+                role = params.get("role", "")
+                if delta:
+                    event_type = "assistant" if role == "assistant" else "system"
+                    if event_type == "assistant":
+                        yield {
+                            "type": "assistant",
+                            "message": {"content": [{
+                                "type": "text",
+                                "text": delta,
+                            }]},
+                        }
+                    else:
+                        yield {
+                            "type": "system",
+                            "subtype": "codex_realtime",
+                            "message": f"Realtime {role}: {delta}",
+                        }
+                continue
+
+            if method == "thread/realtime/error":
+                yield {
+                    "type": "error",
+                    "message": params.get("message", "Codex realtime error"),
+                }
+                continue
+
             if method in {
-                "turn/diff/updated",
-                "turn/plan/updated",
                 "item/autoApprovalReview/started",
                 "item/autoApprovalReview/completed",
-                "item/mcpToolCall/progress",
                 "serverRequest/resolved",
                 "hook/started",
                 "hook/completed",
                 "skills/changed",
                 "fs/changed",
-                "thread/compacted",
-                "model/rerouted",
-                "deprecationNotice",
-                "configWarning",
+                "thread/archived",
+                "thread/unarchived",
+                "thread/settings/updated",
                 "account/updated",
                 "account/rateLimits/updated",
                 "app/list/updated",
                 "mcpServer/startupStatus/updated",
+                "externalAgentConfig/import/completed",
+                "remoteControl/status/changed",
+                "fuzzyFileSearch/sessionUpdated",
+                "fuzzyFileSearch/sessionCompleted",
+                "thread/realtime/started",
+                "thread/realtime/itemAdded",
+                "thread/realtime/transcript/done",
+                "thread/realtime/outputAudio/delta",
+                "thread/realtime/sdp",
+                "thread/realtime/closed",
             }:
                 # Known but not interesting for our event stream
                 continue
@@ -1875,6 +2682,8 @@ async def _run_agent_sdk(
     finally:
         if _inject_task and not _inject_task.done():
             _inject_task.cancel()
+        if _stderr_task and not _stderr_task.done():
+            _stderr_task.cancel()
         # Clean up the subprocess
         try:
             if proc.stdin and not proc.stdin.is_closing():
