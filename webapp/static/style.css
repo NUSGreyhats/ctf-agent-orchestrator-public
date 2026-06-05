@@ -1621,6 +1621,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   font-family: var(--mono); font-size: 0.66rem;
 }
 .skill-pill-muted { color: var(--text-muted); font-family: var(--sans); }
+.add-run-modal { max-width: 660px; }
 .run-skills-modal { max-width: 620px; }
 .run-skill-inheritance {
   margin: 0 0 0.6rem; color: var(--text-muted);

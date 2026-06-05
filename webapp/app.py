@@ -14,6 +14,7 @@ import base64
 import difflib
 import hashlib
 import io
+import ipaddress
 import json
 import logging
 import math
@@ -694,6 +695,23 @@ def run_notes_filename(challenge: dict, run: dict) -> str:
     return "WORKING_NOTES.md"
 
 
+def public_run_summary(challenge: dict, run: dict) -> dict:
+    summary = {
+        "id": run["id"],
+        "agent": run["agent"],
+        "model": run["model"],
+        "effort": run.get("effort", ""),
+        "status": run["status"],
+        "error": run.get("error"),
+        "duration_ms": effective_run_duration_ms(run),
+        "enabled_skills": run_enabled_skills(challenge, run),
+        "skill_override": run_has_skill_override(run),
+    }
+    if run.get("custom_prompt"):
+        summary["custom_prompt"] = run["custom_prompt"]
+    return summary
+
+
 def working_notes_template(label: str) -> str:
     return (
         f"# Working Notes — {label}\n"
@@ -888,7 +906,11 @@ def setup_parallel_cross_notes(challenge_id: str, runs: dict | None = None) -> N
         label = run.get("notes_label", run["agent"])
         own_notes = run_dir / f"WORKING_NOTES_{label}.md"
         if not own_notes.exists():
-            own_notes.write_text(working_notes_template(label))
+            legacy_notes = run_dir / "WORKING_NOTES.md"
+            if legacy_notes.exists():
+                own_notes.write_text(legacy_notes.read_text(errors="replace"))
+            else:
+                own_notes.write_text(working_notes_template(label))
 
     # Cross-link: symlink each teammate's notes into this run dir
     for rid, run in run_items:
@@ -1995,6 +2017,8 @@ def _serialize_runs(challenge: dict) -> dict:
         }
         if run_has_skill_override(run):
             run_meta["enabled_skills"] = run_enabled_skills(challenge, run)
+        if run.get("custom_prompt"):
+            run_meta["custom_prompt"] = run["custom_prompt"]
         serialized[run_id] = run_meta
     return serialized
 
@@ -2156,6 +2180,11 @@ def load_challenges_from_disk() -> None:
                         run_meta.get("enabled_skills"),
                         default=[],
                     )
+                custom_prompt = str(
+                    run_meta.get("custom_prompt") or ""
+                ).strip()
+                if custom_prompt:
+                    run["custom_prompt"] = custom_prompt
                 run["_codex_thread_id"] = provider_state.get(
                     "codex_thread_id"
                 )
@@ -2526,17 +2555,7 @@ async def list_challenges(request: Request) -> JSONResponse:
     for c in challenges.values():
         runs_summary = []
         for run in c["runs"].values():
-            runs_summary.append({
-                "id": run["id"],
-                "agent": run["agent"],
-                "model": run["model"],
-                "effort": run.get("effort", ""),
-                "status": run["status"],
-                "error": run.get("error"),
-                "duration_ms": effective_run_duration_ms(run),
-                "enabled_skills": run_enabled_skills(c, run),
-                "skill_override": run_has_skill_override(run),
-            })
+            runs_summary.append(public_run_summary(c, run))
         result.append({
             "id": c["id"],
             "name": c["name"],
@@ -3305,6 +3324,149 @@ async def stop_challenge(request: Request) -> JSONResponse:
         "status": challenge["status"],
         "run_ids": changed_run_ids,
     })
+
+
+async def add_challenge_runs(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if challenge.get("status") == "solved":
+        return JSONResponse(
+            {"error": "challenge is solved; un-solve it before adding agents"},
+            status_code=409,
+        )
+
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+
+    agents_value = body.get("agents", "")
+    agents_str = (
+        json.dumps(agents_value)
+        if isinstance(agents_value, list)
+        else str_field(agents_value).strip()
+    )
+    agent_entries = parse_agents_field(agents_str)
+    if not agent_entries:
+        single_agent = str_field(body.get("agent", "")).strip() or DEFAULT_AGENT
+        agent_entries = [{
+            "agent": single_agent,
+            "model": str_field(body.get("model", "")),
+            "effort": str_field(body.get("effort", "")),
+        }]
+
+    valid_entries = []
+    seen: set[tuple[str, str, str]] = set()
+    for entry in agent_entries:
+        agent_name = entry.get("agent", "")
+        if agent_name not in VALID_AGENTS:
+            return JSONResponse(
+                {"error": f"invalid agent: {agent_name}"},
+                status_code=400,
+            )
+        key = (
+            agent_name,
+            entry.get("model", ""),
+            entry.get("effort", ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        valid_entries.append(entry)
+
+    if not valid_entries:
+        return JSONResponse({"error": "agent required"}, status_code=400)
+
+    custom_prompt = str_field(body.get("prompt", "")).strip()
+    has_skill_override = "enabled_skills" in body
+    enabled_skills = normalize_enabled_skills(
+        body.get("enabled_skills"),
+        default=[],
+    ) if has_skill_override else []
+
+    new_total = len(challenge.get("runs", {})) + len(valid_entries)
+    if new_total > 1:
+        challenge["mode"] = "parallel"
+        setup_parallel_shared_dir(challenge_id)
+        for existing_run in challenge["runs"].values():
+            setup_run_dir(challenge_id, existing_run["id"])
+
+    added_run_ids = []
+    for entry in valid_entries:
+        agent_name = entry["agent"]
+        run_id = uuid.uuid4().hex[:8]
+        run_model = (
+            entry.get("model")
+            or str_field(body.get("model", ""))
+            or resolved_default_model(agent_name)
+        )
+        run_effort = normalize_effort_for_agent(
+            agent_name,
+            entry.get("effort") or str_field(body.get("effort", "")),
+        )
+        run = make_run(
+            run_id=run_id,
+            agent=agent_name,
+            model=run_model,
+            effort=run_effort,
+            status="solving",
+        )
+        if custom_prompt:
+            run["custom_prompt"] = custom_prompt
+        if has_skill_override:
+            run["enabled_skills"] = enabled_skills
+        challenge["runs"][run_id] = run
+        setup_run_dir(challenge_id, run_id)
+        added_run_ids.append(run_id)
+
+    if challenge.get("mode") == "parallel":
+        assign_notes_labels(challenge["runs"])
+        setup_parallel_cross_notes(challenge_id, challenge["runs"])
+
+    for run_id in added_run_ids:
+        sync_run_skill_links(challenge, challenge["runs"][run_id])
+
+    challenge["status"] = derive_challenge_status(challenge)
+    challenge["error"] = None
+    save_metadata(challenge)
+
+    def _task_done_cb(t: asyncio.Task, rid: str = "") -> None:
+        exc = t.exception() if not t.cancelled() else None
+        if exc:
+            log.error(
+                "[%s/%s] TASK EXCEPTION: %s",
+                challenge_id[:8], rid[:8], exc, exc_info=exc,
+            )
+
+    added_runs = []
+    for run_id in added_run_ids:
+        run = challenge["runs"][run_id]
+        task = asyncio.create_task(run_agent_task(challenge_id, run_id))
+        task.add_done_callback(lambda t, rid=run_id: _task_done_cb(t, rid))
+        run["task"] = task
+        summary = public_run_summary(challenge, run)
+        added_runs.append(summary)
+        await broadcast_challenge(challenge_id, {
+            "type": "run_added",
+            "challenge_id": challenge_id,
+            "run": summary,
+        })
+
+    await broadcast_challenge(challenge_id, {
+        "type": "challenge_status",
+        "status": challenge["status"],
+    })
+    return JSONResponse({
+        "status": challenge["status"],
+        "mode": challenge["mode"],
+        "runs": added_runs,
+    }, status_code=201)
 
 
 async def broadcast_to_agents(request: Request) -> JSONResponse:
@@ -4556,6 +4718,7 @@ def _export_challenge_to_zip(
             "notes_label": run.get("notes_label", ""),
             "enabled_skills": run_enabled_skills(challenge, run),
             "skill_override": run_has_skill_override(run),
+            "custom_prompt": run.get("custom_prompt", ""),
         }
 
     zf.writestr(f"{prefix}/challenge.json", json.dumps(meta, indent=2))
@@ -4960,7 +5123,7 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
     notes_file = run_notes_filename(challenge, run)
     run_cwd = get_run_cwd(challenge["id"], run)
     notes_path = run_cwd / notes_file
-    enabled_skill_set = set(challenge_enabled_skills(challenge))
+    enabled_skill_set = set(run_enabled_skills(challenge, run))
 
     parts = [
         "You are solving a CTF challenge.",
@@ -5057,6 +5220,14 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
         parts.append("Remote instance connection info:")
         for line in _instance_prompt_lines(instance_info):
             parts.append(f"  {line}")
+
+    custom_prompt = str(run.get("custom_prompt") or "").strip()
+    if custom_prompt:
+        parts.extend([
+            "",
+            "Run-specific instructions:",
+            custom_prompt,
+        ])
 
     has_declared_files = bool(challenge.get("files"))
     try:
@@ -7989,6 +8160,9 @@ WG_SERVER_PUBLIC_KEY = WG_DIR / "server_public.key"
 WG_SETTINGS = WG_DIR / "wg0.settings.json"
 WG_DNSMASQ_CONF = Path("/etc/dnsmasq.d/wg-ctf.conf")
 VPN_SUBNET = "10.13.37"
+VPN_CIDR = f"{VPN_SUBNET}.0/24"
+VPN_CLIENT_IP = f"{VPN_SUBNET}.2"
+VPN_SERVER_IP = f"{VPN_SUBNET}.1"
 
 
 def _wg_installed() -> bool:
@@ -8031,6 +8205,40 @@ def _wg_peer_info() -> dict | None:
         return None
 
 
+def _validate_wg_public_key(public_key: str) -> bool:
+    try:
+        return len(base64.b64decode(public_key, validate=True)) == 32
+    except Exception:
+        return False
+
+
+def _parse_vpn_networks(raw_networks: str) -> tuple[list[str], str | None]:
+    """Parse client-side CIDRs the server should reverse-route through wg0."""
+    raw_networks = raw_networks.strip()
+    if not raw_networks:
+        return [], None
+
+    networks: list[str] = []
+    seen: set[str] = set()
+    for token in re.split(r"[\s,]+", raw_networks):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            network = ipaddress.ip_network(token, strict=False)
+        except ValueError:
+            return [], f"Invalid internal network CIDR: {token}"
+        if network.version != 4:
+            return [], f"IPv6 internal networks are not supported yet: {token}"
+        if network.prefixlen == 0:
+            return [], "0.0.0.0/0 is too broad for reverse VPN routing"
+        normalized = str(network)
+        if normalized not in seen:
+            seen.add(normalized)
+            networks.append(normalized)
+    return networks, None
+
+
 def _get_server_public_ip() -> str:
     """Best-effort detection of the server's public IP."""
     for cmd in (
@@ -8052,22 +8260,20 @@ def _get_server_public_ip() -> str:
 
 def _build_wg_server_conf(
     client_public_key: str,
-    client_networks: str,
+    client_networks: list[str],
     dns_forward: bool,
 ) -> str:
     server_private_key = WG_SERVER_PRIVATE_KEY.read_text().strip()
-    allowed_ips = f"{VPN_SUBNET}.2/32"
-    if client_networks.strip():
-        allowed_ips += f", {client_networks.strip()}"
+    allowed_ips = ", ".join([f"{VPN_CLIENT_IP}/32", *client_networks])
     egress_iface_cmd = "$(ip -4 route list default | awk '{print $5; exit}')"
 
     conf = f"""[Interface]
 # dns_forward={"true" if dns_forward else "false"}
-Address = {VPN_SUBNET}.1/24
+Address = {VPN_SERVER_IP}/24
 ListenPort = 51820
 PrivateKey = {server_private_key}
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o {egress_iface_cmd} -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o {egress_iface_cmd} -j MASQUERADE
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -s {VPN_CIDR} -o {egress_iface_cmd} -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -s {VPN_CIDR} -o {egress_iface_cmd} -j MASQUERADE
 
 [Peer]
 PublicKey = {client_public_key}
@@ -8078,30 +8284,63 @@ AllowedIPs = {allowed_ips}
 
 def _build_wg_client_conf(
     client_private_key_placeholder: str,
-    client_networks: str,
+    client_networks: list[str],
     dns_forward: bool,
 ) -> str:
     server_public_key = WG_SERVER_PUBLIC_KEY.read_text().strip()
     server_ip = _get_server_public_ip()
 
-    dns_line = f"DNS = {VPN_SUBNET}.1" if dns_forward else ""
-    # Client routes the VPN subnet + internal networks through the tunnel
-    allowed_ips = f"{VPN_SUBNET}.0/24"
-    if client_networks.strip():
-        allowed_ips += f", {client_networks.strip()}"
+    dns_line = f"DNS = {VPN_SERVER_IP}" if dns_forward else ""
+    routed_networks = ""
+    if client_networks:
+        routed_networks = (
+            "# Reverse-routed networks behind this client: "
+            f"{', '.join(client_networks)}\n"
+            "# Keep those CIDRs out of this peer's AllowedIPs; they must stay "
+            "locally reachable from the client.\n"
+        )
 
     conf = f"""[Interface]
-Address = {VPN_SUBNET}.2/24
+Address = {VPN_CLIENT_IP}/24
 PrivateKey = {client_private_key_placeholder}
 {dns_line}
 
 [Peer]
 PublicKey = {server_public_key}
 Endpoint = {server_ip}:51820
-AllowedIPs = {allowed_ips}
+{routed_networks}AllowedIPs = {VPN_CIDR}
 PersistentKeepalive = 25
 """
     return conf
+
+
+def _build_wg_client_setup(client_networks: list[str]) -> str:
+    if not client_networks:
+        return ""
+
+    nat_up = "; ".join(
+        f"iptables -t nat -A POSTROUTING -s {VPN_CIDR} -d {network} -j MASQUERADE"
+        for network in client_networks
+    )
+    nat_down = "; ".join(
+        f"iptables -t nat -D POSTROUTING -s {VPN_CIDR} -d {network} -j MASQUERADE"
+        for network in client_networks
+    )
+    return (
+        "# Linux clients only: this reverse-routing setup uses wg-quick, "
+        "sysctl, and iptables.\n"
+        "# Add these lines to the Linux wg-quick client config if this client "
+        "routes the internal CIDR(s).\n"
+        "# They enable forwarding and NAT replies from the internal network "
+        "back through the tunnel.\n"
+        "PostUp = sysctl -w net.ipv4.ip_forward=1; "
+        "iptables -A FORWARD -i %i -j ACCEPT; "
+        "iptables -A FORWARD -o %i -j ACCEPT; "
+        f"{nat_up}\n"
+        "PostDown = iptables -D FORWARD -i %i -j ACCEPT; "
+        "iptables -D FORWARD -o %i -j ACCEPT; "
+        f"{nat_down}\n"
+    )
 
 
 def _setup_dns_forwarder() -> None:
@@ -8117,7 +8356,7 @@ def _setup_dns_forwarder() -> None:
     WG_DNSMASQ_CONF.write_text(
         f"interface=wg0\n"
         f"bind-interfaces\n"
-        f"listen-address={VPN_SUBNET}.1\n"
+        f"listen-address={VPN_SERVER_IP}\n"
         f"no-resolv\n"
         f"server=8.8.8.8\n"
         f"server=1.1.1.1\n"
@@ -8200,12 +8439,15 @@ async def vpn_configure(request: Request) -> JSONResponse:
             {"error": "client_public_key required"}, status_code=400
         )
 
-    # Validate key format (base64, 44 chars with =)
-    if len(client_public_key) != 44 or not client_public_key.endswith("="):
+    if not _validate_wg_public_key(client_public_key):
         return JSONResponse(
             {"error": "Invalid WireGuard public key format"},
             status_code=400,
         )
+
+    client_networks, network_error = _parse_vpn_networks(client_networks)
+    if network_error:
+        return JSONResponse({"error": network_error}, status_code=400)
 
     # Bring down existing interface if up
     if _wg_interface_up():
@@ -8223,6 +8465,7 @@ async def vpn_configure(request: Request) -> JSONResponse:
     client_conf = _build_wg_client_conf(
         "<YOUR_PRIVATE_KEY>", client_networks, dns_forward
     )
+    client_setup = _build_wg_client_setup(client_networks)
 
     # Bring up interface
     result = subprocess.run(
@@ -8243,6 +8486,8 @@ async def vpn_configure(request: Request) -> JSONResponse:
     return JSONResponse({
         "ok": True,
         "client_config": client_conf,
+        "client_setup": client_setup,
+        "client_networks": client_networks,
         "server_public_key": WG_SERVER_PUBLIC_KEY.read_text().strip(),
     })
 
@@ -9862,6 +10107,7 @@ routes = [
     Route("/api/challenges/bulk", bulk_upload, methods=["POST"]),
     Route("/api/challenges/export", export_challenges_bulk, methods=["POST"]),
     Route("/api/challenges/{id}/solve", solve_challenge, methods=["POST"]),
+    Route("/api/challenges/{id}/runs", add_challenge_runs, methods=["POST"]),
     Route("/api/challenges/{id}/stop", stop_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/broadcast", broadcast_to_agents, methods=["POST"]),
     Route("/api/challenges/{id}/steer", steer_challenge, methods=["POST"]),
