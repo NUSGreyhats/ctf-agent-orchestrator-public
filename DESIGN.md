@@ -195,9 +195,12 @@ When enabled, the Discord bot connects via the Discord gateway WebSocket and reg
 
 Features:
 
-- per-challenge threads created when challenges are loaded/created with Discord enabled;
-- thread rename to `[solved]` on completion;
+- per-challenge Discord destinations created when challenges are created/imported with Discord enabled;
+- layout setting for either one thread per challenge in the selected announcement channel or one text channel per challenge under a Discord category matching the challenge category;
+- destination rename on completion (`[solved]` thread prefix or `solved-` channel prefix);
 - notifications for starts, stops, solves, flag detections, and breakthroughs;
+- flag review buttons on detected candidates for submit, reject, mark correct, and broadcast;
+- challenge action buttons for status, stats, tail, flags, submit flag, mark solved, stop, and resume;
 - slash commands: `/broadcast`, `/submit`, `/status`, `/flags`, `/stop`, `/resume`, `/solved`, `/ctf`, `/files`.
 
 Changing Discord settings in the web UI reconciles the gateway: it starts when enabled, stops when disabled, and restarts when token/channel/guild settings change.
@@ -289,5 +292,6 @@ Settings persist to `challenges/settings.json`.
 | `max_platform_import_size_gb` | `2.0` | Per-challenge cap for platform-imported files; challenges exceeding it are skipped |
 | `discord_enabled` | `false` | Enable Discord bot integration |
 | `discord_bot_token` | empty | Discord bot token |
-| `discord_channel_id` | empty | Discord channel for challenge threads |
+| `discord_channel_id` | empty | Discord announcement channel; also the parent channel for thread mode |
 | `discord_guild_id` | empty | Discord guild for slash command registration |
+| `discord_challenge_layout` | `threads` | Discord challenge destination mode: `threads` or `channels` |

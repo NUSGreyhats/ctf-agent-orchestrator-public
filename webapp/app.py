@@ -12,6 +12,7 @@ Supports 2 solving modes:
 import asyncio
 import base64
 import difflib
+import hashlib
 import io
 import json
 import logging
@@ -42,13 +43,13 @@ try:
     from .discord_bot import (
         get_bot, make_thread_name, make_challenge_embed,
         make_solve_embed, make_stop_embed, DiscordBot, DiscordGateway,
-        _truncate,
+        make_category_name, make_challenge_channel_name, _truncate,
     )
 except ImportError:
     from discord_bot import (
         get_bot, make_thread_name, make_challenge_embed,
         make_solve_embed, make_stop_embed, DiscordBot, DiscordGateway,
-        _truncate,
+        make_category_name, make_challenge_channel_name, _truncate,
     )
 
 try:
@@ -113,6 +114,25 @@ _instance_locks: dict[str, asyncio.Lock] = {}
 CONNECTIONS_FILE = STATE_ROOT_DIR / "connections.json"
 DEFAULT_MAX_PLATFORM_IMPORT_SIZE_GB = 2.0
 BYTES_PER_GIB = 1024 ** 3
+DEFAULT_DISCORD_CHALLENGE_LAYOUT = "threads"
+VALID_DISCORD_CHALLENGE_LAYOUTS = {"threads", "channels"}
+DISCORD_COMPONENT_PREFIX = "ctf"
+DISCORD_BUTTON_ACTIONS = {
+    "status",
+    "stats",
+    "tail",
+    "flags",
+    "submit",
+    "solved",
+    "stop",
+    "resume",
+}
+DISCORD_FLAG_REVIEW_ACTIONS = {
+    "flag_submit",
+    "flag_reject",
+    "flag_correct",
+    "flag_broadcast",
+}
 
 
 def load_connections() -> list[dict]:
@@ -1396,6 +1416,7 @@ def load_settings() -> dict:
         "discord_bot_token": "",
         "discord_channel_id": "",
         "discord_guild_id": "",
+        "discord_challenge_layout": DEFAULT_DISCORD_CHALLENGE_LAYOUT,
     }
     if SETTINGS_FILE.exists():
         try:
@@ -1408,6 +1429,9 @@ def load_settings() -> dict:
             pass
     defaults["max_platform_import_size_gb"] = normalize_platform_import_size_gb(
         defaults.get("max_platform_import_size_gb")
+    )
+    defaults["discord_challenge_layout"] = normalize_discord_challenge_layout(
+        defaults.get("discord_challenge_layout")
     )
     return defaults
 
@@ -1431,30 +1455,244 @@ def platform_import_limit_bytes(settings: dict | None = None) -> int:
     return int(gb * BYTES_PER_GIB)
 
 
-async def discord_create_thread(challenge: dict) -> None:
-    bot = get_bot(load_settings())
-    if not bot:
-        return
+def normalize_discord_challenge_layout(value) -> str:
+    layout = str(value or DEFAULT_DISCORD_CHALLENGE_LAYOUT).strip().lower()
+    if layout not in VALID_DISCORD_CHALLENGE_LAYOUTS:
+        return DEFAULT_DISCORD_CHALLENGE_LAYOUT
+    return layout
+
+
+def _discord_destination_id(challenge: dict) -> str:
+    return str(
+        challenge.get("_discord_channel_id")
+        or challenge.get("_discord_thread_id")
+        or ""
+    )
+
+
+def _discord_destination_kind(challenge: dict) -> str:
+    if challenge.get("_discord_channel_id"):
+        return "channel"
+    if challenge.get("_discord_thread_id"):
+        return "thread"
+    return ""
+
+
+def _discord_component_id(challenge_id: str, action: str) -> str:
+    return f"{DISCORD_COMPONENT_PREFIX}:{challenge_id}:{action}"
+
+
+def _discord_flag_token(flag: str) -> str:
+    digest = hashlib.sha256(flag_lookup_key(flag).encode()).digest()
+    return base64.urlsafe_b64encode(digest[:9]).decode().rstrip("=")
+
+
+def _discord_flag_component_id(challenge_id: str, action: str, flag: str) -> str:
+    return f"{DISCORD_COMPONENT_PREFIX}:{challenge_id}:{action}:{_discord_flag_token(flag)}"
+
+
+def _discord_button(challenge: dict, action: str, label: str, style: int = 2) -> dict:
+    return {
+        "type": 2,
+        "style": style,
+        "label": label,
+        "custom_id": _discord_component_id(challenge.get("id", ""), action),
+    }
+
+
+def discord_challenge_components(challenge: dict) -> list[dict]:
+    return [
+        {
+            "type": 1,
+            "components": [
+                _discord_button(challenge, "status", "Status", 1),
+                _discord_button(challenge, "stats", "Stats"),
+                _discord_button(challenge, "tail", "Tail"),
+                _discord_button(challenge, "flags", "Flags"),
+            ],
+        },
+        {
+            "type": 1,
+            "components": [
+                _discord_button(challenge, "submit", "Submit Flag", 1),
+                _discord_button(challenge, "solved", "Mark Solved", 3),
+                _discord_button(challenge, "stop", "Stop", 4),
+                _discord_button(challenge, "resume", "Resume"),
+            ],
+        },
+    ]
+
+
+def _discord_flag_modal_components(
+    field_id: str,
+    label: str,
+    required: bool,
+    placeholder: str = "",
+) -> list[dict]:
+    field = {
+        "type": 4,
+        "custom_id": field_id,
+        "label": label[:45],
+        "style": 1,
+        "required": required,
+    }
+    if placeholder:
+        field["placeholder"] = placeholder[:100]
+    return [{"type": 1, "components": [field]}]
+
+
+def discord_flag_review_components(challenge: dict, flag: str) -> list[dict]:
+    challenge_id = challenge.get("id", "")
+    return [{
+        "type": 1,
+        "components": [
+            {
+                "type": 2,
+                "style": 1,
+                "label": "Submit",
+                "custom_id": _discord_flag_component_id(
+                    challenge_id, "flag_submit", flag
+                ),
+            },
+            {
+                "type": 2,
+                "style": 4,
+                "label": "Reject",
+                "custom_id": _discord_flag_component_id(
+                    challenge_id, "flag_reject", flag
+                ),
+            },
+            {
+                "type": 2,
+                "style": 3,
+                "label": "Mark Correct",
+                "custom_id": _discord_flag_component_id(
+                    challenge_id, "flag_correct", flag
+                ),
+            },
+            {
+                "type": 2,
+                "style": 2,
+                "label": "Broadcast",
+                "custom_id": _discord_flag_component_id(
+                    challenge_id, "flag_broadcast", flag
+                ),
+            },
+        ],
+    }]
+
+
+async def discord_create_thread_destination(challenge: dict, bot: DiscordBot) -> None:
     thread_name = make_thread_name(challenge)
     embed = make_challenge_embed(challenge)
     # Reuse existing thread if one matches
     existing_id = await bot.find_thread_by_name(thread_name)
     if existing_id:
         challenge["_discord_thread_id"] = existing_id
+        challenge["_discord_challenge_layout"] = "threads"
         save_metadata(challenge)
-        await bot.send_message(existing_id, embed=embed)
+        await bot.send_message(
+            existing_id,
+            embed=embed,
+            components=discord_challenge_components(challenge),
+        )
         log.info("Discord thread reused: %s -> %s", thread_name, existing_id)
         return
     thread_id = await bot.create_thread(thread_name)
     if thread_id:
         challenge["_discord_thread_id"] = thread_id
+        challenge["_discord_challenge_layout"] = "threads"
         save_metadata(challenge)
-        await bot.send_message(thread_id, embed=embed)
+        await bot.send_message(
+            thread_id,
+            embed=embed,
+            components=discord_challenge_components(challenge),
+        )
         log.info("Discord thread created: %s -> %s", thread_name, thread_id)
 
 
+async def discord_create_channel_destination(challenge: dict, bot: DiscordBot) -> None:
+    guild_id = await bot.default_guild_id()
+    if not guild_id:
+        log.error("Discord channel mode requires a guild text channel")
+        return
+
+    category_name = make_category_name(challenge)
+    category_id = str(challenge.get("_discord_category_id", ""))
+    if not category_id:
+        category_id = await bot.find_category_by_name(category_name, guild_id) or ""
+    if not category_id:
+        category_id = await bot.create_category(category_name, guild_id) or ""
+    if not category_id:
+        return
+
+    channel_name = make_challenge_channel_name(challenge)
+    channel_id = str(challenge.get("_discord_channel_id", ""))
+    if not channel_id:
+        channel_id = await bot.find_text_channel_by_name(
+            channel_name,
+            category_id,
+            guild_id,
+        ) or ""
+    embed = make_challenge_embed(challenge)
+    if channel_id:
+        challenge["_discord_category_id"] = category_id
+        challenge["_discord_channel_id"] = channel_id
+        challenge["_discord_challenge_layout"] = "channels"
+        save_metadata(challenge)
+        await bot.send_message(
+            channel_id,
+            embed=embed,
+            components=discord_challenge_components(challenge),
+        )
+        log.info(
+            "Discord channel reused: %s/%s -> %s",
+            category_name,
+            channel_name,
+            channel_id,
+        )
+        return
+
+    topic = f"CTF Solver challenge {challenge.get('id', '')}".strip()
+    channel_id = await bot.create_text_channel(
+        channel_name,
+        parent_id=category_id,
+        guild_id=guild_id,
+        topic=topic,
+    )
+    if channel_id:
+        challenge["_discord_category_id"] = category_id
+        challenge["_discord_channel_id"] = channel_id
+        challenge["_discord_challenge_layout"] = "channels"
+        save_metadata(challenge)
+        await bot.send_message(
+            channel_id,
+            embed=embed,
+            components=discord_challenge_components(challenge),
+        )
+        log.info(
+            "Discord channel created: %s/%s -> %s",
+            category_name,
+            channel_name,
+            channel_id,
+        )
+
+
+async def discord_ensure_destination(challenge: dict) -> None:
+    settings = load_settings()
+    bot = get_bot(settings)
+    if not bot:
+        return
+    layout = normalize_discord_challenge_layout(
+        settings.get("discord_challenge_layout")
+    )
+    if layout == "channels":
+        await discord_create_channel_destination(challenge, bot)
+    else:
+        await discord_create_thread_destination(challenge, bot)
+
+
 async def discord_mark_solved(challenge: dict, flag: str = "", agent: str = "") -> None:
-    thread_id = challenge.get("_discord_thread_id", "")
     bot = get_bot(load_settings())
     if not bot:
         return
@@ -1464,8 +1702,15 @@ async def discord_mark_solved(challenge: dict, flag: str = "", agent: str = "") 
         new_name = f"[solved][{category}] {name}"
     else:
         new_name = f"[solved] {name}"
-    if thread_id:
-        await bot.rename_thread(thread_id, new_name)
+    destination_id = _discord_destination_id(challenge)
+    if destination_id:
+        if _discord_destination_kind(challenge) == "channel":
+            await bot.rename_channel(
+                destination_id,
+                make_challenge_channel_name(challenge, solved=True),
+            )
+        else:
+            await bot.rename_thread(destination_id, new_name)
     # Post to main channel
     parts = [f"\U0001f6a9 **{name}** solved!"]
     if agent:
@@ -1475,14 +1720,19 @@ async def discord_mark_solved(challenge: dict, flag: str = "", agent: str = "") 
     await bot.send_channel_message(" ".join(parts))
 
 
-async def discord_notify(challenge: dict, content: str = "", embed: dict | None = None) -> None:
-    thread_id = challenge.get("_discord_thread_id", "")
-    if not thread_id:
+async def discord_notify(
+    challenge: dict,
+    content: str = "",
+    embed: dict | None = None,
+    components: list[dict] | None = None,
+) -> None:
+    destination_id = _discord_destination_id(challenge)
+    if not destination_id:
         return
     bot = get_bot(load_settings())
     if not bot:
         return
-    await bot.send_message(thread_id, content, embed)
+    await bot.send_message(destination_id, content, embed, components)
 
 
 def _discord_fenced_text(text: str, available_chars: int) -> str:
@@ -1560,6 +1810,9 @@ def save_metadata(challenge: dict) -> None:
         "_source_url": challenge.get("_source_url", ""),
         "_connection_id": challenge.get("_connection_id", ""),
         "_discord_thread_id": challenge.get("_discord_thread_id", ""),
+        "_discord_channel_id": challenge.get("_discord_channel_id", ""),
+        "_discord_category_id": challenge.get("_discord_category_id", ""),
+        "_discord_challenge_layout": challenge.get("_discord_challenge_layout", ""),
         "detected_flags": challenge.get("detected_flags", {}),
         "detected_flag_meta": challenge.get("detected_flag_meta", {}),
     }
@@ -1790,6 +2043,9 @@ def load_challenges_from_disk() -> None:
             "_source_url": meta.get("_source_url", ""),
             "_connection_id": meta.get("_connection_id", ""),
             "_discord_thread_id": meta.get("_discord_thread_id", ""),
+            "_discord_channel_id": meta.get("_discord_channel_id", ""),
+            "_discord_category_id": meta.get("_discord_category_id", ""),
+            "_discord_challenge_layout": meta.get("_discord_challenge_layout", ""),
             "detected_flags": meta.get("detected_flags", {}),
             "detected_flag_meta": meta.get("detected_flag_meta", {}),
         }
@@ -2346,7 +2602,7 @@ async def create_challenge(request: Request) -> JSONResponse:
     }
     challenges[challenge_id] = challenge
     save_metadata(challenge)
-    asyncio.create_task(discord_create_thread(challenge))
+    asyncio.create_task(discord_ensure_destination(challenge))
 
     # Start all runs
     def _task_done_cb(t: asyncio.Task, rid: str = "") -> None:
@@ -4692,6 +4948,7 @@ def _handle_detected_flag(
             await discord_notify(
                 challenge,
                 f"**{run.get('agent', '?')}** found possible flag: `{detected_key}`",
+                components=discord_flag_review_components(challenge, detected_key),
             )
         asyncio.create_task(_notify())
 
@@ -5850,6 +6107,7 @@ async def update_settings(request: Request) -> JSONResponse:
             "discord_bot_token",
             "discord_channel_id",
             "discord_guild_id",
+            "discord_challenge_layout",
         )
     )
     if "default_agent" in body:
@@ -5906,6 +6164,10 @@ async def update_settings(request: Request) -> JSONResponse:
         settings["discord_channel_id"] = str(body["discord_channel_id"]).strip()
     if "discord_guild_id" in body:
         settings["discord_guild_id"] = str(body["discord_guild_id"]).strip()
+    if "discord_challenge_layout" in body:
+        settings["discord_challenge_layout"] = normalize_discord_challenge_layout(
+            body["discord_challenge_layout"]
+        )
     save_settings(settings)
     if discord_changed:
         asyncio.create_task(_reconcile_discord_gateway())
@@ -6462,7 +6724,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         }
         challenges[challenge_id] = challenge
         save_metadata(challenge)
-        asyncio.create_task(discord_create_thread(challenge))
+        asyncio.create_task(discord_ensure_destination(challenge))
 
         if challenge_status == "solving":
             for run_id, run in runs.items():
@@ -7519,32 +7781,40 @@ async def vpn_toggle(request: Request) -> JSONResponse:
 from contextlib import asynccontextmanager
 
 
-def _thread_to_challenge_id(thread_id: str) -> str | None:
-    thread_id = str(thread_id or "")
+def _discord_destination_to_challenge_id(destination_id: str) -> str | None:
+    destination_id = str(destination_id or "")
     for ch_id, ch in challenges.items():
-        if str(ch.get("_discord_thread_id", "")) == thread_id:
+        if str(ch.get("_discord_thread_id", "")) == destination_id:
+            return ch_id
+        if str(ch.get("_discord_channel_id", "")) == destination_id:
             return ch_id
     return None
 
 
-def _normalize_discord_thread_name(name: str) -> str:
+def _normalize_discord_destination_name(name: str) -> str:
     normalized = " ".join(str(name or "").strip().split())
     normalized = re.sub(r"^\[solved\]\s*", "", normalized, flags=re.IGNORECASE)
     return normalized.casefold()
 
 
-def _challenge_thread_name_keys(challenge: dict) -> set[str]:
-    base = make_thread_name(challenge)
+def _challenge_destination_name_keys(challenge: dict) -> set[str]:
+    thread_base = make_thread_name(challenge)
     name = challenge.get("name", "Unknown")
     category = challenge.get("category", "")
-    variants = {base, base[:100]}
+    channel_base = make_challenge_channel_name(challenge)
+    variants = {
+        thread_base,
+        thread_base[:100],
+        channel_base,
+        make_challenge_channel_name(challenge, solved=True),
+    }
     if category:
         solved = f"[solved][{category}] {name}"
     else:
         solved = f"[solved] {name}"
     variants.update({solved, solved[:100]})
     return {
-        key for key in (_normalize_discord_thread_name(v) for v in variants)
+        key for key in (_normalize_discord_destination_name(v) for v in variants)
         if key
     }
 
@@ -7562,26 +7832,38 @@ def _discord_interaction_channel_ids(interaction: dict) -> list[str]:
 
 def _challenge_id_from_discord_interaction(interaction: dict) -> str | None:
     for channel_id in _discord_interaction_channel_ids(interaction):
-        ch_id = _thread_to_challenge_id(channel_id)
+        ch_id = _discord_destination_to_challenge_id(channel_id)
         if ch_id:
             return ch_id
 
     channel = interaction.get("channel") or {}
-    thread_name = channel.get("name", "")
-    name_key = _normalize_discord_thread_name(thread_name)
+    destination_name = channel.get("name", "")
+    name_key = _normalize_discord_destination_name(destination_name)
     if not name_key:
         return None
 
     for ch_id, challenge in challenges.items():
-        if name_key not in _challenge_thread_name_keys(challenge):
+        if name_key not in _challenge_destination_name_keys(challenge):
             continue
         channel_id = str(channel.get("id") or interaction.get("channel_id") or "")
-        if channel_id and str(challenge.get("_discord_thread_id", "")) != channel_id:
-            challenge["_discord_thread_id"] = channel_id
+        if not channel_id:
+            return ch_id
+        channel_type = channel.get("type")
+        if channel_type in (10, 11, 12):
+            id_field = "_discord_thread_id"
+            layout = "threads"
+        else:
+            id_field = "_discord_channel_id"
+            layout = "channels"
+            if channel.get("parent_id"):
+                challenge["_discord_category_id"] = str(channel["parent_id"])
+        if str(challenge.get(id_field, "")) != channel_id:
+            challenge[id_field] = channel_id
+            challenge["_discord_challenge_layout"] = layout
             save_metadata(challenge)
             log.info(
-                "Recovered Discord thread mapping by name: %s -> %s",
-                thread_name,
+                "Recovered Discord destination mapping by name: %s -> %s",
+                destination_name,
                 channel_id,
             )
         return ch_id
@@ -7609,11 +7891,11 @@ def _discord_category_choices() -> str:
         if ch.get("_discord_thread_id") and str(ch.get("category", "")).strip()
     })
     if not categories:
-        return "No Discord challenge categories are available."
+        return "No joinable Discord thread categories are available."
     preview = ", ".join(categories[:20])
     if len(categories) > 20:
         preview += f", and {len(categories) - 20} more"
-    return f"Available categories: {preview}"
+    return f"Joinable thread categories: {preview}"
 
 
 def _discord_option_map(raw_options: list[dict]) -> tuple[str, dict]:
@@ -7690,6 +7972,41 @@ def _format_discord_duration(ms: int | float) -> str:
     if minutes:
         return f"{minutes}m {seconds}s"
     return f"{seconds}s"
+
+
+def _discord_status_message(challenge: dict) -> str:
+    lines = [f"**{challenge.get('name', '?')}** — {challenge.get('status', '?')}"]
+    for run in challenge["runs"].values():
+        agent = run.get("agent", "?")
+        model = run.get("model", "")
+        status = run.get("status", "?")
+        emoji = {
+            "solving": "\u25b6",
+            "solved": "\u2705",
+            "failed": "\u274c",
+            "completed": "\u2714",
+            "pending": "\u23f8",
+        }.get(status, "\u2753")
+        line = f"{emoji} `{agent}` ({model}) — {status}"
+        if run.get("error"):
+            line += f": {run['error']}"
+        lines.append(line)
+    return _truncate("\n".join(lines))
+
+
+def _discord_flags_message(challenge: dict) -> str:
+    detected = challenge.get("detected_flags", {})
+    if not detected:
+        return "No flags detected yet"
+    lines = []
+    for flag, status in detected.items():
+        emoji = {
+            "correct": "\u2705",
+            "wrong": "\u274c",
+            "pending": "\u23f3",
+        }.get(status, "\u2753")
+        lines.append(f"{emoji} `{flag}` — {status}")
+    return _truncate("\n".join(lines))
 
 
 def _discord_stats_message(challenge_id: str, challenge: dict) -> str:
@@ -7885,6 +8202,82 @@ def _discord_select_run(
     return run_id, run, ""
 
 
+async def _discord_stop_runs(challenge_id: str, challenge: dict) -> str:
+    stopped_ids = []
+    for run_id, run in challenge["runs"].items():
+        if run["status"] != "solving":
+            continue
+        run["status"] = "failed"
+        run["error"] = None
+        stop_event = {
+            "type": "system",
+            "message": "Agent stopped from Discord.",
+        }
+        run["output_lines"].append(stop_event)
+        append_output_event(challenge_id, run_id, stop_event)
+        await broadcast(challenge_id, run_id, stop_event)
+        await stop_run(run, "discord_stop")
+        finish_run_timer(run)
+        stopped_ids.append(run_id)
+
+    if not stopped_ids:
+        return "No agents are currently running"
+
+    challenge["status"] = derive_challenge_status(challenge)
+    save_metadata(challenge)
+    for run_id in stopped_ids:
+        run = challenge["runs"][run_id]
+        await broadcast(challenge_id, run_id, {
+            "type": "run_status",
+            "run_id": run_id,
+            "status": run["status"],
+            "error": run.get("error"),
+            "duration_ms": effective_run_duration_ms(run),
+        })
+    await broadcast_challenge(challenge_id, {
+        "type": "challenge_status",
+        "status": challenge["status"],
+    })
+    return f"Stopped {len(stopped_ids)} agent(s)"
+
+
+async def _discord_resume_runs(
+    challenge_id: str,
+    challenge: dict,
+    continue_msg: str = "Resume from Discord",
+) -> str:
+    resumed = []
+    for run_id, run in challenge["runs"].items():
+        if run["status"] not in ("failed", "completed"):
+            continue
+        run["status"] = "solving"
+        run.pop("_stop_reason", None)
+        run["task"] = asyncio.create_task(
+            run_agent_task(challenge_id, run_id, continue_msg=continue_msg)
+        )
+        resumed.append(run_id)
+
+    if not resumed:
+        return "No agents to resume"
+
+    challenge["status"] = derive_challenge_status(challenge)
+    save_metadata(challenge)
+    for run_id in resumed:
+        run = challenge["runs"][run_id]
+        await broadcast(challenge_id, run_id, {
+            "type": "run_status",
+            "run_id": run_id,
+            "status": run["status"],
+            "error": run.get("error"),
+            "duration_ms": effective_run_duration_ms(run),
+        })
+    await broadcast_challenge(challenge_id, {
+        "type": "challenge_status",
+        "status": challenge["status"],
+    })
+    return f"Resumed {len(resumed)} agent(s)"
+
+
 def _discord_help_message() -> str:
     return _truncate(
         "**CTF Solver Bot Help**\n\n"
@@ -7894,7 +8287,7 @@ def _discord_help_message() -> str:
         "`/add category:all` — add yourself to all challenge threads.\n"
         "`/join challenge:<name>` — add yourself to one challenge thread by fuzzy name.\n"
         "`/help` — show this help message.\n\n"
-        "**Use inside a challenge thread**\n"
+        "**Use inside a challenge thread or channel**\n"
         "`/status` — show challenge and agent run status.\n"
         "`/stats` — show runtime, token, tool, and flag stats.\n"
         "`/tail agent:<name> lines:<n>` — show recent transcript events.\n"
@@ -7913,6 +8306,396 @@ def _discord_help_message() -> str:
     )
 
 
+def _discord_parse_component_id(custom_id: str) -> tuple[str, str, str]:
+    parts = str(custom_id or "").split(":")
+    if len(parts) < 3 or parts[0] != DISCORD_COMPONENT_PREFIX:
+        return "", "", ""
+    challenge_id, action = parts[1], parts[2]
+    token = parts[3] if len(parts) > 3 else ""
+    if action in DISCORD_FLAG_REVIEW_ACTIONS:
+        return (challenge_id, action, token) if token else ("", "", "")
+    if action not in DISCORD_BUTTON_ACTIONS and action not in {
+        "submit_modal",
+        "solved_modal",
+    }:
+        return "", "", ""
+    return challenge_id, action, token
+
+
+def _discord_detected_flag_from_token(challenge: dict, token: str) -> str:
+    for flag in challenge.get("detected_flags", {}):
+        if _discord_flag_token(flag) == token:
+            return flag
+    return ""
+
+
+def _discord_modal_value(interaction: dict, field_id: str) -> str:
+    for row in (interaction.get("data") or {}).get("components", []):
+        for component in row.get("components", []):
+            if component.get("custom_id") == field_id:
+                return str(component.get("value", ""))
+    return ""
+
+
+async def _discord_submit_flag_from_interaction(
+    bot: DiscordBot,
+    interaction_token: str,
+    challenge_id: str,
+    challenge: dict,
+    flag: str,
+    author: str,
+) -> None:
+    if not flag:
+        await bot.followup_interaction(interaction_token, "Flag required.")
+        return
+    plugin, config = _resolve_plugin_config(challenge)
+    if not plugin or not config:
+        await bot.followup_interaction(
+            interaction_token,
+            "No platform connection for this challenge",
+        )
+        return
+    remote_id = challenge.get("_remote_id", "")
+    try:
+        submit_flag = normalize_flag_for_submission(
+            flag,
+            challenge_flag_formats(challenge),
+        )
+        result = await plugin.submit_flag(config, remote_id, submit_flag)
+        if result.correct:
+            stored_flag = set_detected_flag_status(challenge, submit_flag, "correct")
+            record_flag_submission(
+                challenge,
+                stored_flag,
+                submitted_flag=submit_flag,
+                correct=True,
+                message=result.message,
+                auto=False,
+            )
+            await apply_solved_status(
+                challenge_id,
+                challenge,
+                flag=submit_flag,
+                stop_reason="discord_submit_solved",
+            )
+            await _broadcast_detected_flag_state(
+                challenge_id,
+                challenge,
+                stored_flag,
+                correct=True,
+                message=result.message,
+            )
+            solved_by = f"{author} (Discord)"
+            await bot.followup_interaction(
+                interaction_token,
+                embed=make_solve_embed(challenge, submit_flag, solved_by),
+            )
+            await discord_mark_solved(challenge, submit_flag, solved_by)
+        else:
+            stored_flag = set_detected_flag_status(challenge, submit_flag, "wrong")
+            record_flag_submission(
+                challenge,
+                stored_flag,
+                submitted_flag=submit_flag,
+                correct=False,
+                message=result.message,
+                auto=False,
+            )
+            save_metadata(challenge)
+            await _broadcast_detected_flag_state(
+                challenge_id,
+                challenge,
+                stored_flag,
+                correct=False,
+                message=result.message,
+            )
+            await bot.followup_interaction(
+                interaction_token,
+                f"Incorrect: {result.message}",
+            )
+    except Exception as exc:
+        await bot.followup_interaction(interaction_token, f"Submit error: {exc}")
+
+
+async def _broadcast_detected_flag_state(
+    challenge_id: str,
+    challenge: dict,
+    flag: str,
+    *,
+    correct: bool | None = None,
+    message: str = "",
+) -> None:
+    event = {
+        "type": "flag_result",
+        "challenge_id": challenge_id,
+        "challenge_name": challenge.get("name", ""),
+        "flag": flag,
+        "status": challenge.get("detected_flags", {}).get(flag, "pending"),
+        "meta": detected_flag_meta(challenge, flag),
+    }
+    if correct is not None:
+        event["correct"] = correct
+    if message:
+        event["message"] = message
+    await broadcast_global(event)
+
+
+async def _handle_discord_flag_review(
+    bot: DiscordBot,
+    interaction: dict,
+    challenge_id: str,
+    challenge: dict,
+    action: str,
+    token: str,
+) -> None:
+    try:
+        from .agents.broadcast import _queues
+    except ImportError:
+        from agents.broadcast import _queues
+
+    interaction_id = interaction["id"]
+    interaction_token = interaction["token"]
+    member_user = interaction.get("member", {}).get("user", {}) or {}
+    top_user = interaction.get("user", {}) or {}
+    author_user = member_user or top_user
+    author = author_user.get("username", "Discord")
+    flag = _discord_detected_flag_from_token(challenge, token)
+    if not flag:
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            "Flag candidate not found.",
+            flags=64,
+        )
+        return
+
+    if action == "flag_submit":
+        await bot.defer_interaction(interaction_id, interaction_token)
+        await _discord_submit_flag_from_interaction(
+            bot,
+            interaction_token,
+            challenge_id,
+            challenge,
+            flag,
+            author,
+        )
+        return
+
+    if action == "flag_reject":
+        stored_flag = set_detected_flag_status(challenge, flag, "wrong")
+        save_metadata(challenge)
+        await _broadcast_detected_flag_state(
+            challenge_id,
+            challenge,
+            stored_flag,
+            correct=False,
+            message=f"Rejected by {author} via Discord",
+        )
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            f"Rejected flag candidate: `{stored_flag}`",
+        )
+        return
+
+    if action == "flag_correct":
+        await bot.defer_interaction(interaction_id, interaction_token)
+        stored_flag = set_detected_flag_status(challenge, flag, "correct")
+        record_flag_submission(
+            challenge,
+            stored_flag,
+            submitted_flag=stored_flag,
+            correct=True,
+            message=f"Marked correct by {author} via Discord",
+            manual_mark=True,
+        )
+        solved_by = f"{author} (Discord)"
+        await apply_solved_status(
+            challenge_id,
+            challenge,
+            flag=stored_flag,
+            stop_reason="discord_flag_review_correct",
+        )
+        await _broadcast_detected_flag_state(
+            challenge_id,
+            challenge,
+            stored_flag,
+            correct=True,
+            message="Marked correct via Discord review",
+        )
+        await bot.followup_interaction(
+            interaction_token,
+            embed=make_solve_embed(challenge, stored_flag, solved_by),
+        )
+        await discord_mark_solved(challenge, stored_flag, solved_by)
+        return
+
+    if action == "flag_broadcast":
+        q = _queues.get(challenge_id, {})
+        message = f"[{author} via Discord flag review]: Candidate flag `{flag}`"
+        for queue in q.values():
+            await queue.put(message)
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            f"Broadcast flag candidate to {len(q)} active agent(s): `{flag}`",
+        )
+
+
+async def _handle_discord_component_interaction(interaction: dict) -> None:
+    bot = get_bot(load_settings())
+    if not bot:
+        return
+    interaction_id = interaction["id"]
+    interaction_token = interaction["token"]
+    custom_id = (interaction.get("data") or {}).get("custom_id", "")
+    challenge_id, action, token = _discord_parse_component_id(custom_id)
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            "Challenge not found.",
+            flags=64,
+        )
+        return
+
+    if action in DISCORD_FLAG_REVIEW_ACTIONS:
+        await _handle_discord_flag_review(
+            bot,
+            interaction,
+            challenge_id,
+            challenge,
+            action,
+            token,
+        )
+        return
+
+    if action == "submit":
+        await bot.open_modal(
+            interaction_id,
+            interaction_token,
+            _discord_component_id(challenge_id, "submit_modal"),
+            "Submit Flag",
+            _discord_flag_modal_components(
+                "flag",
+                "Flag",
+                required=True,
+                placeholder=challenge_flag_formats(challenge)[0]
+                if challenge_flag_formats(challenge)
+                else "flag{...}",
+            ),
+        )
+        return
+
+    if action == "solved":
+        await bot.open_modal(
+            interaction_id,
+            interaction_token,
+            _discord_component_id(challenge_id, "solved_modal"),
+            "Mark Solved",
+            _discord_flag_modal_components(
+                "flag",
+                "Flag (optional)",
+                required=False,
+                placeholder=challenge_flag_formats(challenge)[0]
+                if challenge_flag_formats(challenge)
+                else "flag{...}",
+            ),
+        )
+        return
+
+    if action == "status":
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            _discord_status_message(challenge),
+            flags=64,
+        )
+    elif action == "stats":
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            _discord_stats_message(challenge_id, challenge),
+            flags=64,
+        )
+    elif action == "tail":
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            _discord_tail_message(challenge_id, challenge),
+            flags=64,
+        )
+    elif action == "flags":
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            _discord_flags_message(challenge),
+            flags=64,
+        )
+    elif action == "stop":
+        await bot.defer_interaction(interaction_id, interaction_token)
+        await bot.followup_interaction(
+            interaction_token,
+            await _discord_stop_runs(challenge_id, challenge),
+        )
+    elif action == "resume":
+        await bot.defer_interaction(interaction_id, interaction_token)
+        await bot.followup_interaction(
+            interaction_token,
+            await _discord_resume_runs(challenge_id, challenge),
+        )
+
+
+async def _handle_discord_modal_submit(interaction: dict) -> None:
+    bot = get_bot(load_settings())
+    if not bot:
+        return
+    custom_id = (interaction.get("data") or {}).get("custom_id", "")
+    challenge_id, action, _token = _discord_parse_component_id(custom_id)
+    challenge = challenges.get(challenge_id)
+    interaction_id = interaction["id"]
+    interaction_token = interaction["token"]
+    member_user = interaction.get("member", {}).get("user", {}) or {}
+    top_user = interaction.get("user", {}) or {}
+    author_user = member_user or top_user
+    author = author_user.get("username", "Discord")
+    if not challenge:
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            "Challenge not found.",
+            flags=64,
+        )
+        return
+
+    flag = _discord_modal_value(interaction, "flag").strip()
+    if action == "submit_modal":
+        await bot.defer_interaction(interaction_id, interaction_token)
+        await _discord_submit_flag_from_interaction(
+            bot,
+            interaction_token,
+            challenge_id,
+            challenge,
+            flag,
+            author,
+        )
+    elif action == "solved_modal":
+        await bot.defer_interaction(interaction_id, interaction_token)
+        solved_by = f"{author} (Discord)"
+        await apply_solved_status(
+            challenge_id,
+            challenge,
+            flag=flag,
+            stop_reason="discord_solved",
+        )
+        await bot.followup_interaction(
+            interaction_token,
+            embed=make_solve_embed(challenge, flag or "\u2014", solved_by),
+        )
+        await discord_mark_solved(challenge, flag or "", solved_by)
+
+
 async def _handle_discord_interaction(interaction: dict) -> None:
     """Handle a Discord slash command interaction."""
     try:
@@ -7921,6 +8704,12 @@ async def _handle_discord_interaction(interaction: dict) -> None:
         from agents.broadcast import _queues
 
     itype = interaction.get("type")
+    if itype == 3:  # MESSAGE_COMPONENT
+        await _handle_discord_component_interaction(interaction)
+        return
+    if itype == 5:  # MODAL_SUBMIT
+        await _handle_discord_modal_submit(interaction)
+        return
     if itype != 2:  # APPLICATION_COMMAND
         return
 
@@ -8007,7 +8796,7 @@ async def _handle_discord_interaction(interaction: dict) -> None:
             await bot.respond_to_interaction(
                 interaction_id,
                 interaction_token,
-                f"No Discord challenge threads matched `{category}`.\n{_discord_category_choices()}",
+                f"No joinable Discord challenge threads matched `{category}`.\n{_discord_category_choices()}",
                 flags=64,
             )
             return
@@ -8101,7 +8890,7 @@ async def _handle_discord_interaction(interaction: dict) -> None:
     if not ch_id:
         await bot.respond_to_interaction(
             interaction_id, interaction_token,
-            "This command must be used in a challenge thread.",
+            "This command must be used in a challenge thread or channel.",
             flags=64,  # EPHEMERAL
         )
         return
