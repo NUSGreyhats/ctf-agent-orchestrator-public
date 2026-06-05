@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import re
 from typing import Any, Callable, Awaitable
 
 log = logging.getLogger("ctf-solver.discord")
@@ -171,6 +172,7 @@ class DiscordBot:
         self.token = token
         self.channel_id = channel_id
         self.application_id: str = ""
+        self._guild_id: str = ""
         self._client: httpx.AsyncClient | None = None
 
     def _get_client(self) -> httpx.AsyncClient:
@@ -201,6 +203,48 @@ class DiscordBot:
     async def close(self):
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+
+    async def fetch_channel(self, channel_id: str) -> dict | None:
+        try:
+            resp = await self._request("GET", f"/channels/{channel_id}")
+            if resp.status_code == 200:
+                return resp.json()
+            log.error(
+                "Failed to fetch Discord channel %s: %s %s",
+                channel_id,
+                resp.status_code,
+                resp.text[:200],
+            )
+        except Exception as exc:
+            log.error("Discord fetch_channel error: %s", exc)
+        return None
+
+    async def default_guild_id(self) -> str:
+        if self._guild_id:
+            return self._guild_id
+        if not self.channel_id:
+            return ""
+        channel = await self.fetch_channel(self.channel_id)
+        self._guild_id = str((channel or {}).get("guild_id", ""))
+        return self._guild_id
+
+    async def list_guild_channel_objects(self, guild_id: str = "") -> list[dict]:
+        gid = guild_id or await self.default_guild_id()
+        if not gid:
+            return []
+        try:
+            resp = await self._request("GET", f"/guilds/{gid}/channels")
+            if resp.status_code == 200:
+                return resp.json()
+            log.error(
+                "Failed to list Discord guild channels for %s: %s %s",
+                gid,
+                resp.status_code,
+                resp.text[:200],
+            )
+        except Exception as exc:
+            log.error("Discord list_guild_channel_objects error: %s", exc)
+        return []
 
     async def fetch_application_id(self) -> str:
         if self.application_id:
@@ -307,6 +351,89 @@ class DiscordBot:
             log.error("Discord create_thread error: %s", exc)
             return None
 
+    async def find_category_by_name(self, name: str, guild_id: str = "") -> str | None:
+        channels = await self.list_guild_channel_objects(guild_id)
+        for channel in channels:
+            if channel.get("type") == 4 and channel.get("name") == name:
+                return channel.get("id")
+        return None
+
+    async def create_category(self, name: str, guild_id: str = "") -> str | None:
+        gid = guild_id or await self.default_guild_id()
+        if not gid:
+            log.error("Cannot create Discord category %s: guild not found", name)
+            return None
+        try:
+            resp = await self._request(
+                "POST",
+                f"/guilds/{gid}/channels",
+                json={
+                    "name": name[:100],
+                    "type": 4,
+                },
+            )
+            if resp.status_code not in (200, 201):
+                log.error(
+                    "Failed to create category %s: %s %s",
+                    name,
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                return None
+            return resp.json().get("id")
+        except Exception as exc:
+            log.error("Discord create_category error: %s", exc)
+            return None
+
+    async def find_text_channel_by_name(
+        self, name: str, parent_id: str = "", guild_id: str = ""
+    ) -> str | None:
+        channels = await self.list_guild_channel_objects(guild_id)
+        for channel in channels:
+            if channel.get("type") not in (0, 5):
+                continue
+            if channel.get("name") != name:
+                continue
+            if parent_id and str(channel.get("parent_id", "")) != str(parent_id):
+                continue
+            return channel.get("id")
+        return None
+
+    async def create_text_channel(
+        self, name: str, parent_id: str = "", guild_id: str = "",
+        topic: str = "",
+    ) -> str | None:
+        gid = guild_id or await self.default_guild_id()
+        if not gid:
+            log.error("Cannot create Discord channel %s: guild not found", name)
+            return None
+        payload: dict[str, Any] = {
+            "name": name[:100],
+            "type": 0,
+        }
+        if parent_id:
+            payload["parent_id"] = parent_id
+        if topic:
+            payload["topic"] = topic[:1024]
+        try:
+            resp = await self._request(
+                "POST",
+                f"/guilds/{gid}/channels",
+                json=payload,
+            )
+            if resp.status_code not in (200, 201):
+                log.error(
+                    "Failed to create channel %s: %s %s",
+                    name,
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                return None
+            return resp.json().get("id")
+        except Exception as exc:
+            log.error("Discord create_text_channel error: %s", exc)
+            return None
+
     async def send_message(
         self, thread_id: str, content: str = "", embed: dict | None = None
     ) -> dict | None:
@@ -347,6 +474,18 @@ class DiscordBot:
             return resp.status_code == 200
         except Exception as exc:
             log.error("Discord rename_thread error: %s", exc)
+            return False
+
+    async def rename_channel(self, channel_id: str, name: str) -> bool:
+        try:
+            resp = await self._request(
+                "PATCH",
+                f"/channels/{channel_id}",
+                json={"name": name[:100]},
+            )
+            return resp.status_code == 200
+        except Exception as exc:
+            log.error("Discord rename_channel error: %s", exc)
             return False
 
     async def add_thread_member(self, thread_id: str, user_id: str) -> tuple[bool, str]:
@@ -399,15 +538,13 @@ class DiscordBot:
             guilds = resp.json()
             channels = []
             for guild in guilds:
-                resp = await self._request("GET", f"/guilds/{guild['id']}/channels")
-                if resp.status_code != 200:
-                    continue
-                for ch in resp.json():
+                for ch in await self.list_guild_channel_objects(guild["id"]):
                     if ch.get("type") in (0, 5, 15):
                         channels.append({
                             "id": ch["id"],
                             "name": f"#{ch['name']}",
                             "guild": guild.get("name", ""),
+                            "guild_id": guild["id"],
                         })
             return channels
         except Exception as exc:
@@ -586,6 +723,24 @@ def make_thread_name(challenge: dict) -> str:
     if category:
         return f"[{category}] {name}"
     return name
+
+
+def make_category_name(challenge: dict) -> str:
+    name = str(challenge.get("category", "") or "Uncategorized").strip()
+    return (name or "Uncategorized")[:100]
+
+
+def _channel_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").casefold())
+    slug = re.sub(r"-+", "-", slug).strip("-_")
+    return slug or "challenge"
+
+
+def make_challenge_channel_name(challenge: dict, solved: bool = False) -> str:
+    name = _channel_slug(challenge.get("name", "challenge"))
+    if solved and not name.startswith("solved-"):
+        name = f"solved-{name}"
+    return name[:100]
 
 
 def make_challenge_embed(challenge: dict) -> dict:

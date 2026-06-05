@@ -42,13 +42,13 @@ try:
     from .discord_bot import (
         get_bot, make_thread_name, make_challenge_embed,
         make_solve_embed, make_stop_embed, DiscordBot, DiscordGateway,
-        _truncate,
+        make_category_name, make_challenge_channel_name, _truncate,
     )
 except ImportError:
     from discord_bot import (
         get_bot, make_thread_name, make_challenge_embed,
         make_solve_embed, make_stop_embed, DiscordBot, DiscordGateway,
-        _truncate,
+        make_category_name, make_challenge_channel_name, _truncate,
     )
 
 try:
@@ -113,6 +113,8 @@ _instance_locks: dict[str, asyncio.Lock] = {}
 CONNECTIONS_FILE = STATE_ROOT_DIR / "connections.json"
 DEFAULT_MAX_PLATFORM_IMPORT_SIZE_GB = 2.0
 BYTES_PER_GIB = 1024 ** 3
+DEFAULT_DISCORD_CHALLENGE_LAYOUT = "threads"
+VALID_DISCORD_CHALLENGE_LAYOUTS = {"threads", "channels"}
 
 
 def load_connections() -> list[dict]:
@@ -1396,6 +1398,7 @@ def load_settings() -> dict:
         "discord_bot_token": "",
         "discord_channel_id": "",
         "discord_guild_id": "",
+        "discord_challenge_layout": DEFAULT_DISCORD_CHALLENGE_LAYOUT,
     }
     if SETTINGS_FILE.exists():
         try:
@@ -1408,6 +1411,9 @@ def load_settings() -> dict:
             pass
     defaults["max_platform_import_size_gb"] = normalize_platform_import_size_gb(
         defaults.get("max_platform_import_size_gb")
+    )
+    defaults["discord_challenge_layout"] = normalize_discord_challenge_layout(
+        defaults.get("discord_challenge_layout")
     )
     return defaults
 
@@ -1431,16 +1437,37 @@ def platform_import_limit_bytes(settings: dict | None = None) -> int:
     return int(gb * BYTES_PER_GIB)
 
 
-async def discord_create_thread(challenge: dict) -> None:
-    bot = get_bot(load_settings())
-    if not bot:
-        return
+def normalize_discord_challenge_layout(value) -> str:
+    layout = str(value or DEFAULT_DISCORD_CHALLENGE_LAYOUT).strip().lower()
+    if layout not in VALID_DISCORD_CHALLENGE_LAYOUTS:
+        return DEFAULT_DISCORD_CHALLENGE_LAYOUT
+    return layout
+
+
+def _discord_destination_id(challenge: dict) -> str:
+    return str(
+        challenge.get("_discord_channel_id")
+        or challenge.get("_discord_thread_id")
+        or ""
+    )
+
+
+def _discord_destination_kind(challenge: dict) -> str:
+    if challenge.get("_discord_channel_id"):
+        return "channel"
+    if challenge.get("_discord_thread_id"):
+        return "thread"
+    return ""
+
+
+async def discord_create_thread_destination(challenge: dict, bot: DiscordBot) -> None:
     thread_name = make_thread_name(challenge)
     embed = make_challenge_embed(challenge)
     # Reuse existing thread if one matches
     existing_id = await bot.find_thread_by_name(thread_name)
     if existing_id:
         challenge["_discord_thread_id"] = existing_id
+        challenge["_discord_challenge_layout"] = "threads"
         save_metadata(challenge)
         await bot.send_message(existing_id, embed=embed)
         log.info("Discord thread reused: %s -> %s", thread_name, existing_id)
@@ -1448,13 +1475,86 @@ async def discord_create_thread(challenge: dict) -> None:
     thread_id = await bot.create_thread(thread_name)
     if thread_id:
         challenge["_discord_thread_id"] = thread_id
+        challenge["_discord_challenge_layout"] = "threads"
         save_metadata(challenge)
         await bot.send_message(thread_id, embed=embed)
         log.info("Discord thread created: %s -> %s", thread_name, thread_id)
 
 
+async def discord_create_channel_destination(challenge: dict, bot: DiscordBot) -> None:
+    guild_id = await bot.default_guild_id()
+    if not guild_id:
+        log.error("Discord channel mode requires a guild text channel")
+        return
+
+    category_name = make_category_name(challenge)
+    category_id = str(challenge.get("_discord_category_id", ""))
+    if not category_id:
+        category_id = await bot.find_category_by_name(category_name, guild_id) or ""
+    if not category_id:
+        category_id = await bot.create_category(category_name, guild_id) or ""
+    if not category_id:
+        return
+
+    channel_name = make_challenge_channel_name(challenge)
+    channel_id = str(challenge.get("_discord_channel_id", ""))
+    if not channel_id:
+        channel_id = await bot.find_text_channel_by_name(
+            channel_name,
+            category_id,
+            guild_id,
+        ) or ""
+    embed = make_challenge_embed(challenge)
+    if channel_id:
+        challenge["_discord_category_id"] = category_id
+        challenge["_discord_channel_id"] = channel_id
+        challenge["_discord_challenge_layout"] = "channels"
+        save_metadata(challenge)
+        await bot.send_message(channel_id, embed=embed)
+        log.info(
+            "Discord channel reused: %s/%s -> %s",
+            category_name,
+            channel_name,
+            channel_id,
+        )
+        return
+
+    topic = f"CTF Solver challenge {challenge.get('id', '')}".strip()
+    channel_id = await bot.create_text_channel(
+        channel_name,
+        parent_id=category_id,
+        guild_id=guild_id,
+        topic=topic,
+    )
+    if channel_id:
+        challenge["_discord_category_id"] = category_id
+        challenge["_discord_channel_id"] = channel_id
+        challenge["_discord_challenge_layout"] = "channels"
+        save_metadata(challenge)
+        await bot.send_message(channel_id, embed=embed)
+        log.info(
+            "Discord channel created: %s/%s -> %s",
+            category_name,
+            channel_name,
+            channel_id,
+        )
+
+
+async def discord_ensure_destination(challenge: dict) -> None:
+    settings = load_settings()
+    bot = get_bot(settings)
+    if not bot:
+        return
+    layout = normalize_discord_challenge_layout(
+        settings.get("discord_challenge_layout")
+    )
+    if layout == "channels":
+        await discord_create_channel_destination(challenge, bot)
+    else:
+        await discord_create_thread_destination(challenge, bot)
+
+
 async def discord_mark_solved(challenge: dict, flag: str = "", agent: str = "") -> None:
-    thread_id = challenge.get("_discord_thread_id", "")
     bot = get_bot(load_settings())
     if not bot:
         return
@@ -1464,8 +1564,15 @@ async def discord_mark_solved(challenge: dict, flag: str = "", agent: str = "") 
         new_name = f"[solved][{category}] {name}"
     else:
         new_name = f"[solved] {name}"
-    if thread_id:
-        await bot.rename_thread(thread_id, new_name)
+    destination_id = _discord_destination_id(challenge)
+    if destination_id:
+        if _discord_destination_kind(challenge) == "channel":
+            await bot.rename_channel(
+                destination_id,
+                make_challenge_channel_name(challenge, solved=True),
+            )
+        else:
+            await bot.rename_thread(destination_id, new_name)
     # Post to main channel
     parts = [f"\U0001f6a9 **{name}** solved!"]
     if agent:
@@ -1476,13 +1583,13 @@ async def discord_mark_solved(challenge: dict, flag: str = "", agent: str = "") 
 
 
 async def discord_notify(challenge: dict, content: str = "", embed: dict | None = None) -> None:
-    thread_id = challenge.get("_discord_thread_id", "")
-    if not thread_id:
+    destination_id = _discord_destination_id(challenge)
+    if not destination_id:
         return
     bot = get_bot(load_settings())
     if not bot:
         return
-    await bot.send_message(thread_id, content, embed)
+    await bot.send_message(destination_id, content, embed)
 
 
 def _discord_fenced_text(text: str, available_chars: int) -> str:
@@ -1560,6 +1667,9 @@ def save_metadata(challenge: dict) -> None:
         "_source_url": challenge.get("_source_url", ""),
         "_connection_id": challenge.get("_connection_id", ""),
         "_discord_thread_id": challenge.get("_discord_thread_id", ""),
+        "_discord_channel_id": challenge.get("_discord_channel_id", ""),
+        "_discord_category_id": challenge.get("_discord_category_id", ""),
+        "_discord_challenge_layout": challenge.get("_discord_challenge_layout", ""),
         "detected_flags": challenge.get("detected_flags", {}),
         "detected_flag_meta": challenge.get("detected_flag_meta", {}),
     }
@@ -1790,6 +1900,9 @@ def load_challenges_from_disk() -> None:
             "_source_url": meta.get("_source_url", ""),
             "_connection_id": meta.get("_connection_id", ""),
             "_discord_thread_id": meta.get("_discord_thread_id", ""),
+            "_discord_channel_id": meta.get("_discord_channel_id", ""),
+            "_discord_category_id": meta.get("_discord_category_id", ""),
+            "_discord_challenge_layout": meta.get("_discord_challenge_layout", ""),
             "detected_flags": meta.get("detected_flags", {}),
             "detected_flag_meta": meta.get("detected_flag_meta", {}),
         }
@@ -2346,7 +2459,7 @@ async def create_challenge(request: Request) -> JSONResponse:
     }
     challenges[challenge_id] = challenge
     save_metadata(challenge)
-    asyncio.create_task(discord_create_thread(challenge))
+    asyncio.create_task(discord_ensure_destination(challenge))
 
     # Start all runs
     def _task_done_cb(t: asyncio.Task, rid: str = "") -> None:
@@ -5850,6 +5963,7 @@ async def update_settings(request: Request) -> JSONResponse:
             "discord_bot_token",
             "discord_channel_id",
             "discord_guild_id",
+            "discord_challenge_layout",
         )
     )
     if "default_agent" in body:
@@ -5906,6 +6020,10 @@ async def update_settings(request: Request) -> JSONResponse:
         settings["discord_channel_id"] = str(body["discord_channel_id"]).strip()
     if "discord_guild_id" in body:
         settings["discord_guild_id"] = str(body["discord_guild_id"]).strip()
+    if "discord_challenge_layout" in body:
+        settings["discord_challenge_layout"] = normalize_discord_challenge_layout(
+            body["discord_challenge_layout"]
+        )
     save_settings(settings)
     if discord_changed:
         asyncio.create_task(_reconcile_discord_gateway())
@@ -6462,7 +6580,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         }
         challenges[challenge_id] = challenge
         save_metadata(challenge)
-        asyncio.create_task(discord_create_thread(challenge))
+        asyncio.create_task(discord_ensure_destination(challenge))
 
         if challenge_status == "solving":
             for run_id, run in runs.items():
@@ -7519,32 +7637,40 @@ async def vpn_toggle(request: Request) -> JSONResponse:
 from contextlib import asynccontextmanager
 
 
-def _thread_to_challenge_id(thread_id: str) -> str | None:
-    thread_id = str(thread_id or "")
+def _discord_destination_to_challenge_id(destination_id: str) -> str | None:
+    destination_id = str(destination_id or "")
     for ch_id, ch in challenges.items():
-        if str(ch.get("_discord_thread_id", "")) == thread_id:
+        if str(ch.get("_discord_thread_id", "")) == destination_id:
+            return ch_id
+        if str(ch.get("_discord_channel_id", "")) == destination_id:
             return ch_id
     return None
 
 
-def _normalize_discord_thread_name(name: str) -> str:
+def _normalize_discord_destination_name(name: str) -> str:
     normalized = " ".join(str(name or "").strip().split())
     normalized = re.sub(r"^\[solved\]\s*", "", normalized, flags=re.IGNORECASE)
     return normalized.casefold()
 
 
-def _challenge_thread_name_keys(challenge: dict) -> set[str]:
-    base = make_thread_name(challenge)
+def _challenge_destination_name_keys(challenge: dict) -> set[str]:
+    thread_base = make_thread_name(challenge)
     name = challenge.get("name", "Unknown")
     category = challenge.get("category", "")
-    variants = {base, base[:100]}
+    channel_base = make_challenge_channel_name(challenge)
+    variants = {
+        thread_base,
+        thread_base[:100],
+        channel_base,
+        make_challenge_channel_name(challenge, solved=True),
+    }
     if category:
         solved = f"[solved][{category}] {name}"
     else:
         solved = f"[solved] {name}"
     variants.update({solved, solved[:100]})
     return {
-        key for key in (_normalize_discord_thread_name(v) for v in variants)
+        key for key in (_normalize_discord_destination_name(v) for v in variants)
         if key
     }
 
@@ -7562,26 +7688,38 @@ def _discord_interaction_channel_ids(interaction: dict) -> list[str]:
 
 def _challenge_id_from_discord_interaction(interaction: dict) -> str | None:
     for channel_id in _discord_interaction_channel_ids(interaction):
-        ch_id = _thread_to_challenge_id(channel_id)
+        ch_id = _discord_destination_to_challenge_id(channel_id)
         if ch_id:
             return ch_id
 
     channel = interaction.get("channel") or {}
-    thread_name = channel.get("name", "")
-    name_key = _normalize_discord_thread_name(thread_name)
+    destination_name = channel.get("name", "")
+    name_key = _normalize_discord_destination_name(destination_name)
     if not name_key:
         return None
 
     for ch_id, challenge in challenges.items():
-        if name_key not in _challenge_thread_name_keys(challenge):
+        if name_key not in _challenge_destination_name_keys(challenge):
             continue
         channel_id = str(channel.get("id") or interaction.get("channel_id") or "")
-        if channel_id and str(challenge.get("_discord_thread_id", "")) != channel_id:
-            challenge["_discord_thread_id"] = channel_id
+        if not channel_id:
+            return ch_id
+        channel_type = channel.get("type")
+        if channel_type in (10, 11, 12):
+            id_field = "_discord_thread_id"
+            layout = "threads"
+        else:
+            id_field = "_discord_channel_id"
+            layout = "channels"
+            if channel.get("parent_id"):
+                challenge["_discord_category_id"] = str(channel["parent_id"])
+        if str(challenge.get(id_field, "")) != channel_id:
+            challenge[id_field] = channel_id
+            challenge["_discord_challenge_layout"] = layout
             save_metadata(challenge)
             log.info(
-                "Recovered Discord thread mapping by name: %s -> %s",
-                thread_name,
+                "Recovered Discord destination mapping by name: %s -> %s",
+                destination_name,
                 channel_id,
             )
         return ch_id
@@ -7609,11 +7747,11 @@ def _discord_category_choices() -> str:
         if ch.get("_discord_thread_id") and str(ch.get("category", "")).strip()
     })
     if not categories:
-        return "No Discord challenge categories are available."
+        return "No joinable Discord thread categories are available."
     preview = ", ".join(categories[:20])
     if len(categories) > 20:
         preview += f", and {len(categories) - 20} more"
-    return f"Available categories: {preview}"
+    return f"Joinable thread categories: {preview}"
 
 
 def _discord_option_map(raw_options: list[dict]) -> tuple[str, dict]:
@@ -7894,7 +8032,7 @@ def _discord_help_message() -> str:
         "`/add category:all` — add yourself to all challenge threads.\n"
         "`/join challenge:<name>` — add yourself to one challenge thread by fuzzy name.\n"
         "`/help` — show this help message.\n\n"
-        "**Use inside a challenge thread**\n"
+        "**Use inside a challenge thread or channel**\n"
         "`/status` — show challenge and agent run status.\n"
         "`/stats` — show runtime, token, tool, and flag stats.\n"
         "`/tail agent:<name> lines:<n>` — show recent transcript events.\n"
@@ -8007,7 +8145,7 @@ async def _handle_discord_interaction(interaction: dict) -> None:
             await bot.respond_to_interaction(
                 interaction_id,
                 interaction_token,
-                f"No Discord challenge threads matched `{category}`.\n{_discord_category_choices()}",
+                f"No joinable Discord challenge threads matched `{category}`.\n{_discord_category_choices()}",
                 flags=64,
             )
             return
@@ -8101,7 +8239,7 @@ async def _handle_discord_interaction(interaction: dict) -> None:
     if not ch_id:
         await bot.respond_to_interaction(
             interaction_id, interaction_token,
-            "This command must be used in a challenge thread.",
+            "This command must be used in a challenge thread or channel.",
             flags=64,  # EPHEMERAL
         )
         return

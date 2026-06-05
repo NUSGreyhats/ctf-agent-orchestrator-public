@@ -178,6 +178,14 @@
             <button id="btn-discord-fetch-channels" class="btn-ghost btn-sm">Refresh</button>
           </div>
         </div>
+        <div class="form-group">
+          <label for="settings-discord-layout">Challenge Destination</label>
+          <select id="settings-discord-layout">
+            <option value="threads">Thread per challenge</option>
+            <option value="channels">Channel per challenge</option>
+          </select>
+          <span class="checkbox-hint">Channel mode creates one Discord category per challenge category and one text channel per challenge; the bot needs Manage Channels.</span>
+        </div>
         <button id="btn-discord-test" class="btn-ghost btn-sm">Test</button>
         <span id="discord-test-result" class="text-muted" style="margin-left:0.5rem"></span>
       </div>

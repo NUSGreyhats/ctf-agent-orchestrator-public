@@ -4835,6 +4835,7 @@ $("#btn-settings").addEventListener("click", async () => {
   // Discord
   $("#settings-discord-enabled").checked = !!s.discord_enabled;
   $("#settings-discord-token").value = s.discord_bot_token || "";
+  $("#settings-discord-layout").value = s.discord_challenge_layout || "threads";
   const discordChannel = $("#settings-discord-channel");
   if (s.discord_channel_id) {
     // Preserve saved value; user can hit Refresh to populate the dropdown
@@ -4895,6 +4896,7 @@ $("#btn-settings-save").addEventListener("click", async () => {
     discord_enabled: $("#settings-discord-enabled").checked,
     discord_bot_token: $("#settings-discord-token").value.trim(),
     discord_channel_id: $("#settings-discord-channel").value.trim(),
+    discord_challenge_layout: $("#settings-discord-layout").value,
   };
   const res = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
   if (res && res.ok) {

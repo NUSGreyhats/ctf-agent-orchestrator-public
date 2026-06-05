@@ -87,7 +87,7 @@ When multiple agents solve the same challenge, each gets an isolated working dir
 
 Optional Discord bot for team coordination:
 
-- **Per-challenge threads** — A thread is created for each challenge when Discord is enabled and renamed to `[solved]` on completion.
+- **Per-challenge Discord destinations** — Discord can create either a thread per challenge in the selected announcement channel, or a text channel per challenge under a Discord category matching the challenge category. Channel mode requires the bot to have Manage Channels.
 - **Real-time notifications** — Solve events, flag detections, breakthroughs, starts, completions, and stops are posted to Discord.
 - **Slash commands** — `/broadcast`, `/submit`, `/status`, `/flags`, `/stop`, `/resume`, `/solved`, `/ctf`, `/files` for controlling agents and viewing challenge state from Discord.
 - **Live settings** — Enabling/disabling Discord or changing token/channel/guild settings starts, stops, or restarts the gateway without requiring a webapp restart.
