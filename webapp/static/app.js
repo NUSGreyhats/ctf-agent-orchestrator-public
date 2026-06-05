@@ -1403,7 +1403,12 @@ function updateButtons(status) {
   $("#btn-resume").classList.toggle("hidden", status !== "failed" && status !== "completed");
   $("#btn-unsolve").classList.toggle("hidden", status !== "solved");
 
-  $("#btn-stop").classList.toggle("hidden", status !== "solving");
+  const stopBtn = $("#btn-stop");
+  stopBtn.textContent = isParallelMode(currentChallengeMode) && currentRuns.length > 1
+    ? "Stop All"
+    : "Stop";
+  stopBtn.classList.toggle("hidden", status !== "solving");
+  updateRunControlButtons();
 }
 
 function updateCounters() {
@@ -1475,6 +1480,10 @@ function applyRunStatusEvent(event, fallbackRunId) {
   }
 }
 
+function canStopRun(run) {
+  return !!run && run.status === "solving";
+}
+
 // === Detail Buttons ===
 $("#btn-back").addEventListener("click", () => {
   disconnectAllWS(); stopTimer(); currentChallengeId = null;
@@ -1526,18 +1535,50 @@ $("#btn-unsolve").addEventListener("click", async () => {
   }
 });
 
-$("#btn-stop").addEventListener("click", async () => {
+async function stopRun(runId = "") {
   if (!currentChallengeId) return;
-  const res = await api(`/api/challenges/${currentChallengeId}/stop`, { method: "POST" });
+  const qs = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+  const res = await api(
+    `/api/challenges/${currentChallengeId}/stop${qs}`,
+    { method: "POST" }
+  );
   if (res && res.ok) {
     const data = await res.json().catch(() => ({}));
+    const changedRunIds = Array.isArray(data.run_ids)
+      ? data.run_ids
+      : (runId ? [runId] : currentRuns.filter(canStopRun).map((r) => r.id));
+    for (const rid of changedRunIds) {
+      const run = currentRuns.find((r) => r.id === rid);
+      if (!run) continue;
+      freezeRunTimer(run);
+      run.status = "failed";
+      run.error = null;
+      updateRunTabDot(rid, "failed");
+    }
     if (data.status) {
       updateStatusBadge(data.status);
       updateButtons(data.status);
       if (["solved", "failed", "completed"].includes(data.status)) stopTimer();
+      else startTimer();
     }
-    openChallenge(currentChallengeId);
+    updateRunControlButtons();
+    updateTimer();
+    if (changedRunIds.length) {
+      showToast(
+        runId ? "Agent stopped" : `Stopped ${changedRunIds.length} agent${changedRunIds.length === 1 ? "" : "s"}`,
+        "info"
+      );
+    } else {
+      showToast("No active agents stopped", "info");
+    }
+  } else if (res) {
+    const data = await res.json().catch(() => ({}));
+    showToast(data.error || "Failed to stop agent", "error");
   }
+}
+
+$("#btn-stop").addEventListener("click", async () => {
+  await stopRun();
 });
 
 $("#btn-add-flag-format").addEventListener("click", addFlagFormatAndScan);
@@ -2281,9 +2322,12 @@ function initRunTabs(runs) {
     if (useSplit) {
       const pane = document.createElement("div");
       pane.className = "split-pane";
-      pane.innerHTML = `<div class="split-pane-header"><span class="run-tab-dot ${dotClass}"></span><span class="split-pane-title">${esc(label)}</span><button type="button" class="btn-ghost btn-xs split-skill-btn">Skills</button></div>`;
+      pane.innerHTML = `<div class="split-pane-header"><span class="run-tab-dot ${dotClass}"></span><span class="split-pane-title">${esc(label)}</span><span class="split-pane-actions"><button type="button" class="btn-ghost btn-xs split-skill-btn">Skills</button><button type="button" class="btn-danger btn-xs split-run-stop-btn" data-run="${esc(run.id)}">Stop</button></span></div>`;
       pane.querySelector(".split-skill-btn").addEventListener("click", () => {
         openRunSkillsModal(run.id);
+      });
+      pane.querySelector(".split-run-stop-btn").addEventListener("click", () => {
+        stopRun(run.id);
       });
       const feed = document.createElement("div");
       feed.id = `feed-${run.id}`;
@@ -2357,9 +2401,12 @@ function addRunTab(run) {
   } else {
     const pane = document.createElement("div");
     pane.className = "split-pane";
-    pane.innerHTML = `<div class="split-pane-header"><span class="run-tab-dot ${dotClass}"></span><span class="split-pane-title">${esc(label)}</span><button type="button" class="btn-ghost btn-xs split-skill-btn">Skills</button></div>`;
+    pane.innerHTML = `<div class="split-pane-header"><span class="run-tab-dot ${dotClass}"></span><span class="split-pane-title">${esc(label)}</span><span class="split-pane-actions"><button type="button" class="btn-ghost btn-xs split-skill-btn">Skills</button><button type="button" class="btn-danger btn-xs split-run-stop-btn" data-run="${esc(run.id)}">Stop</button></span></div>`;
     pane.querySelector(".split-skill-btn").addEventListener("click", () => {
       openRunSkillsModal(run.id);
+    });
+    pane.querySelector(".split-run-stop-btn").addEventListener("click", () => {
+      stopRun(run.id);
     });
     const feed = document.createElement("div");
     feed.id = `feed-${run.id}`;
@@ -2411,6 +2458,25 @@ function updateRunTabDot(runId, status) {
   }
 }
 
+function updateRunControlButtons() {
+  const activeStopBtn = $("#btn-active-run-stop");
+  if (activeStopBtn) {
+    const activeRun = currentRuns.find((r) => r.id === activeRunId);
+    const showActiveStop = isParallelMode(currentChallengeMode)
+      && currentRuns.length > 1
+      && canStopRun(activeRun);
+    activeStopBtn.classList.toggle("hidden", !showActiveStop);
+    activeStopBtn.disabled = !showActiveStop;
+  }
+
+  document.querySelectorAll(".split-run-stop-btn").forEach((btn) => {
+    const run = currentRuns.find((r) => r.id === btn.dataset.run);
+    const canStop = canStopRun(run);
+    btn.classList.toggle("hidden", !canStop);
+    btn.disabled = !canStop;
+  });
+}
+
 // === Steer Run Select ===
 function updateSteerRunSelect() {
   const label = $("#steer-run-select");
@@ -2430,6 +2496,7 @@ function updateSteerRunSelect() {
   } else {
     label.classList.add("hidden");
   }
+  updateRunControlButtons();
 }
 
 function updateRunFromSummary(summary) {
@@ -2450,6 +2517,7 @@ function updateRunFromSummary(summary) {
     delete run._timerStartedAt;
   }
   updateRunTabDot(run.id, run.status);
+  updateRunControlButtons();
 }
 
 function openRunSkillsModal(runId) {
@@ -3162,6 +3230,7 @@ function renderRunEvent(runId, event) {
     }
     renderStats();
     updateTimer();
+    updateRunControlButtons();
     return;
   }
 
@@ -3205,6 +3274,7 @@ function renderRunEvent(runId, event) {
     }
     // Refresh selectors and header with new run
     updateSteerRunSelect();
+    updateRunControlButtons();
     updateFilesRunSelect();
     // Update model badge for new agent
     const agentMeta = getAgentMeta(r.agent);
@@ -4501,6 +4571,12 @@ $("#btn-active-run-skills").addEventListener("click", () => {
     ? activeRunId
     : currentRuns[0]?.id;
   if (runId) openRunSkillsModal(runId);
+});
+$("#btn-active-run-stop").addEventListener("click", () => {
+  const runId = activeRunId && activeRunId !== "__default__"
+    ? activeRunId
+    : currentRuns[0]?.id;
+  if (runId) stopRun(runId);
 });
 $("#run-skill-close").addEventListener("click", closeRunSkillsModal);
 $("#run-skill-overlay").addEventListener("click", (e) => {
