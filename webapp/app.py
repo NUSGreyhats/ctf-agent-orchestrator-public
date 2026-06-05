@@ -473,6 +473,8 @@ PROJECT_SKILL_DIRS = (
     Path(".codex") / "skills",
 )
 SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+MAX_SKILL_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_SKILL_UPLOAD_FILES = 300
 _PREVIEW_TTL = 3600
 _bulk_previews: dict[str, dict] = {}
 _platform_import_progress: dict[str, dict] = {}
@@ -1579,6 +1581,136 @@ def public_skill_catalog(settings: dict | None = None) -> dict:
             default=default_enabled_skill_names(),
         ),
     }
+
+
+def _safe_skill_archive_path(raw_path: str) -> PurePosixPath | None:
+    normalized = raw_path.replace("\\", "/").strip("/")
+    if not normalized:
+        return None
+    path = PurePosixPath(normalized)
+    if path.is_absolute():
+        return None
+    if any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    return path
+
+
+def _zipinfo_is_symlink(info: zipfile.ZipInfo) -> bool:
+    file_type = (info.external_attr >> 16) & 0o170000
+    return file_type == 0o120000
+
+
+def _uploaded_skill_name(skill_file: Path, fallback_name: str) -> str | None:
+    frontmatter = _read_skill_frontmatter(skill_file)
+    name = (frontmatter.get("name") or fallback_name).strip()
+    return name if SKILL_NAME_RE.match(name) else None
+
+
+def _public_skill_entry(entry: dict) -> dict:
+    return {
+        key: value
+        for key, value in entry.items()
+        if not key.startswith("_")
+    }
+
+
+def _install_uploaded_skill_dir(
+    skill_dir: Path,
+    fallback_name: str,
+) -> tuple[dict | None, str | None]:
+    skill_file = skill_dir / "SKILL.md"
+    if not skill_file.is_file():
+        return None, "Uploaded skill must contain SKILL.md"
+
+    skill_name = _uploaded_skill_name(skill_file, fallback_name)
+    if not skill_name:
+        return None, (
+            "Uploaded skill has an invalid name. Use letters, numbers, "
+            "dots, underscores, or hyphens."
+        )
+
+    ALL_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = ALL_SKILLS_DIR / skill_name
+    tmp_dest = ALL_SKILLS_DIR / f".{skill_name}.{uuid.uuid4().hex}.tmp"
+    try:
+        shutil.copytree(skill_dir, tmp_dest, symlinks=False)
+        if dest.is_symlink():
+            dest.unlink()
+        elif dest.exists():
+            shutil.rmtree(dest)
+        tmp_dest.rename(dest)
+    except OSError as exc:
+        shutil.rmtree(tmp_dest, ignore_errors=True)
+        return None, f"Failed to install skill: {exc}"
+
+    entry = _skill_entry_from_file(dest / "SKILL.md", ALL_SKILLS_DIR)
+    if not entry:
+        return None, "Installed skill could not be loaded"
+    return entry, None
+
+
+def _extract_uploaded_skill_zip(
+    archive_bytes: bytes,
+    extract_dir: Path,
+    fallback_name: str,
+) -> tuple[Path | None, str, str | None]:
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(archive_bytes))
+    except zipfile.BadZipFile:
+        return None, fallback_name, "Invalid zip file"
+
+    files: dict[str, bytes] = {}
+    total_size = 0
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        if _zipinfo_is_symlink(info):
+            return (
+                None,
+                fallback_name,
+                f"Zip contains unsupported symlink: {info.filename}",
+            )
+        safe_path = _safe_skill_archive_path(info.filename)
+        if not safe_path:
+            return None, fallback_name, f"Zip contains unsafe path: {info.filename}"
+        if safe_path.parts[0] == "__MACOSX" or safe_path.name == ".DS_Store":
+            continue
+        total_size += info.file_size
+        if total_size > MAX_SKILL_UPLOAD_BYTES:
+            return None, fallback_name, "Skill upload is too large"
+        if len(files) >= MAX_SKILL_UPLOAD_FILES:
+            return None, fallback_name, "Skill upload contains too many files"
+        files[safe_path.as_posix()] = zf.read(info)
+
+    skill_paths = [
+        PurePosixPath(path)
+        for path in files
+        if PurePosixPath(path).name == "SKILL.md"
+    ]
+    if not skill_paths:
+        return None, fallback_name, "Zip must contain a SKILL.md file"
+    if len(skill_paths) > 1:
+        return (
+            None,
+            fallback_name,
+            "Upload one skill at a time; zip contains multiple SKILL.md files",
+        )
+
+    skill_root = skill_paths[0].parent
+    prefix = "" if skill_root.as_posix() == "." else f"{skill_root.as_posix()}/"
+    skill_fallback = (
+        fallback_name if skill_root.as_posix() == "." else skill_root.name
+    )
+    for path, data in files.items():
+        if prefix and not path.startswith(prefix):
+            continue
+        rel = path[len(prefix):] if prefix else path
+        if not rel:
+            continue
+        dest = extract_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    return extract_dir, skill_fallback, None
 
 
 def challenge_enabled_skills(challenge: dict) -> list[str]:
@@ -6545,6 +6677,68 @@ async def get_skills(request: Request) -> JSONResponse:
     return JSONResponse(public_skill_catalog())
 
 
+async def upload_skill(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    form = await request.form()
+    upload = form.get("skill")
+    if not upload or not hasattr(upload, "read"):
+        return JSONResponse({"error": "No skill uploaded"}, status_code=400)
+
+    filename = Path(getattr(upload, "filename", "") or "").name
+    if not filename:
+        return JSONResponse(
+            {"error": "Skill upload must have a filename"},
+            status_code=400,
+        )
+
+    raw = await upload.read()
+    if not raw:
+        return JSONResponse({"error": "Skill upload is empty"}, status_code=400)
+    if len(raw) > MAX_SKILL_UPLOAD_BYTES:
+        return JSONResponse(
+            {"error": "Skill upload is too large"},
+            status_code=400,
+        )
+
+    with tempfile.TemporaryDirectory(prefix="skill-upload-") as tmp:
+        tmp_dir = Path(tmp)
+        source_dir = tmp_dir / "skill"
+        source_dir.mkdir()
+        lower_name = filename.lower()
+        fallback_name = Path(filename).stem
+
+        if lower_name.endswith(".zip"):
+            source_dir, fallback_name, extract_error = _extract_uploaded_skill_zip(
+                raw, source_dir, fallback_name
+            )
+            if extract_error:
+                return JSONResponse({"error": extract_error}, status_code=400)
+        else:
+            if (
+                lower_name not in {"skill.md", "skill"}
+                and not lower_name.endswith(".md")
+            ):
+                return JSONResponse(
+                    {"error": "Upload a .zip skill bundle or a SKILL.md file"},
+                    status_code=400,
+                )
+            (source_dir / "SKILL.md").write_bytes(raw)
+
+        entry, install_error = _install_uploaded_skill_dir(source_dir, fallback_name)
+        if install_error:
+            return JSONResponse({"error": install_error}, status_code=400)
+
+    return JSONResponse({
+        "ok": True,
+        "skill": _public_skill_entry(entry),
+        "catalog": public_skill_catalog(),
+    })
+
+
 async def discord_test(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
@@ -10095,6 +10289,7 @@ routes = [
     Route("/api/settings", get_settings, methods=["GET"]),
     Route("/api/settings", update_settings, methods=["PUT"]),
     Route("/api/skills", get_skills, methods=["GET"]),
+    Route("/api/skills/upload", upload_skill, methods=["POST"]),
     Route("/api/discord/test", discord_test, methods=["POST"]),
     Route("/api/discord/channels", discord_channels, methods=["POST"]),
     Route("/api/challenges", list_challenges, methods=["GET"]),

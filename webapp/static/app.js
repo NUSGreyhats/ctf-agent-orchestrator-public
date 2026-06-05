@@ -251,6 +251,14 @@ async function loadSkillCatalog() {
   return true;
 }
 
+function applySkillCatalogPayload(data) {
+  if (!data || !Array.isArray(data.skills)) return false;
+  skillCatalog = data.skills;
+  skillByName = new Map(skillCatalog.map((skill) => [skill.name, skill]));
+  defaultEnabledSkills = normalizeSkillNames(data.default_enabled_skills || allSkillNames());
+  return true;
+}
+
 function renderSkillChecklist(container, selectedNames) {
   if (!container) return;
   const selected = new Set(normalizeSkillNames(selectedNames));
@@ -310,6 +318,49 @@ document.addEventListener("click", (e) => {
     setSkillChecklist(container, currentChallengeDefaultSkills);
   }
 });
+
+async function uploadSettingsSkill() {
+  const input = $("#settings-skill-upload");
+  const result = $("#settings-skill-upload-result");
+  const file = input.files && input.files[0];
+  if (!file) {
+    showToast("Choose a skill zip or SKILL.md first", "error");
+    return;
+  }
+
+  const selectedBeforeUpload = getSelectedSkills($("#settings-skill-list"));
+  const btn = $("#btn-settings-skill-upload");
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Uploading...";
+  result.textContent = "";
+
+  const fd = new FormData();
+  fd.append("skill", file);
+  const res = await api("/api/skills/upload", { method: "POST", body: fd });
+
+  btn.disabled = false;
+  btn.textContent = oldText;
+  if (!res) return;
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) {
+    showToast(data.error || "Skill upload failed", "error");
+    return;
+  }
+
+  if (!applySkillCatalogPayload(data.catalog)) {
+    await loadSkillCatalog();
+  }
+  const uploadedName = data.skill && data.skill.name;
+  const selectedAfterUpload = uploadedName
+    ? normalizeSkillNames([...selectedBeforeUpload, uploadedName])
+    : normalizeSkillNames(selectedBeforeUpload);
+  renderSkillChecklist($("#settings-skill-list"), selectedAfterUpload);
+  input.value = "";
+  result.textContent = uploadedName ? `Uploaded ${uploadedName}` : "Uploaded";
+  showToast(result.textContent, "success");
+}
 
 // === API ===
 async function api(path, opts = {}) {
@@ -5227,6 +5278,8 @@ $("#btn-settings").addEventListener("click", async () => {
   }).join("");
 
   renderSkillChecklist($("#settings-skill-list"), s.enabled_skills || defaultEnabledSkills);
+  $("#settings-skill-upload").value = "";
+  $("#settings-skill-upload-result").textContent = "";
 
   // Discord
   $("#settings-discord-enabled").checked = !!s.discord_enabled;
@@ -5267,6 +5320,8 @@ $("#btn-settings-back").addEventListener("click", () => {
   showView("dashboard");
   loadChallenges();
 });
+
+$("#btn-settings-skill-upload").addEventListener("click", uploadSettingsSkill);
 
 $("#btn-settings-save").addEventListener("click", async () => {
   const selectedAgents = Array.from(document.querySelectorAll(".settings-agent-cb:checked")).map((cb) => cb.value);

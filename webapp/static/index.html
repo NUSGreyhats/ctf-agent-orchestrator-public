@@ -158,6 +158,11 @@
       <div class="settings-section">
         <h2 class="settings-section-title">Default Skills</h2>
         <p class="text-muted" style="font-size:0.72rem;margin-bottom:0.5rem;">Selected skills are enabled by default for new challenges.</p>
+        <div class="skill-upload-row">
+          <input type="file" id="settings-skill-upload" accept=".zip,.md">
+          <button type="button" id="btn-settings-skill-upload" class="btn-ghost btn-sm">Upload Skill</button>
+          <span id="settings-skill-upload-result" class="text-muted"></span>
+        </div>
         <div class="skill-toolbar">
           <button type="button" class="btn-ghost btn-sm" data-skill-action="all" data-skill-target="#settings-skill-list">Select All</button>
           <button type="button" class="btn-ghost btn-sm" data-skill-action="none" data-skill-target="#settings-skill-list">Select None</button>
