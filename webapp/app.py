@@ -12,6 +12,7 @@ Supports 2 solving modes:
 import asyncio
 import base64
 import difflib
+import hashlib
 import io
 import json
 import logging
@@ -125,6 +126,12 @@ DISCORD_BUTTON_ACTIONS = {
     "solved",
     "stop",
     "resume",
+}
+DISCORD_FLAG_REVIEW_ACTIONS = {
+    "flag_submit",
+    "flag_reject",
+    "flag_correct",
+    "flag_broadcast",
 }
 
 
@@ -1475,6 +1482,15 @@ def _discord_component_id(challenge_id: str, action: str) -> str:
     return f"{DISCORD_COMPONENT_PREFIX}:{challenge_id}:{action}"
 
 
+def _discord_flag_token(flag: str) -> str:
+    digest = hashlib.sha256(flag_lookup_key(flag).encode()).digest()
+    return base64.urlsafe_b64encode(digest[:9]).decode().rstrip("=")
+
+
+def _discord_flag_component_id(challenge_id: str, action: str, flag: str) -> str:
+    return f"{DISCORD_COMPONENT_PREFIX}:{challenge_id}:{action}:{_discord_flag_token(flag)}"
+
+
 def _discord_button(challenge: dict, action: str, label: str, style: int = 2) -> dict:
     return {
         "type": 2,
@@ -1523,6 +1539,47 @@ def _discord_flag_modal_components(
     if placeholder:
         field["placeholder"] = placeholder[:100]
     return [{"type": 1, "components": [field]}]
+
+
+def discord_flag_review_components(challenge: dict, flag: str) -> list[dict]:
+    challenge_id = challenge.get("id", "")
+    return [{
+        "type": 1,
+        "components": [
+            {
+                "type": 2,
+                "style": 1,
+                "label": "Submit",
+                "custom_id": _discord_flag_component_id(
+                    challenge_id, "flag_submit", flag
+                ),
+            },
+            {
+                "type": 2,
+                "style": 4,
+                "label": "Reject",
+                "custom_id": _discord_flag_component_id(
+                    challenge_id, "flag_reject", flag
+                ),
+            },
+            {
+                "type": 2,
+                "style": 3,
+                "label": "Mark Correct",
+                "custom_id": _discord_flag_component_id(
+                    challenge_id, "flag_correct", flag
+                ),
+            },
+            {
+                "type": 2,
+                "style": 2,
+                "label": "Broadcast",
+                "custom_id": _discord_flag_component_id(
+                    challenge_id, "flag_broadcast", flag
+                ),
+            },
+        ],
+    }]
 
 
 async def discord_create_thread_destination(challenge: dict, bot: DiscordBot) -> None:
@@ -1663,14 +1720,19 @@ async def discord_mark_solved(challenge: dict, flag: str = "", agent: str = "") 
     await bot.send_channel_message(" ".join(parts))
 
 
-async def discord_notify(challenge: dict, content: str = "", embed: dict | None = None) -> None:
+async def discord_notify(
+    challenge: dict,
+    content: str = "",
+    embed: dict | None = None,
+    components: list[dict] | None = None,
+) -> None:
     destination_id = _discord_destination_id(challenge)
     if not destination_id:
         return
     bot = get_bot(load_settings())
     if not bot:
         return
-    await bot.send_message(destination_id, content, embed)
+    await bot.send_message(destination_id, content, embed, components)
 
 
 def _discord_fenced_text(text: str, available_chars: int) -> str:
@@ -4886,6 +4948,7 @@ def _handle_detected_flag(
             await discord_notify(
                 challenge,
                 f"**{run.get('agent', '?')}** found possible flag: `{detected_key}`",
+                components=discord_flag_review_components(challenge, detected_key),
             )
         asyncio.create_task(_notify())
 
@@ -8243,17 +8306,27 @@ def _discord_help_message() -> str:
     )
 
 
-def _discord_parse_component_id(custom_id: str) -> tuple[str, str]:
-    parts = str(custom_id or "").split(":", 2)
-    if len(parts) != 3 or parts[0] != DISCORD_COMPONENT_PREFIX:
-        return "", ""
+def _discord_parse_component_id(custom_id: str) -> tuple[str, str, str]:
+    parts = str(custom_id or "").split(":")
+    if len(parts) < 3 or parts[0] != DISCORD_COMPONENT_PREFIX:
+        return "", "", ""
     challenge_id, action = parts[1], parts[2]
+    token = parts[3] if len(parts) > 3 else ""
+    if action in DISCORD_FLAG_REVIEW_ACTIONS:
+        return (challenge_id, action, token) if token else ("", "", "")
     if action not in DISCORD_BUTTON_ACTIONS and action not in {
         "submit_modal",
         "solved_modal",
     }:
-        return "", ""
-    return challenge_id, action
+        return "", "", ""
+    return challenge_id, action, token
+
+
+def _discord_detected_flag_from_token(challenge: dict, token: str) -> str:
+    for flag in challenge.get("detected_flags", {}):
+        if _discord_flag_token(flag) == token:
+            return flag
+    return ""
 
 
 def _discord_modal_value(interaction: dict, field_id: str) -> str:
@@ -8290,11 +8363,27 @@ async def _discord_submit_flag_from_interaction(
         )
         result = await plugin.submit_flag(config, remote_id, submit_flag)
         if result.correct:
+            stored_flag = set_detected_flag_status(challenge, submit_flag, "correct")
+            record_flag_submission(
+                challenge,
+                stored_flag,
+                submitted_flag=submit_flag,
+                correct=True,
+                message=result.message,
+                auto=False,
+            )
             await apply_solved_status(
                 challenge_id,
                 challenge,
                 flag=submit_flag,
                 stop_reason="discord_submit_solved",
+            )
+            await _broadcast_detected_flag_state(
+                challenge_id,
+                challenge,
+                stored_flag,
+                correct=True,
+                message=result.message,
             )
             solved_by = f"{author} (Discord)"
             await bot.followup_interaction(
@@ -8303,14 +8392,154 @@ async def _discord_submit_flag_from_interaction(
             )
             await discord_mark_solved(challenge, submit_flag, solved_by)
         else:
-            set_detected_flag_status(challenge, submit_flag, "wrong")
+            stored_flag = set_detected_flag_status(challenge, submit_flag, "wrong")
+            record_flag_submission(
+                challenge,
+                stored_flag,
+                submitted_flag=submit_flag,
+                correct=False,
+                message=result.message,
+                auto=False,
+            )
             save_metadata(challenge)
+            await _broadcast_detected_flag_state(
+                challenge_id,
+                challenge,
+                stored_flag,
+                correct=False,
+                message=result.message,
+            )
             await bot.followup_interaction(
                 interaction_token,
                 f"Incorrect: {result.message}",
             )
     except Exception as exc:
         await bot.followup_interaction(interaction_token, f"Submit error: {exc}")
+
+
+async def _broadcast_detected_flag_state(
+    challenge_id: str,
+    challenge: dict,
+    flag: str,
+    *,
+    correct: bool | None = None,
+    message: str = "",
+) -> None:
+    event = {
+        "type": "flag_result",
+        "challenge_id": challenge_id,
+        "challenge_name": challenge.get("name", ""),
+        "flag": flag,
+        "status": challenge.get("detected_flags", {}).get(flag, "pending"),
+        "meta": detected_flag_meta(challenge, flag),
+    }
+    if correct is not None:
+        event["correct"] = correct
+    if message:
+        event["message"] = message
+    await broadcast_global(event)
+
+
+async def _handle_discord_flag_review(
+    bot: DiscordBot,
+    interaction: dict,
+    challenge_id: str,
+    challenge: dict,
+    action: str,
+    token: str,
+) -> None:
+    try:
+        from .agents.broadcast import _queues
+    except ImportError:
+        from agents.broadcast import _queues
+
+    interaction_id = interaction["id"]
+    interaction_token = interaction["token"]
+    member_user = interaction.get("member", {}).get("user", {}) or {}
+    top_user = interaction.get("user", {}) or {}
+    author_user = member_user or top_user
+    author = author_user.get("username", "Discord")
+    flag = _discord_detected_flag_from_token(challenge, token)
+    if not flag:
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            "Flag candidate not found.",
+            flags=64,
+        )
+        return
+
+    if action == "flag_submit":
+        await bot.defer_interaction(interaction_id, interaction_token)
+        await _discord_submit_flag_from_interaction(
+            bot,
+            interaction_token,
+            challenge_id,
+            challenge,
+            flag,
+            author,
+        )
+        return
+
+    if action == "flag_reject":
+        stored_flag = set_detected_flag_status(challenge, flag, "wrong")
+        save_metadata(challenge)
+        await _broadcast_detected_flag_state(
+            challenge_id,
+            challenge,
+            stored_flag,
+            correct=False,
+            message=f"Rejected by {author} via Discord",
+        )
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            f"Rejected flag candidate: `{stored_flag}`",
+        )
+        return
+
+    if action == "flag_correct":
+        await bot.defer_interaction(interaction_id, interaction_token)
+        stored_flag = set_detected_flag_status(challenge, flag, "correct")
+        record_flag_submission(
+            challenge,
+            stored_flag,
+            submitted_flag=stored_flag,
+            correct=True,
+            message=f"Marked correct by {author} via Discord",
+            manual_mark=True,
+        )
+        solved_by = f"{author} (Discord)"
+        await apply_solved_status(
+            challenge_id,
+            challenge,
+            flag=stored_flag,
+            stop_reason="discord_flag_review_correct",
+        )
+        await _broadcast_detected_flag_state(
+            challenge_id,
+            challenge,
+            stored_flag,
+            correct=True,
+            message="Marked correct via Discord review",
+        )
+        await bot.followup_interaction(
+            interaction_token,
+            embed=make_solve_embed(challenge, stored_flag, solved_by),
+        )
+        await discord_mark_solved(challenge, stored_flag, solved_by)
+        return
+
+    if action == "flag_broadcast":
+        q = _queues.get(challenge_id, {})
+        message = f"[{author} via Discord flag review]: Candidate flag `{flag}`"
+        for queue in q.values():
+            await queue.put(message)
+        await bot.respond_to_interaction(
+            interaction_id,
+            interaction_token,
+            f"Broadcast flag candidate to {len(q)} active agent(s): `{flag}`",
+        )
 
 
 async def _handle_discord_component_interaction(interaction: dict) -> None:
@@ -8320,7 +8549,7 @@ async def _handle_discord_component_interaction(interaction: dict) -> None:
     interaction_id = interaction["id"]
     interaction_token = interaction["token"]
     custom_id = (interaction.get("data") or {}).get("custom_id", "")
-    challenge_id, action = _discord_parse_component_id(custom_id)
+    challenge_id, action, token = _discord_parse_component_id(custom_id)
     challenge = challenges.get(challenge_id)
     if not challenge:
         await bot.respond_to_interaction(
@@ -8328,6 +8557,17 @@ async def _handle_discord_component_interaction(interaction: dict) -> None:
             interaction_token,
             "Challenge not found.",
             flags=64,
+        )
+        return
+
+    if action in DISCORD_FLAG_REVIEW_ACTIONS:
+        await _handle_discord_flag_review(
+            bot,
+            interaction,
+            challenge_id,
+            challenge,
+            action,
+            token,
         )
         return
 
@@ -8412,7 +8652,7 @@ async def _handle_discord_modal_submit(interaction: dict) -> None:
     if not bot:
         return
     custom_id = (interaction.get("data") or {}).get("custom_id", "")
-    challenge_id, action = _discord_parse_component_id(custom_id)
+    challenge_id, action, _token = _discord_parse_component_id(custom_id)
     challenge = challenges.get(challenge_id)
     interaction_id = interaction["id"]
     interaction_token = interaction["token"]

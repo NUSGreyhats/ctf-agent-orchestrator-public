@@ -199,6 +199,7 @@ Features:
 - layout setting for either one thread per challenge in the selected announcement channel or one text channel per challenge under a Discord category matching the challenge category;
 - destination rename on completion (`[solved]` thread prefix or `solved-` channel prefix);
 - notifications for starts, stops, solves, flag detections, and breakthroughs;
+- flag review buttons on detected candidates for submit, reject, mark correct, and broadcast;
 - challenge action buttons for status, stats, tail, flags, submit flag, mark solved, stop, and resume;
 - slash commands: `/broadcast`, `/submit`, `/status`, `/flags`, `/stop`, `/resume`, `/solved`, `/ctf`, `/files`.
 

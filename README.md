@@ -89,6 +89,7 @@ Optional Discord bot for team coordination:
 
 - **Per-challenge Discord destinations** — Discord can create either a thread per challenge in the selected announcement channel, or a text channel per challenge under a Discord category matching the challenge category. Channel mode requires the bot to have Manage Channels.
 - **Real-time notifications** — Solve events, flag detections, breakthroughs, starts, completions, and stops are posted to Discord.
+- **Flag review** — Detected flags can be submitted, rejected, marked correct, or broadcast to active agents directly from Discord.
 - **Action buttons** — Challenge messages include buttons for status, stats, tail, flags, submit flag, mark solved, stop, and resume.
 - **Slash commands** — `/broadcast`, `/submit`, `/status`, `/flags`, `/stop`, `/resume`, `/solved`, `/ctf`, `/files` for controlling agents and viewing challenge state from Discord.
 - **Live settings** — Enabling/disabling Discord or changing token/channel/guild settings starts, stops, or restarts the gateway without requiring a webapp restart.
