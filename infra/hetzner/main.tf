@@ -222,8 +222,6 @@ resource "null_resource" "deploy_webapp" {
       echo "  Run: ssh root@$IP -i $SSH_KEY_PATH"
       echo "  Run: claude auth login"
       echo "  Run: codex login"
-      echo "  Run: copilot login"
-      echo "  Run: opencode auth login"
       echo "============================================"
       echo ""
     EOT

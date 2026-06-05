@@ -282,14 +282,6 @@
           <input type="text" id="challenge-flag" placeholder="e.g. flag{...} or CTF{...}">
         </div>
 
-        <div class="form-group form-group-inline">
-          <label class="checkbox-label">
-            <input type="checkbox" id="challenge-autonomous">
-            <span>Autonomous mode</span>
-          </label>
-          <span class="checkbox-hint">Keep trying until the flag is found</span>
-        </div>
-
         <div class="form-group">
           <label>Challenge Files</label>
           <div id="drop-zone" class="drop-zone">
@@ -352,13 +344,7 @@
               <label for="bulk-flag">Default Flag Format</label>
               <input type="text" id="bulk-flag" placeholder="e.g. flag{...}">
             </div>
-            <div class="form-group bulk-autonomous-group">
-              <label class="checkbox-label">
-                <input type="checkbox" id="bulk-autonomous">
-                <span>Autonomous</span>
-              </label>
-            </div>
-            <div class="form-group bulk-autonomous-group">
+            <div class="form-group bulk-option-group">
               <label class="checkbox-label">
                 <input type="checkbox" id="bulk-paused">
                 <span>Pause (start manually)</span>
@@ -419,6 +405,7 @@
         </div>
         <div id="steer-bar" class="steer-bar">
           <span id="steer-run-select" class="steer-agent-label hidden"></span>
+          <button id="btn-active-run-skills" class="btn-ghost btn-sm" type="button">Skills</button>
           <input type="text" id="steer-input" placeholder="Send guidance to the agent..." autocomplete="off">
           <button id="btn-steer" class="btn-primary btn-sm">Send</button>
         </div>
@@ -448,14 +435,8 @@
             </div>
             <div id="detail-files" class="info-meta"></div>
             <div class="skill-edit-section">
-              <div class="flags-header">Skills</div>
-              <div class="skill-toolbar">
-                <button type="button" class="btn-ghost btn-sm" data-skill-action="defaults" data-skill-target="#detail-skill-list">Defaults</button>
-                <button type="button" class="btn-ghost btn-sm" data-skill-action="all" data-skill-target="#detail-skill-list">All</button>
-                <button type="button" class="btn-ghost btn-sm" data-skill-action="none" data-skill-target="#detail-skill-list">None</button>
-                <button type="button" id="btn-save-challenge-skills" class="btn-primary btn-sm">Save</button>
-              </div>
-              <div id="detail-skill-list" class="skill-checklist skill-checklist-compact"></div>
+              <div class="flags-header">Default Skills</div>
+              <div id="detail-skill-list" class="skill-readonly-list"></div>
             </div>
             <div class="manual-flag-section">
               <div class="flags-header">Manual Flag</div>
@@ -493,6 +474,29 @@
           </div>
         </div>
 
+      </div>
+    </div>
+  </div>
+
+  <!-- Run Skills Modal -->
+  <div id="run-skill-overlay" class="modal-overlay hidden">
+    <div class="modal run-skills-modal">
+      <div class="modal-header">
+        <h2>Run Skills</h2>
+        <button id="run-skill-close" class="btn-icon">&times;</button>
+      </div>
+      <p id="run-skill-subtitle" class="modal-subtitle"></p>
+      <div id="run-skill-inheritance" class="run-skill-inheritance"></div>
+      <div class="skill-toolbar">
+        <button type="button" class="btn-ghost btn-sm" data-skill-action="challenge-defaults" data-skill-target="#run-skill-list">Challenge Defaults</button>
+        <button type="button" class="btn-ghost btn-sm" data-skill-action="all" data-skill-target="#run-skill-list">All</button>
+        <button type="button" class="btn-ghost btn-sm" data-skill-action="none" data-skill-target="#run-skill-list">None</button>
+      </div>
+      <div id="run-skill-list" class="skill-checklist skill-checklist-compact"></div>
+      <div class="run-skill-actions">
+        <button type="button" id="btn-run-skills-reset" class="btn-ghost">Reset to Defaults &amp; Resume</button>
+        <button type="button" id="btn-run-skills-apply-all" class="btn-secondary">Apply to All &amp; Resume</button>
+        <button type="button" id="btn-run-skills-apply" class="btn-primary">Apply &amp; Resume</button>
       </div>
     </div>
   </div>
@@ -575,19 +579,13 @@
               <label for="import-flag">Default Flag Format</label>
               <input type="text" id="import-flag" placeholder="e.g. flag{...}">
             </div>
-            <div class="form-group bulk-autonomous-group">
-              <label class="checkbox-label">
-                <input type="checkbox" id="import-autonomous">
-                <span>Autonomous</span>
-              </label>
-            </div>
-            <div class="form-group bulk-autonomous-group">
+            <div class="form-group bulk-option-group">
               <label class="checkbox-label">
                 <input type="checkbox" id="import-paused">
                 <span>Pause (start manually)</span>
               </label>
             </div>
-            <div class="form-group bulk-autonomous-group">
+            <div class="form-group bulk-option-group">
               <label class="checkbox-label">
                 <input type="checkbox" id="import-skip-solved">
                 <span>Skip already solved</span>

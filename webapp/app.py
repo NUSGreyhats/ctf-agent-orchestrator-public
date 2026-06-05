@@ -204,6 +204,11 @@ _FLAG_PATTERNS = [
     re.compile(r"CTF\{[^}]+\}", re.IGNORECASE),
     re.compile(r"HTB\{[^}]+\}", re.IGNORECASE),
 ]
+CTFGREP_DEFAULT_TERMS = ("flag{", "ctf{", "picoCTF{", "HTB{")
+CTFGREP_MAX_TERMS = 6
+CTFGREP_CANDIDATE_INNER_MAX = 100
+CTFGREP_TIMEOUT_SECONDS = 20
+CTFGREP_AUTO_SUBMIT_WAIT_SECONDS = 10
 
 
 def normalize_flag_format(value: str) -> str:
@@ -627,7 +632,6 @@ def make_run(
         "solve_start": None,
         "duration_ms": None,
         "_codex_thread_id": None,
-        "_opencode_session_id": None,
         "_saw_provider_message": False,
         "_last_stream_error": None,
         "_last_stderr_lines": [],
@@ -953,8 +957,6 @@ def provider_state_for_metadata(run: dict) -> dict:
     state = {}
     if run.get("_codex_thread_id"):
         state["codex_thread_id"] = run["_codex_thread_id"]
-    if run.get("_opencode_session_id"):
-        state["opencode_session_id"] = run["_opencode_session_id"]
     return state
 
 
@@ -1565,10 +1567,20 @@ def challenge_enabled_skills(challenge: dict) -> list[str]:
     )
 
 
+def run_has_skill_override(run: dict) -> bool:
+    return run.get("enabled_skills") is not None
+
+
+def run_enabled_skills(challenge: dict, run: dict) -> list[str]:
+    if run_has_skill_override(run):
+        return normalize_enabled_skills(run.get("enabled_skills"), default=[])
+    return challenge_enabled_skills(challenge)
+
+
 def sync_run_skill_links(challenge: dict, run: dict) -> None:
     """Materialize selected project skills into this run's provider dirs."""
     run_dir = get_run_cwd(challenge["id"], run)
-    selected = challenge_enabled_skills(challenge)
+    selected = run_enabled_skills(challenge, run)
     catalog = skill_catalog_by_name()
 
     for rel_dir in PROJECT_SKILL_DIRS:
@@ -1967,7 +1979,7 @@ def _serialize_runs(challenge: dict) -> dict:
     """Serialize runs for metadata (strip non-serializable fields)."""
     serialized = {}
     for run_id, run in challenge["runs"].items():
-        serialized[run_id] = {
+        run_meta = {
             "id": run["id"],
             "agent": run["agent"],
             "model": run["model"],
@@ -1981,6 +1993,9 @@ def _serialize_runs(challenge: dict) -> dict:
             "_session_state": run.get("_session_state", {}),
             "_submit_token": run.get("_submit_token", ""),
         }
+        if run_has_skill_override(run):
+            run_meta["enabled_skills"] = run_enabled_skills(challenge, run)
+        serialized[run_id] = run_meta
     return serialized
 
 
@@ -1996,7 +2011,6 @@ def save_metadata(challenge: dict) -> None:
         "flag_format": challenge["flag_format"],
         "extra_flag_formats": challenge.get("extra_flag_formats", []),
         "mode": challenge["mode"],
-        "autonomous": challenge.get("autonomous", False),
         "status": challenge["status"],
         "created_at": challenge["created_at"],
         "files": challenge["files"],
@@ -2114,6 +2128,8 @@ def load_challenges_from_disk() -> None:
             # New format: restore runs
             for run_id, run_meta in saved_runs.items():
                 run_agent = run_meta.get("agent", DEFAULT_AGENT)
+                if run_agent not in VALID_AGENTS:
+                    run_agent = DEFAULT_AGENT
                 run_status = run_meta.get("status", "unknown")
                 if run_status == "solving":
                     run_status = "failed"
@@ -2135,19 +2151,19 @@ def load_challenges_from_disk() -> None:
                 run["duration_ms"] = run_meta.get("duration_ms")
                 if run_meta.get("notes_label"):
                     run["notes_label"] = run_meta["notes_label"]
+                if "enabled_skills" in run_meta:
+                    run["enabled_skills"] = normalize_enabled_skills(
+                        run_meta.get("enabled_skills"),
+                        default=[],
+                    )
                 run["_codex_thread_id"] = provider_state.get(
                     "codex_thread_id"
-                )
-                run["_opencode_session_id"] = provider_state.get(
-                    "opencode_session_id"
                 )
                 session_state = run_meta.get("_session_state", {})
                 # Backfill from legacy provider_state
                 if not session_state:
                     if run.get("_codex_thread_id"):
                         session_state["codex_thread_id"] = run["_codex_thread_id"]
-                    if run.get("_opencode_session_id"):
-                        session_state["opencode_session_id"] = run["_opencode_session_id"]
                 run["_session_state"] = session_state
                 run["_submit_token"] = run_meta.get("_submit_token", "")
                 run["output_lines"] = _normalize_output_lines(
@@ -2158,6 +2174,8 @@ def load_challenges_from_disk() -> None:
         else:
             # Legacy format: migrate to single run
             old_agent = meta.get("agent", DEFAULT_AGENT)
+            if old_agent not in VALID_AGENTS:
+                old_agent = DEFAULT_AGENT
             old_status = meta.get("status", "unknown")
             if old_status == "solving":
                 old_status = "failed"
@@ -2181,15 +2199,10 @@ def load_challenges_from_disk() -> None:
             run["_codex_thread_id"] = provider_state.get(
                 "codex_thread_id"
             )
-            run["_opencode_session_id"] = provider_state.get(
-                "opencode_session_id"
-            )
             session_state_legacy = meta.get("_session_state", {})
             if not session_state_legacy:
                 if run.get("_codex_thread_id"):
                     session_state_legacy["codex_thread_id"] = run["_codex_thread_id"]
-                if run.get("_opencode_session_id"):
-                    session_state_legacy["opencode_session_id"] = run["_opencode_session_id"]
             run["_session_state"] = session_state_legacy
             # Try legacy output log
             legacy_events = _load_legacy_output_log(challenge_id)
@@ -2233,7 +2246,6 @@ def load_challenges_from_disk() -> None:
                 ),
             ),
             "mode": mode,
-            "autonomous": meta.get("autonomous", False),
             "status": "pending",
             "created_at": meta.get(
                 "created_at", datetime.now().isoformat()
@@ -2522,6 +2534,8 @@ async def list_challenges(request: Request) -> JSONResponse:
                 "status": run["status"],
                 "error": run.get("error"),
                 "duration_ms": effective_run_duration_ms(run),
+                "enabled_skills": run_enabled_skills(c, run),
+                "skill_override": run_has_skill_override(run),
             })
         result.append({
             "id": c["id"],
@@ -2699,7 +2713,6 @@ async def create_challenge(request: Request) -> JSONResponse:
     agents_str = form.get("agents", "").strip()
     model = form.get("model", "").strip()
     effort = form.get("effort", "").strip()
-    autonomous = form.get("autonomous", "").strip() == "true"
     enabled_skills = normalize_enabled_skills(
         form.get("enabled_skills"),
         default=normalize_enabled_skills(load_settings().get("enabled_skills")),
@@ -2808,7 +2821,6 @@ async def create_challenge(request: Request) -> JSONResponse:
         "flag_format": flag_format,
         "extra_flag_formats": [],
         "mode": mode,
-        "autonomous": autonomous,
         "status": "solving",
         "created_at": datetime.now().isoformat(),
         "files": sorted(file_data.keys()),
@@ -3049,7 +3061,6 @@ async def bulk_upload(request: Request) -> JSONResponse:
 
         model = str_field(body.get("model", "")).strip()
         effort = str_field(body.get("effort", "")).strip()
-        autonomous = bool(body.get("autonomous", False))
         paused = bool(body.get("paused", False))
         enabled_skills = normalize_enabled_skills(
             body.get("enabled_skills"),
@@ -3140,7 +3151,6 @@ async def bulk_upload(request: Request) -> JSONResponse:
                 "flag_format": ch_flag_format,
                 "extra_flag_formats": [],
                 "mode": mode,
-                "autonomous": autonomous,
                 "status": challenge_status,
                 "created_at": datetime.now().isoformat(),
                 "files": file_names,
@@ -3359,6 +3369,26 @@ async def _steer_run_with_message(
         run_agent_task(
             challenge_id, target_run_id, continue_msg=message
         )
+    )
+
+
+def _skill_resume_message(run: dict) -> str | None:
+    if run.get("status") == "pending" and not run.get("output_lines"):
+        return None
+    return "Continue solving the challenge."
+
+
+async def _start_run_after_skill_change(
+    challenge_id: str,
+    run_id: str,
+    run: dict,
+    continue_msg: str | None,
+) -> None:
+    run["status"] = "solving"
+    run["error"] = None
+    run.pop("_stop_reason", None)
+    run["task"] = asyncio.create_task(
+        run_agent_task(challenge_id, run_id, continue_msg=continue_msg)
     )
 
 
@@ -4521,6 +4551,8 @@ def _export_challenge_to_zip(
             "status": run["status"],
             "duration_ms": effective_run_duration_ms(run),
             "notes_label": run.get("notes_label", ""),
+            "enabled_skills": run_enabled_skills(challenge, run),
+            "skill_override": run_has_skill_override(run),
         }
 
     zf.writestr(f"{prefix}/challenge.json", json.dumps(meta, indent=2))
@@ -4920,85 +4952,23 @@ def _instance_prompt_lines(instance_info: dict) -> list[str]:
 
 def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) -> str:
     """Build the CTF solving prompt."""
-    agent_name = run["agent"]
-    notes_label = run.get("notes_label", agent_name)
     is_parallel = challenge["mode"] == "parallel"
 
     notes_file = run_notes_filename(challenge, run)
     run_cwd = get_run_cwd(challenge["id"], run)
     notes_path = run_cwd / notes_file
-    enabled_skills = challenge_enabled_skills(challenge)
-    enabled_skill_set = set(enabled_skills)
+    enabled_skill_set = set(challenge_enabled_skills(challenge))
 
     parts = [
         "You are solving a CTF challenge.",
     ]
-    if enabled_skills:
-        parts.extend([
-            "Project skills enabled for this challenge:",
-            ", ".join(f"`{name}`" for name in enabled_skills),
-        ])
-        if "ctf-methodology" in enabled_skill_set:
-            parts.append(
-                "Load the ctf-methodology skill first and follow it for the "
-                "full solve. It contains the triage workflow and routes you "
-                "to the correct category and tool skills."
-            )
-        else:
-            parts.append(
-                "Use the enabled project skills when relevant. Do not assume "
-                "disabled project skills are available."
-            )
-    else:
-        parts.append(
-            "No project skills are enabled for this challenge. Use your "
-            "built-in knowledge and installed command-line tools."
-        )
-
-    key_tool_rules = []
-    if "analyze-with-ida-domain-api" in enabled_skill_set:
-        key_tool_rules.append(
-            "- For ANY binary (ELF/PE): use IDA Pro for static analysis "
-            "(load the analyze-with-ida-domain-api skill). Do NOT use objdump "
-            "or readelf as primary analysis; IDA is installed and licensed."
-        )
-    if "libdebug-debugging" in enabled_skill_set:
-        key_tool_rules.append(
-            "- For runtime debugging: use libdebug "
-            "(load the libdebug-debugging skill), not raw GDB."
-        )
-    if "kernel-gef-debugging" in enabled_skill_set:
-        key_tool_rules.append(
-            "- For kernel challenges: use GDB+GEF via MCP "
-            "(load the kernel-gef-debugging skill)."
-        )
-    key_tool_rules.append("- Run ctfgrep first for a quick flag search across encodings.")
+    if "ctf-methodology" in enabled_skill_set:
+        parts.append("Follow ctf-methodology and solve the CTF challenge")
 
     parts.extend([
         "",
-        "Key tool rules:",
-        *key_tool_rules,
-        "",
         f"Maintain this exact working notes file: `{notes_path}`",
-        f"The file name is `{notes_file}`, but always write it at the absolute "
-        "path above inside your current working directory.",
-        f"Do not create or edit `/root/{notes_file}`, `/root/WORKING_NOTES_CLAUDE.md`, "
-        "or any WORKING_NOTES file outside this run directory.",
-        "",
-        "Use this structure:",
-        "```",
-        f"# Working Notes — {notes_label}",
-        "## Challenge Understanding",
-        "## Hypotheses",
-        "[ ] untested  [x] failed  [>] active",
-        "## Key Findings",
-        "## Tools & Techniques Tried",
-        "## Dead Ends",
-        "## Next Steps",
-        "```",
-        "Update this file as you work. Your context may be compacted "
-        "during long solves — this file is your persistent memory. "
-        "If you lose context, re-read it first.",
+        "Update this file as you work. If you lose context, re-read it first.",
     ])
 
     # Parallel mode: team awareness
@@ -5129,15 +5099,6 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
             "Keep command output bounded: avoid unbounded recursive listings, and use "
             "targeted commands with limits (for example, head/tail).",
         ])
-    if challenge.get("autonomous"):
-        parts.extend([
-            "",
-            "IMPORTANT: Do not stop or ask for guidance. Keep "
-            "trying different approaches until you find the "
-            "flag. If one technique fails, move on to the "
-            "next. Exhaust all options before giving up.",
-        ])
-
     return "\n".join(parts)
 
 
@@ -5184,6 +5145,7 @@ def _handle_detected_flag(
     event: dict | None = None,
     event_index: int | None = None,
     source_type: str = "detected",
+    auto_submit_tasks: list[asyncio.Task] | None = None,
 ) -> bool:
     """Persist, broadcast, and optionally auto-submit a detected flag."""
     run = challenge["runs"].get(run_id)
@@ -5364,7 +5326,9 @@ def _handle_detected_flag(
         except Exception:
             seen.discard(seen_key)
 
-    asyncio.create_task(_submit())
+    task = asyncio.create_task(_submit())
+    if auto_submit_tasks is not None:
+        auto_submit_tasks.append(task)
     return is_new
 
 
@@ -5393,6 +5357,136 @@ def _try_detect_and_submit_flag(
                 event_index=event_index,
                 source_type=source_type,
             )
+
+
+def _path_has_entries(path: Path) -> bool:
+    try:
+        next(path.iterdir())
+        return True
+    except (StopIteration, OSError):
+        return False
+
+
+def _ctfgrep_preflight_target(challenge_id: str, run_cwd: Path) -> Path | None:
+    files_dir = CHALLENGES_DIR / challenge_id / "_files"
+    if files_dir.is_dir() and _path_has_entries(files_dir):
+        return files_dir
+
+    challenge_files_dir = run_cwd / "challenge_files"
+    if challenge_files_dir.is_dir() and _path_has_entries(challenge_files_dir):
+        return challenge_files_dir
+
+    return None
+
+
+def _ctfgrep_search_terms(challenge: dict) -> list[str]:
+    configured_terms = []
+    for flag_format in challenge_flag_formats(challenge):
+        text = normalize_flag_format(flag_format)
+        if "{" not in text:
+            continue
+        prefix = text.split("{", 1)[0].strip()
+        if len(prefix) >= 2:
+            configured_terms.append(f"{prefix}{{")
+    terms = configured_terms or list(CTFGREP_DEFAULT_TERMS)
+    return _unique_strings(terms)[:CTFGREP_MAX_TERMS]
+
+
+def _ctfgrep_candidate_flags(challenge: dict, text: str) -> list[str]:
+    candidates = []
+    for flag in detect_flags(text, challenge_flag_formats(challenge)):
+        if "{" not in flag or not flag.endswith("}"):
+            continue
+        inner = flag.split("{", 1)[1][:-1]
+        if len(inner) <= CTFGREP_CANDIDATE_INNER_MAX:
+            candidates.append(flag)
+    return _unique_strings(candidates)
+
+
+async def _run_ctfgrep_preflight(
+    challenge_id: str,
+    run_id: str,
+    challenge: dict,
+    run: dict,
+    run_cwd: Path,
+) -> bool:
+    """Silently add bounded ctfgrep hits to detected flag candidates."""
+    target_dir = _ctfgrep_preflight_target(challenge_id, run_cwd)
+    if target_dir is None:
+        return False
+
+    ctfgrep = shutil.which("ctfgrep")
+    if not ctfgrep:
+        log.info(
+            "[%s/%s] ctfgrep preflight skipped: ctfgrep was not found",
+            challenge_id[:8], run_id[:8],
+        )
+        return False
+
+    terms = _ctfgrep_search_terms(challenge)
+    raw_outputs = []
+
+    for term in terms:
+        cmd = [ctfgrep, "-i", "-m", "4", "-t", "4", str(target_dir), term]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(run_cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=CTFGREP_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                stdout, stderr = await proc.communicate()
+                log.info(
+                    "[%s/%s] ctfgrep preflight timed out after %ss for %r",
+                    challenge_id[:8], run_id[:8],
+                    CTFGREP_TIMEOUT_SECONDS, term,
+                )
+        except Exception as exc:
+            log.warning(
+                "[%s/%s] ctfgrep preflight failed for %r: %s",
+                challenge_id[:8], run_id[:8], term, exc,
+            )
+            continue
+
+        stdout_text = stdout.decode("utf-8", errors="replace")
+        stderr_text = stderr.decode("utf-8", errors="replace")
+        combined = "\n".join(
+            part for part in (stdout_text.strip(), stderr_text.strip()) if part
+        )
+        raw_outputs.append(combined)
+        if proc.returncode not in (0, None):
+            log.info(
+                "[%s/%s] ctfgrep preflight exited with code %s for %r",
+                challenge_id[:8], run_id[:8], proc.returncode, term,
+            )
+
+    raw_text = "\n".join(raw_outputs)
+    candidate_flags = _ctfgrep_candidate_flags(challenge, raw_text)
+
+    auto_submit_tasks: list[asyncio.Task] = []
+    for flag in candidate_flags:
+        _handle_detected_flag(
+            challenge_id,
+            run_id,
+            challenge,
+            flag,
+            source_type="ctfgrep_preflight",
+            auto_submit_tasks=auto_submit_tasks,
+        )
+
+    if auto_submit_tasks:
+        await asyncio.wait(
+            auto_submit_tasks,
+            timeout=CTFGREP_AUTO_SUBMIT_WAIT_SECONDS,
+        )
+    return bool(candidate_flags)
 
 
 async def _run_agent_sdk_path(
@@ -5811,6 +5905,12 @@ async def run_agent_task(
     seed_working_notes(challenge_id, run)
     write_submit_answer_helper(challenge_id, run_id)
     start_run_timer(run)
+
+    if not continue_msg:
+        await _run_ctfgrep_preflight(challenge_id, run_id, challenge, run, run_cwd)
+        if run.get("status") == "solved" or challenge.get("status") == "solved":
+            return
+
     provider = get_provider(run["agent"])
 
     # Start remote instance if needed. Agents must not begin work until a
@@ -5834,8 +5934,6 @@ async def run_agent_task(
     has_session = bool(
         session_state_for_prompt.get("claude_session_id")
         or session_state_for_prompt.get("codex_thread_id")
-        or session_state_for_prompt.get("opencode_session_id")
-        or session_state_for_prompt.get("copilot_session_id")
     )
 
     if continue_msg and has_session:
@@ -5919,9 +6017,7 @@ async def run_agent_task(
         "agent": run["agent"],
         "model": run["model"],
         "effort": run.get("effort", ""),
-        "autonomous": challenge.get("autonomous", False),
         "_codex_thread_id": run.get("_codex_thread_id"),
-        "_opencode_session_id": run.get("_opencode_session_id"),
     }
     cmd = provider.build_command(compat_dict, prompt, bool(continue_msg))
 
@@ -6331,9 +6427,9 @@ async def discord_channels(request: Request) -> JSONResponse:
 def _static_provider_metadata(provider) -> dict:
     """Return provider metadata using static models only (no PTY discovery).
 
-    This avoids the 3-8 second PTY subprocess that _discover_models_from_cli
-    spawns for Claude and Copilot. The static models list is always available
-    and sufficient for the UI.
+    This avoids the 3-8 second PTY subprocess that some provider discovery
+    paths spawn. The static models list is always available and sufficient
+    for the UI.
     """
     return {
         "name": provider.name,
@@ -6346,7 +6442,6 @@ def _static_provider_metadata(provider) -> dict:
         ],
         "default_model": provider.default_model,
         "auth_connect_command": provider.auth_connect_command,
-        "autonomous_default": provider.autonomous_default,
         "badge_mode": provider.badge_mode,
         "effort_levels": [
             {"value": value, "label": label}
@@ -6680,7 +6775,6 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         agents = str_field(agents_value).strip()
     model = str_field(body.get("model", ""))
     effort = str_field(body.get("effort", ""))
-    autonomous = bool(body.get("autonomous", False))
     flag_format = str_field(body.get("flag_format", "")).strip()
     paused = bool(body.get("paused", False))
     enabled_skills = normalize_enabled_skills(
@@ -7000,7 +7094,6 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "flag_format": ch_flag_format,
             "extra_flag_formats": [],
             "mode": mode,
-            "autonomous": autonomous,
             "status": challenge_status,
             "created_at": datetime.now().isoformat(),
             "files": sorted(file_data.keys()),
@@ -7243,26 +7336,130 @@ async def update_challenge_skills(request: Request) -> JSONResponse:
         return err
 
     challenge_id = request.path_params["id"]
+    if challenge_id not in challenges:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    return JSONResponse(
+        {"error": "challenge skills are locked after creation"},
+        status_code=405,
+    )
+
+
+async def update_run_skills(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    run_id = request.path_params["run_id"]
     challenge = challenges.get(challenge_id)
     if not challenge:
         return JSONResponse({"error": "not found"}, status_code=404)
+    if challenge.get("status") == "solved":
+        return JSONResponse(
+            {"error": "challenge is solved; run skills are locked"},
+            status_code=409,
+        )
+    if run_id not in challenge.get("runs", {}):
+        return JSONResponse({"error": "run not found"}, status_code=404)
 
     body, json_err = await read_json_object(request)
     if json_err:
         return json_err
 
-    enabled_skills = normalize_enabled_skills(
+    reset = bool(body.get("reset", False))
+    apply_to_all = bool(body.get("apply_to_all", False))
+    resume = body.get("resume", True) is not False
+    enabled_skills = [] if reset else normalize_enabled_skills(
         body.get("enabled_skills"),
         default=[],
     )
-    challenge["enabled_skills"] = enabled_skills
-    sync_challenge_skill_links(challenge)
+
+    if apply_to_all:
+        targets = [
+            (rid, run)
+            for rid, run in challenge.get("runs", {}).items()
+            if run.get("status") != "solved"
+        ]
+    else:
+        target_run = challenge["runs"][run_id]
+        targets = (
+            [(run_id, target_run)]
+            if target_run.get("status") != "solved"
+            else []
+        )
+
+    if not targets:
+        return JSONResponse(
+            {"error": "no non-solved runs to update"},
+            status_code=409,
+        )
+
+    updated_runs = []
+    for target_id, target_run in targets:
+        continue_msg = _skill_resume_message(target_run) if resume else None
+        if resume:
+            await stop_run(target_run, "skills_changed")
+            finish_run_timer(target_run)
+
+        if reset:
+            target_run.pop("enabled_skills", None)
+        else:
+            target_run["enabled_skills"] = enabled_skills
+        sync_run_skill_links(challenge, target_run)
+
+        effective_skills = run_enabled_skills(challenge, target_run)
+        skills_event = {
+            "type": "run_skills",
+            "run_id": target_id,
+            "enabled_skills": effective_skills,
+            "skill_override": run_has_skill_override(target_run),
+            "message": (
+                "Run skills reset to challenge defaults."
+                if reset else "Run skills updated."
+            ),
+        }
+        target_run["output_lines"].append(skills_event)
+        append_output_event(challenge_id, target_id, skills_event)
+        await broadcast(challenge_id, target_id, skills_event)
+
+        if resume:
+            await _start_run_after_skill_change(
+                challenge_id, target_id, target_run, continue_msg
+            )
+            status_event = {
+                "type": "run_status",
+                "run_id": target_id,
+                "status": target_run["status"],
+                "error": target_run.get("error"),
+                "duration_ms": effective_run_duration_ms(target_run),
+            }
+            await broadcast(challenge_id, target_id, status_event)
+
+        updated_runs.append({
+            "id": target_run["id"],
+            "agent": target_run["agent"],
+            "model": target_run["model"],
+            "effort": target_run.get("effort", ""),
+            "status": target_run["status"],
+            "error": target_run.get("error"),
+            "duration_ms": effective_run_duration_ms(target_run),
+            "enabled_skills": run_enabled_skills(challenge, target_run),
+            "skill_override": run_has_skill_override(target_run),
+        })
+
+    challenge["status"] = derive_challenge_status(challenge)
     save_metadata(challenge)
     await broadcast_challenge(challenge_id, {
-        "type": "challenge_skills",
-        "enabled_skills": enabled_skills,
+        "type": "challenge_status",
+        "status": challenge["status"],
     })
-    return JSONResponse({"enabled_skills": enabled_skills})
+    return JSONResponse({
+        "status": challenge["status"],
+        "runs": updated_runs,
+        "enabled_skills": challenge_enabled_skills(challenge),
+    })
 
 
 async def plugin_submit_flag(request: Request) -> JSONResponse:
@@ -9670,6 +9867,7 @@ routes = [
     Route("/api/challenges/{id}/flag-formats", add_flag_format, methods=["POST"]),
     Route("/api/challenges/{id}/flags", add_manual_flag, methods=["POST"]),
     Route("/api/challenges/{id}/skills", update_challenge_skills, methods=["PUT"]),
+    Route("/api/challenges/{id}/runs/{run_id}/skills", update_run_skills, methods=["PUT"]),
     Route("/api/challenges/{id}/stats", get_challenge_stats, methods=["GET"]),
     Route("/api/challenges/{id}/runs/{run_id}/events", list_run_events, methods=["GET"]),
     Route("/api/challenges/{id}/transcript-search", search_challenge_transcript, methods=["GET"]),

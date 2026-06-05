@@ -1,6 +1,6 @@
 # ctf-agent-wrapper
 
-An AI-powered CTF solving workstation. It provisions a cloud VM pre-loaded with forensics, reverse engineering, debugging, and analysis tools, then lets you throw CTF challenges at one or more AI agents via a web UI. Supports Claude Code, Codex, GitHub Copilot CLI, and OpenCode — individually or racing in parallel.
+An AI-powered CTF solving workstation. It provisions a cloud VM pre-loaded with forensics, reverse engineering, debugging, and analysis tools, then lets you throw CTF challenges at one or more AI agents via a web UI. Supports Claude Code and Codex — individually or racing in parallel.
 
 ## Methodology
 
@@ -18,10 +18,8 @@ Repo-owned skills live in `skills/`. During environment setup, repo-owned and ex
 |-------|--------|---------------|----------------|---------------|----------|
 | Claude Code | Provider default, Opus 4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Provider default, Low, Medium, High, Max | Yes | `notify_teammates`, working notes | Yes |
 | Codex | Discovered from local cache/config | Per-model, discovered from local cache | Yes | Dynamic `notify_teammates`, working notes | Yes |
-| GitHub Copilot CLI | Provider default, curated GPT/Claude/Gemini list | Provider default, Low, Medium, High, XHigh | Yes | SDK `notify_teammates`, working notes | Yes |
-| OpenCode | Discovered from `opencode models` | Provider default | Yes | TypeScript `notify_teammates`, working notes | Yes |
 
-All four agents run through their provider integration paths. Multiple agents can race the same challenge by adding multiple agent rows when creating, bulk uploading, or importing challenges; two or more agent rows automatically create a parallel challenge.
+Both agents run through their provider integration paths. Multiple agents can race the same challenge by adding multiple agent rows when creating, bulk uploading, or importing challenges; two or more agent rows automatically create a parallel challenge.
 
 ## Features
 
@@ -99,13 +97,12 @@ Optional Discord bot for team coordination:
 - **Cloud providers** — Terraform configs for Hetzner Cloud, DigitalOcean, and GCP.
 - **Runtime allowlist deploy** — Deploys copy only runtime project files (`environment`, `webapp`, `skills`, `mcps`, `hooks`, `README.md`, `DESIGN.md`) instead of the whole repo. Local `.git/`, `infra/`, Terraform state/vars, and local caches are not copied to the VM. Runtime `challenges`, `state`, and generated `all-skills` are preserved.
 - **Runtime data preservation** — Deploy sync preserves `/root/ctf-agent-wrapper/challenges` and `/root/ctf-agent-wrapper/state` on the VM.
-- **GDB MCP server** — Persistent GDB session for kernel/binary debugging, registered for Claude, Codex, and OpenCode.
+- **GDB MCP server** — Persistent GDB session for kernel/binary debugging, registered for Claude and Codex.
 - **IDA Pro skill** — Headless static analysis through the `analyze-with-ida-domain-api` skill, backed by IDA Pro's Python Domain API.
 - **WireGuard VPN** — Built-in VPN management for challenges that require network access to a CTF infrastructure. Configure, start/stop, and generate client configs from the web UI.
 - **uv-based Python installs** — Environment scripts install most Python dependencies with `uv pip install --system` for faster provisioning while keeping `pip` available for vendor-local wheels.
 - **Parallel environment setup** — `environment/run.sh` runs independent tooling categories concurrently with package-manager locks; set `ENVIRONMENT_PARALLEL=0` for sequential setup.
 - **Provisioning validation** — `environment/990_validate.sh` checks critical commands and Python imports at the end of setup.
-- **OpenCode server binding** — `opencode serve` is started explicitly on `127.0.0.1` for SDK access.
 
 ### Persistence
 
@@ -160,8 +157,6 @@ Authenticate whichever agents you want to use:
 ```bash
 claude auth login      # Claude Code
 codex login            # Codex
-copilot login          # GitHub Copilot CLI
-opencode auth login    # OpenCode
 ```
 
 ### 3. Solve Challenges
@@ -190,12 +185,6 @@ cd /root/challenges && yolo
 
 # Codex
 cd /root/challenges && codex --dangerously-bypass-approvals-and-sandbox
-
-# Copilot CLI
-cd /root/challenges && copilot --yolo
-
-# OpenCode
-cd /root/challenges && opencode
 ```
 
 ### Teardown
@@ -212,12 +201,12 @@ infra/          Terraform configs (Hetzner Cloud, DigitalOcean, GCP)
 environment/    Setup scripts (tools, CLIs, dependencies)
   lib/          Shared shell helpers used by setup scripts
 webapp/         Starlette/ASGI app for challenge management and agent streaming
-  agents/       Agent provider implementations (Claude, Codex, Copilot, OpenCode)
+  agents/       Agent provider implementations (Claude, Codex)
   plugins/      CTF platform integrations (CTFd, rCTF, HTB CTF)
   static/       Frontend (vanilla JS, CSS)
 skills/         Agent skills (methodology, forensics, tool-specific, community)
 all-skills/     Generated runtime skill catalog populated by environment setup
-hooks/          Agent hook/tool files, including OpenCode collaboration tool
+hooks/          Agent hook/tool files
 mcps/           MCP servers (GDB debugger)
 state/          Runtime state on the VM: metadata, output logs, connections
 ```

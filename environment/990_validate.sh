@@ -61,13 +61,11 @@ check_cmd npm npm --version
 check_cmd uv uv --version
 check_cmd gdb gdb --version
 check_cmd rg rg --version
-check_cmd ctfgrep ctfgrep --help
+check_cmd ctfgrep ctfgrep -h
 check_cmd docker docker --version
 
 check_cmd claude claude --version
 check_cmd codex codex --version
-check_cmd copilot copilot --version
-check_cmd opencode opencode --version
 check_path "$APP_ROOT/all-skills/ctf-methodology/SKILL.md"
 
 check_cmd apktool apktool --version
@@ -86,8 +84,6 @@ check_py_import httpx
 check_py_import requests
 check_py_import websockets
 check_py_import claude_agent_sdk
-check_py_import copilot
-check_py_import opencode_sdk
 check_py_import mcp.server.fastmcp
 check_py_import idapro
 check_py_import ida_domain

@@ -2710,7 +2710,6 @@ provider = AgentProvider(
     models=_discover_models(),
     default_model="",
     auth_connect_command="codex login",
-    autonomous_default=False,
     badge_mode="model",
     build_command=_build_command,
     normalize_saved_events=_normalize_saved_events,

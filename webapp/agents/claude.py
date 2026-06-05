@@ -571,7 +571,6 @@ provider = AgentProvider(
     ),
     default_model="claude-opus-4-7",
     auth_connect_command="claude auth login",
-    autonomous_default=False,
     badge_mode="model",
     build_command=_build_command,
     normalize_saved_events=_normalize_saved_events,

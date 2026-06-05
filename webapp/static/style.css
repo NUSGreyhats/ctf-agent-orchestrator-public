@@ -161,8 +161,6 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .badge-model { background: var(--purple-dim); color: var(--purple); font-family: var(--mono); }
 .badge-mode { background: var(--bg-input); color: var(--text-muted); font-family: var(--mono); font-size: 0.6rem; }
 .badge-agent-codex { background: var(--green-dim); color: var(--green); font-family: var(--mono); }
-.badge-agent-copilot { background: var(--accent-dim); color: var(--accent); font-family: var(--mono); }
-.badge-agent-opencode { background: var(--orange-dim); color: var(--orange); font-family: var(--mono); }
 
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 .badge-solving { animation: pulse 2s ease-in-out infinite; }
@@ -242,8 +240,6 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .card-desc { color: var(--text-muted); font-size: 0.72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: none; }
 .card-agent { font-family: var(--mono); font-size: 0.65rem; color: var(--purple); }
 .card-agent-codex { color: var(--green); }
-.card-agent-copilot { color: var(--accent); }
-.card-agent-opencode { color: var(--orange); }
 .card-files { color: var(--text-dim); font-size: 0.7rem; }
 .card-duration {
   font-family: var(--mono); font-size: 0.65rem; color: var(--text-dim);
@@ -402,7 +398,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   background: var(--bg-input); border: 1px solid var(--border);
   border-radius: 8px; padding: 0.6rem 0.75rem; margin-bottom: 0.75rem;
 }
-.bulk-autonomous-group {
+.bulk-option-group {
   display: flex; align-items: flex-end; padding-bottom: 0.15rem;
 }
 .bulk-challenge-list {
@@ -940,6 +936,14 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   border-bottom: 1px solid var(--border);
   text-transform: uppercase; letter-spacing: 0.03em;
   flex-shrink: 0;
+}
+.split-pane-title {
+  min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.split-skill-btn {
+  flex-shrink: 0; padding: 0.15rem 0.35rem; font-size: 0.62rem;
+  text-transform: none; letter-spacing: 0;
 }
 .split-steer {
   flex-shrink: 0; border-top: 1px solid var(--border);
@@ -1591,6 +1595,28 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   -webkit-box-orient: vertical; overflow: hidden;
 }
 .skill-edit-section { margin-top: 0.75rem; }
+.skill-readonly-list {
+  display: flex; flex-wrap: wrap; gap: 0.3rem;
+  padding: 0.35rem; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.skill-pill {
+  display: inline-flex; align-items: center;
+  min-height: 1.35rem; padding: 0.15rem 0.45rem;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-card); color: var(--text);
+  font-family: var(--mono); font-size: 0.66rem;
+}
+.skill-pill-muted { color: var(--text-muted); font-family: var(--sans); }
+.run-skills-modal { max-width: 620px; }
+.run-skill-inheritance {
+  margin: 0 0 0.6rem; color: var(--text-muted);
+  font-size: 0.76rem;
+}
+.run-skill-actions {
+  display: flex; justify-content: flex-end; gap: 0.45rem;
+  margin-top: 0.8rem; flex-wrap: wrap;
+}
 .import-ch-solved { opacity: 0.6; }
 .import-select-bar { display: flex; gap: 0.4rem; margin-bottom: 0.4rem; }
 

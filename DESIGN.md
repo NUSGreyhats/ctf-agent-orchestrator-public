@@ -62,12 +62,10 @@ Provider implementations expose collaboration as follows:
 
 - **Claude**: in-process MCP tool via `create_sdk_mcp_server`.
 - **Codex**: dynamic tool in `thread/start` `dynamicTools`.
-- **Copilot**: SDK `define_tool` handler.
-- **OpenCode**: TypeScript tool installed under `~/.config/opencode/tools/notify_teammates.ts`; the SDK path also polls the shared queue file.
 
 When an agent calls `notify_teammates`:
 
-1. The tool handler writes to an in-memory queue or the shared OpenCode queue file.
+1. The tool handler writes to an in-memory queue.
 2. The receiving provider poller picks up the message.
 3. The message is injected into teammates' sessions as a teammate breakthrough.
 4. Delivery happens at natural turn boundaries where possible, rather than interrupting an active tool call.
@@ -103,7 +101,6 @@ challenges/{id}/
   _files/
     chall.bin
   _shared/
-    .notify_queue                # OpenCode collaboration queue when used
   _runs/
     {run_id_1}/
       challenge_files/
@@ -136,16 +133,13 @@ All providers currently use SDK/integration paths:
 |----------|-------------|----------|
 | Claude | `claude-agent-sdk` | Native Python client, typed messages |
 | Codex | `codex app-server` | JSON-RPC 2.0 over stdio |
-| Copilot | `github-copilot-sdk` | Python SDK with event callbacks |
-| OpenCode | `opencode-sdk` | REST API to `opencode serve` on `127.0.0.1` |
 
 Provider modules still keep command builders and normalizers for compatibility/fallback behavior, but normal webapp runs go through the SDK-style `run_agent` path.
 
 Each run stores provider session state in challenge metadata, for example:
 
 - Claude session id;
-- Codex thread id;
-- OpenCode session id.
+- Codex thread id.
 
 Resume uses this state when possible. Retry clears run output and session state.
 
