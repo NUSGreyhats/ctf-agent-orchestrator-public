@@ -10,7 +10,7 @@ This project streamlines that setup. It provisions an isolated cloud VM with the
 
 Out of the box, agents are already effective. But we can do better by providing **skills** — structured workflows that guide how the agent should approach different challenge types (forensics, reversing, crypto, pwn, web, etc.). Skills act as a feedback loop: when you notice an agent going down a rabbithole or missing an obvious technique, you encode that knowledge into a skill so it does not repeat the mistake. Over time, the skill library compounds and the solve rate improves.
 
-Skills live in `skills/`. During environment setup they are installed into agent-specific skill directories where supported, and the runtime deploy copies `skills/` to the VM alongside the app.
+Repo-owned skills live in `skills/`. During environment setup, repo-owned and external skills are copied into the generated `all-skills/` catalog. The web app then symlinks the selected skills into each challenge run's project-level agent skill directories, such as `.claude/skills` and `.codex/skills`.
 
 ## Supported Agents
 
@@ -97,7 +97,7 @@ Optional Discord bot for team coordination:
 ### Infrastructure and Deployment
 
 - **Cloud providers** — Terraform configs for Hetzner Cloud, DigitalOcean, and GCP.
-- **Runtime allowlist deploy** — Deploys copy only runtime project files (`environment`, `webapp`, `skills`, `mcps`, `hooks`, `README.md`, `DESIGN.md`) instead of the whole repo. Local `.git/`, `infra/`, Terraform state/vars, and local caches are not copied to the VM.
+- **Runtime allowlist deploy** — Deploys copy only runtime project files (`environment`, `webapp`, `skills`, `mcps`, `hooks`, `README.md`, `DESIGN.md`) instead of the whole repo. Local `.git/`, `infra/`, Terraform state/vars, and local caches are not copied to the VM. Runtime `challenges`, `state`, and generated `all-skills` are preserved.
 - **Runtime data preservation** — Deploy sync preserves `/root/ctf-agent-wrapper/challenges` and `/root/ctf-agent-wrapper/state` on the VM.
 - **GDB MCP server** — Persistent GDB session for kernel/binary debugging, registered for Claude, Codex, and OpenCode.
 - **IDA Pro skill** — Headless static analysis through the `analyze-with-ida-domain-api` skill, backed by IDA Pro's Python Domain API.
@@ -216,6 +216,7 @@ webapp/         Starlette/ASGI app for challenge management and agent streaming
   plugins/      CTF platform integrations (CTFd, rCTF, HTB CTF)
   static/       Frontend (vanilla JS, CSS)
 skills/         Agent skills (methodology, forensics, tool-specific, community)
+all-skills/     Generated runtime skill catalog populated by environment setup
 hooks/          Agent hook/tool files, including OpenCode collaboration tool
 mcps/           MCP servers (GDB debugger)
 state/          Runtime state on the VM: metadata, output logs, connections

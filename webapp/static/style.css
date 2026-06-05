@@ -1560,6 +1560,37 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   border: 1px solid var(--border); border-radius: 6px;
   color: var(--text); font-size: 0.75rem;
 }
+.skill-toolbar {
+  display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.5rem;
+}
+.skill-checklist {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 0.4rem; max-height: 360px; overflow: auto;
+  padding: 0.4rem; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.skill-checklist-compact {
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  max-height: 210px;
+}
+.skill-check {
+  display: flex; align-items: flex-start; gap: 0.4rem;
+  padding: 0.42rem 0.5rem; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--bg-card);
+  min-width: 0;
+}
+.skill-check input { margin-top: 0.15rem; flex: 0 0 auto; }
+.skill-name {
+  display: block; color: var(--text); font-size: 0.72rem;
+  font-family: var(--mono); overflow-wrap: anywhere;
+}
+.skill-desc {
+  display: block; color: var(--text-muted); font-size: 0.66rem;
+  line-height: 1.25; margin-top: 0.18rem;
+  display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+.skill-edit-section { margin-top: 0.75rem; }
 .import-ch-solved { opacity: 0.6; }
 .import-select-bar { display: flex; gap: 0.4rem; margin-bottom: 0.4rem; }
 

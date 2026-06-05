@@ -18,6 +18,7 @@ infra/terraform.tfstate
 infra/terraform.tfstate.backup
 infra/terraform.tfvars
 .claude/
+all-skills/
 challenges/
 state/
 token
