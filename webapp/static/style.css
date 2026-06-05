@@ -1580,6 +1580,13 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .skill-toolbar {
   display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.5rem;
 }
+.skill-upload-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+.skill-upload-row input[type="file"] {
+  max-width: 260px; color: var(--text-muted); font-size: 0.72rem;
+}
 .skill-checklist {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   gap: 0.4rem; max-height: 360px; overflow: auto;
