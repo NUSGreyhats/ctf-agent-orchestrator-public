@@ -214,6 +214,7 @@
           <div id="settings-vpn-peer" class="vpn-peer-info hidden">
             <div class="vpn-kv"><span class="vpn-k">Peer</span> <span id="settings-vpn-peer-key"></span></div>
             <div class="vpn-kv"><span class="vpn-k">Endpoint</span> <span id="settings-vpn-peer-endpoint"></span></div>
+            <div class="vpn-kv"><span class="vpn-k">Handshake</span> <span id="settings-vpn-peer-handshake"></span></div>
             <div class="vpn-kv"><span class="vpn-k">Transfer</span> <span id="settings-vpn-peer-transfer"></span></div>
           </div>
           <div class="form-group">
@@ -223,7 +224,7 @@
           <div class="form-group">
             <label for="settings-vpn-networks">Internal Network CIDR(s)</label>
             <input type="text" id="settings-vpn-networks" placeholder="e.g. 10.0.0.0/24, 192.168.1.0/24">
-            <span class="checkbox-hint">Networks the server should route through the VPN tunnel</span>
+            <span class="checkbox-hint">Networks reachable from this client that the server should route through the VPN tunnel</span>
           </div>
           <div class="form-group form-group-inline">
             <label class="checkbox-label">
@@ -236,6 +237,11 @@
             <label>Client Config (copy to your WireGuard client)</label>
             <pre id="settings-vpn-config-text" class="vpn-config-block"></pre>
             <button id="btn-settings-vpn-copy" class="btn-ghost btn-sm">Copy</button>
+          </div>
+          <div id="settings-vpn-client-setup" class="hidden">
+            <label>Linux-only reverse-routing setup</label>
+            <pre id="settings-vpn-setup-text" class="vpn-config-block"></pre>
+            <button id="btn-settings-vpn-setup-copy" class="btn-ghost btn-sm">Copy</button>
           </div>
         </div>
       </div>
@@ -373,6 +379,7 @@
         <button id="btn-start" class="btn-primary hidden">Start</button>
         <button id="btn-retry" class="btn-primary hidden">Retry</button>
         <button id="btn-resume" class="btn-secondary hidden">Resume</button>
+        <button id="btn-add-run" class="btn-ghost hidden">Add Agent</button>
         <button id="btn-unsolve" class="btn-primary hidden">Un-solve</button>
         <button id="btn-stop" class="btn-danger hidden">Stop</button>
         <button id="btn-sidebar-toggle" class="btn-ghost btn-sidebar-toggle">Panel</button>
@@ -476,6 +483,36 @@
         </div>
 
       </div>
+    </div>
+  </div>
+
+  <!-- Add Agent Modal -->
+  <div id="add-run-overlay" class="modal-overlay hidden">
+    <div class="modal add-run-modal">
+      <div class="modal-header">
+        <h2>Add Agent</h2>
+        <button id="add-run-close" class="btn-icon">&times;</button>
+      </div>
+      <div class="form-group">
+        <label>Agents</label>
+        <div id="add-run-agent-list" class="agent-row-list"></div>
+        <button type="button" id="btn-add-run-agent-row" class="btn-ghost btn-sm">+ Add Agent</button>
+      </div>
+      <div class="form-group">
+        <label for="add-run-prompt">Run Prompt</label>
+        <textarea id="add-run-prompt" rows="4" placeholder="Optional instructions for the new agent(s)..."></textarea>
+        <span class="checkbox-hint">These instructions are appended to the standard challenge prompt.</span>
+      </div>
+      <div class="form-group">
+        <label>Skills</label>
+        <div class="skill-toolbar">
+          <button type="button" class="btn-ghost btn-sm" data-skill-action="challenge-defaults" data-skill-target="#add-run-skill-list">Challenge Defaults</button>
+          <button type="button" class="btn-ghost btn-sm" data-skill-action="all" data-skill-target="#add-run-skill-list">All</button>
+          <button type="button" class="btn-ghost btn-sm" data-skill-action="none" data-skill-target="#add-run-skill-list">None</button>
+        </div>
+        <div id="add-run-skill-list" class="skill-checklist skill-checklist-compact"></div>
+      </div>
+      <button id="btn-add-run-submit" class="btn-primary btn-full">Add &amp; Start</button>
     </div>
   </div>
 

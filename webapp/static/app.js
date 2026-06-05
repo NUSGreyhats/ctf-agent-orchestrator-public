@@ -1401,6 +1401,7 @@ function updateButtons(status) {
   $("#btn-start").classList.toggle("hidden", status !== "pending");
   $("#btn-retry").classList.toggle("hidden", status !== "failed" && status !== "completed");
   $("#btn-resume").classList.toggle("hidden", status !== "failed" && status !== "completed");
+  $("#btn-add-run").classList.toggle("hidden", status === "solved");
   $("#btn-unsolve").classList.toggle("hidden", status !== "solved");
 
   const stopBtn = $("#btn-stop");
@@ -1580,6 +1581,53 @@ async function stopRun(runId = "") {
 $("#btn-stop").addEventListener("click", async () => {
   await stopRun();
 });
+
+function openAddRunModal() {
+  const list = $("#add-run-agent-list");
+  list.innerHTML = "";
+  const name = defaultAgent || primaryAgentName();
+  addAgentRow(list, name, agentModels[name] || "", agentEfforts[name] || "");
+  renderSkillChecklist($("#add-run-skill-list"), currentChallengeDefaultSkills);
+  $("#add-run-prompt").value = "";
+  $("#add-run-overlay").classList.remove("hidden");
+}
+
+function closeAddRunModal() {
+  $("#add-run-overlay").classList.add("hidden");
+}
+
+async function submitAddRun() {
+  if (!currentChallengeId) return;
+  const agents = getAgentRows($("#add-run-agent-list"));
+  if (!agents.length) {
+    showToast("Add at least one agent", "error");
+    return;
+  }
+  const btn = $("#btn-add-run-submit");
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Adding...";
+  const res = await api(`/api/challenges/${currentChallengeId}/runs`, {
+    method: "POST",
+    body: JSON.stringify({
+      agents,
+      prompt: $("#add-run-prompt").value.trim(),
+      enabled_skills: getSelectedSkills($("#add-run-skill-list")),
+    }),
+  });
+  btn.disabled = false;
+  btn.textContent = oldText;
+  if (!res) return;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) {
+    showToast(data.error || "Failed to add agent", "error");
+    return;
+  }
+  closeAddRunModal();
+  const count = (data.runs || []).length;
+  showToast(`Added ${count} agent${count === 1 ? "" : "s"}`, "success");
+  openChallenge(currentChallengeId);
+}
 
 $("#btn-add-flag-format").addEventListener("click", addFlagFormatAndScan);
 $("#flag-format-input").addEventListener("keydown", (e) => {
@@ -4578,6 +4626,15 @@ $("#btn-active-run-stop").addEventListener("click", () => {
     : currentRuns[0]?.id;
   if (runId) stopRun(runId);
 });
+$("#btn-add-run").addEventListener("click", openAddRunModal);
+$("#add-run-close").addEventListener("click", closeAddRunModal);
+$("#add-run-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "add-run-overlay") closeAddRunModal();
+});
+$("#btn-add-run-agent-row").addEventListener("click", () => {
+  addAgentRow($("#add-run-agent-list"));
+});
+$("#btn-add-run-submit").addEventListener("click", submitAddRun);
 $("#run-skill-close").addEventListener("click", closeRunSkillsModal);
 $("#run-skill-overlay").addEventListener("click", (e) => {
   if (e.target.id === "run-skill-overlay") closeRunSkillsModal();
@@ -5092,6 +5149,16 @@ function formatVpnBytes(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1) + " MB";
 }
 
+function formatVpnHandshake(timestamp) {
+  const ts = Number(timestamp || 0);
+  if (!ts) return "never";
+  const age = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (age < 60) return `${age}s ago`;
+  if (age < 3600) return `${Math.floor(age / 60)}m ago`;
+  if (age < 86400) return `${Math.floor(age / 3600)}h ago`;
+  return `${Math.floor(age / 86400)}d ago`;
+}
+
 // (Manager settings removed — no manager in new collaborative model)
 
 function updateSettingsVpnStatus(data) {
@@ -5111,6 +5178,7 @@ function updateSettingsVpnStatus(data) {
     peerEl.classList.remove("hidden");
     $("#settings-vpn-peer-key").textContent = data.peer.public_key || "—";
     $("#settings-vpn-peer-endpoint").textContent = data.peer.endpoint || "—";
+    $("#settings-vpn-peer-handshake").textContent = formatVpnHandshake(data.peer.latest_handshake);
     const rx = parseInt(data.peer.transfer_rx || 0);
     const tx = parseInt(data.peer.transfer_tx || 0);
     $("#settings-vpn-peer-transfer").textContent = `${formatVpnBytes(rx)} rx / ${formatVpnBytes(tx)} tx`;
@@ -5316,6 +5384,13 @@ $("#btn-settings-vpn-configure").addEventListener("click", async () => {
   const data = await res.json();
   $("#settings-vpn-config-text").textContent = data.client_config;
   $("#settings-vpn-client-config").classList.remove("hidden");
+  if (data.client_setup) {
+    $("#settings-vpn-setup-text").textContent = data.client_setup;
+    $("#settings-vpn-client-setup").classList.remove("hidden");
+  } else {
+    $("#settings-vpn-setup-text").textContent = "";
+    $("#settings-vpn-client-setup").classList.add("hidden");
+  }
 
   const vpnRes = await api("/api/vpn");
   if (vpnRes) updateSettingsVpnStatus(await vpnRes.json());
@@ -5326,6 +5401,15 @@ $("#btn-settings-vpn-copy").addEventListener("click", () => {
   const text = $("#settings-vpn-config-text").textContent;
   navigator.clipboard.writeText(text).then(() => {
     const btn = $("#btn-settings-vpn-copy");
+    btn.textContent = "Copied!";
+    setTimeout(() => { btn.textContent = "Copy"; }, 1200);
+  });
+});
+
+$("#btn-settings-vpn-setup-copy").addEventListener("click", () => {
+  const text = $("#settings-vpn-setup-text").textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = $("#btn-settings-vpn-setup-copy");
     btn.textContent = "Copied!";
     setTimeout(() => { btn.textContent = "Copy"; }, 1200);
   });
