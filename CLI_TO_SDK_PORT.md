@@ -172,6 +172,39 @@ Codex doesn't have a Python SDK — it exposes a JSON-RPC 2.0 server
 over stdio. You spawn `codex app-server` as a subprocess and
 communicate via newline-delimited JSON on stdin/stdout.
 
+### Protocol source of truth
+
+Do not infer the app-server event surface from old CLI JSON examples.
+The local Codex binary can generate the current protocol bindings:
+
+```bash
+codex app-server generate-ts --experimental --out /tmp/codex-proto-ts
+codex app-server generate-json-schema --experimental --out /tmp/codex-proto-schema
+```
+
+Review `ServerNotification.ts`, `ServerRequest.ts`, and
+`v2/ThreadItem.ts` whenever updating the parser. As of Codex CLI
+0.135.0, important notifications include:
+
+- `item/started`, `item/completed`, `rawResponseItem/completed`
+- `item/agentMessage/delta`, `item/reasoning/textDelta`,
+  `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`
+- `item/commandExecution/outputDelta`, `command/exec/outputDelta`,
+  `process/outputDelta`, `process/exited`
+- `item/fileChange/patchUpdated`, `turn/diff/updated`
+- `turn/plan/updated`, `item/plan/delta`
+- `thread/goal/updated`, `thread/goal/cleared`
+- `warning`, `guardianWarning`, `configWarning`, `deprecationNotice`
+- `model/rerouted`, `model/verification`
+- `thread/tokenUsage/updated`, `thread/status/changed`, `turn/completed`
+
+Current server requests that need client responses include approvals,
+dynamic tool calls, request-user-input, MCP elicitation, ChatGPT token
+refresh, and attestation generation. Response payloads must match the
+generated schemas; for example `item/tool/requestUserInput` returns
+`{"answers": {...}}` and MCP elicitation uses
+`{"action": "accept" | "decline" | "cancel", "content": ..., "_meta": ...}`.
+
 ### Spawn and handshake
 
 ```python
@@ -298,9 +331,17 @@ while True:
                 "contentItems": [{"type": "text", "text": result}],
                 "success": True,
             })
+        elif server_method == "item/tool/requestUserInput":
+            await send_response(msg["id"], {"answers": {}})
+        elif server_method == "mcpServer/elicitation/request":
+            await send_response(msg["id"], {
+                "action": "accept",
+                "content": {},
+                "_meta": None,
+            })
         else:
-            # Auto-approve everything else
-            await send_response(msg["id"], {"accept": True})
+            # Approvals use method-specific generated response shapes.
+            await send_response(msg["id"], {"decision": "accept"})
 ```
 
 ### Continue a conversation
