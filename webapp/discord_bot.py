@@ -277,6 +277,7 @@ class DiscordBot:
     async def respond_to_interaction(
         self, interaction_id: str, interaction_token: str,
         content: str = "", embed: dict | None = None,
+        components: list[dict] | None = None,
         flags: int = 0,
     ) -> None:
         data: dict[str, Any] = {}
@@ -284,6 +285,8 @@ class DiscordBot:
             data["content"] = _truncate(content)
         if embed:
             data["embeds"] = [embed]
+        if components:
+            data["components"] = components
         if flags:
             data["flags"] = flags
         try:
@@ -310,8 +313,9 @@ class DiscordBot:
     async def followup_interaction(
         self, interaction_token: str,
         content: str = "", embed: dict | None = None,
+        components: list[dict] | None = None,
     ) -> None:
-        app_id = self.application_id
+        app_id = self.application_id or await self.fetch_application_id()
         if not app_id:
             return
         payload: dict[str, Any] = {}
@@ -319,6 +323,8 @@ class DiscordBot:
             payload["content"] = _truncate(content)
         if embed:
             payload["embeds"] = [embed]
+        if components:
+            payload["components"] = components
         try:
             await self._request(
                 "POST",
@@ -327,6 +333,30 @@ class DiscordBot:
             )
         except Exception as exc:
             log.error("Failed to send followup: %s", exc)
+
+    async def open_modal(
+        self,
+        interaction_id: str,
+        interaction_token: str,
+        custom_id: str,
+        title: str,
+        components: list[dict],
+    ) -> None:
+        try:
+            await self._request(
+                "POST",
+                f"/interactions/{interaction_id}/{interaction_token}/callback",
+                json={
+                    "type": 9,
+                    "data": {
+                        "custom_id": custom_id[:100],
+                        "title": title[:45],
+                        "components": components,
+                    },
+                },
+            )
+        except Exception as exc:
+            log.error("Failed to open modal: %s", exc)
 
     async def create_thread(self, name: str, initial_message: str = "") -> str | None:
         try:
@@ -435,13 +465,16 @@ class DiscordBot:
             return None
 
     async def send_message(
-        self, thread_id: str, content: str = "", embed: dict | None = None
+        self, thread_id: str, content: str = "", embed: dict | None = None,
+        components: list[dict] | None = None,
     ) -> dict | None:
         payload: dict[str, Any] = {}
         if content:
             payload["content"] = _truncate(content)
         if embed:
             payload["embeds"] = [embed]
+        if components:
+            payload["components"] = components
         if not payload:
             return None
         try:
@@ -460,9 +493,10 @@ class DiscordBot:
             return None
 
     async def send_channel_message(
-        self, content: str = "", embed: dict | None = None
+        self, content: str = "", embed: dict | None = None,
+        components: list[dict] | None = None,
     ) -> dict | None:
-        return await self.send_message(self.channel_id, content, embed)
+        return await self.send_message(self.channel_id, content, embed, components)
 
     async def rename_thread(self, thread_id: str, name: str) -> bool:
         try:
