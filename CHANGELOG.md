@@ -5,8 +5,7 @@
 ### IDA Pro via Skill
 
 Restored the `analyze-with-ida-domain-api` skill for headless IDA Pro
-analysis through IDA's Python Domain API. Claude, Codex, and OpenCode no
-longer register an `ida` MCP server; Claude/Codex agents load the skill
+analysis through IDA's Python Domain API. Claude/Codex agents load the skill
 and write focused Python analysis scripts instead.
 
 ### HTB Multi-Answer Challenges
@@ -69,8 +68,7 @@ Updated README.md and DESIGN.md to reflect current state:
 - Added Discord integration section
 - Added per-challenge statistics
 - Fixed state persistence paths
-- Updated Supported Agents table (Copilot has session resume and effort
-  levels, Codex/OpenCode don't have subagent tabs)
+- Updated Supported Agents table
 - Updated project structure and settings table
 
 ### Four Solving Modes

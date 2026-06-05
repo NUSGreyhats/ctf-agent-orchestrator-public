@@ -14,7 +14,8 @@ Read the challenge description. Determine the expected answer format
 
 ## Step 2: Quick Flag Search
 
-Run `ctfgrep` first — it searches plaintext, base64, hex, and XOR:
+Use `ctfgrep` for quick flag searches during triage. It searches
+plaintext, base64, hex, and XOR:
 
 ```bash
 ctfgrep -i <directory> "flag{"

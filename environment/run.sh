@@ -121,9 +121,7 @@ run_dependency_graph() {
     005_memory-forensics.sh
     006_disk-forensics.sh
     007_file-forensics.sh
-    008_install-copilot-cli.sh
     009_install-crypto.sh
-    011_install-opencode.sh
     012_install-wireguard.sh
     013_install-skills.sh
     015_install-python-tooling.sh

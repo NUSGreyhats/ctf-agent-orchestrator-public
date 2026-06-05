@@ -1,6 +1,6 @@
 # CTF Solver Web App
 
-A web application that uses AI coding agents (Claude Code, Codex, GitHub Copilot CLI, and OpenCode) to solve CTF challenges. Upload challenge files, describe the problem, and watch an agent work through it in real time.
+A web application that uses AI coding agents (Claude Code and Codex) to solve CTF challenges. Upload challenge files, describe the problem, and watch an agent work through it in real time.
 
 ## Architecture
 
@@ -26,9 +26,7 @@ Methodology and domain skills live in `/root/ctf-agent-wrapper/skills/`. `enviro
 - Python 3.12+ with `starlette` and `uvicorn`
 - Claude Code CLI (`claude`) — install via `environment/003_install-claude-code.sh`
 - Codex CLI (`codex`) — install via `environment/010_install-codex.sh`
-- GitHub Copilot CLI (`copilot`) — install via `environment/008_install-copilot-cli.sh`
-- OpenCode CLI (`opencode`) — install via `environment/011_install-opencode.sh`
-- At least one agent authenticated (`claude auth login`, `codex login`, `copilot login`, or `opencode auth login`)
+- At least one agent authenticated (`claude auth login` or `codex login`)
 
 ### Running
 
@@ -53,8 +51,6 @@ Supported providers:
 |---|---|---|---|
 | Claude Code | `claude -p --dangerously-skip-permissions` | `stream-json` | Hardcoded list: Provider default, Opus, Sonnet, Haiku |
 | Codex | `codex exec --json --dangerously-bypass-approvals-and-sandbox` | raw JSON events | Provider default plus models from local Codex cache/config |
-| GitHub Copilot CLI | `copilot -p --yolo` | `json` | Hardcoded curated GPT/Claude/Gemini list |
-| OpenCode | `opencode run --format json` | raw JSON events | Discovered dynamically from `opencode models` |
 
 The backend keeps challenge creation, retry, stop, and steer behavior consistent across providers while mapping each CLI's native event stream into the same UI model.
 
@@ -64,11 +60,7 @@ For Codex, the model dropdown is populated from `~/.codex/models_cache.json` and
 
 Codex effort forwarding is compatibility-guarded: if a model/effort combination is not supported by the local Codex model cache, the backend omits the effort override and falls back to provider defaults instead of failing the run.
 
-For OpenCode, the model dropdown is populated from the machine's configured providers by running `opencode models`. If discovery fails, the UI falls back to `Provider default` and the backend omits `--model`, letting OpenCode use its own configured default.
-
-For Copilot, the model dropdown is now a fixed curated list to avoid probe/login dependency during UI load.
-
-The effort dropdown appears only for providers that this integration can map directly to CLI effort controls (currently Claude and Codex). Copilot and OpenCode continue to use provider defaults.
+The effort dropdown appears only for providers that this integration can map directly to CLI effort controls.
 
 ### Default Agent Toggle
 
@@ -81,10 +73,6 @@ A persistent toggle in the dashboard header sets the default agent for new chall
 3. **Steer** — Send guidance to a running agent. Stops the current process, then resumes the provider session with your message.
 4. **Stop** — Terminate the agent process mid-solve.
 5. **Delete** — Remove challenge and all associated files.
-
-### Autonomous Mode
-
-A checkbox (default on for Copilot) that appends instructions telling the agent to keep trying different approaches without stopping to ask for guidance.
 
 ### Real-time Activity Stream
 
@@ -112,8 +100,6 @@ Accessible via the "Usage" button in the dashboard header. Shows per-agent stats
 
 - **Claude** — Auth info (email, plan, org), total sessions/messages, token usage by model (from `~/.claude/stats-cache.json`), daily activity bar chart
 - **Codex** — Auth status inferred from `~/.codex/auth.json`, cached auth method, stored session count
-- **Copilot** — Auth info (GitHub user, host, default model from `~/.copilot/config.json`), session count
-- **OpenCode** — Auth status inferred from `~/.local/share/opencode/auth.json`, configured providers, stored project count
 - **Challenges** — Per-agent totals: challenges attempted, solved, failed, average and total duration
 
 ### Other Features

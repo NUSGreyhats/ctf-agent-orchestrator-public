@@ -23,7 +23,6 @@ class AgentProvider:
     models: tuple[tuple[str, str], ...]
     default_model: str
     auth_connect_command: str
-    autonomous_default: bool
     badge_mode: str
     build_command: BuildCommand
     normalize_saved_events: NormalizeSavedEvents
@@ -64,7 +63,6 @@ class AgentProvider:
             ],
             "default_model": default_model,
             "auth_connect_command": self.auth_connect_command,
-            "autonomous_default": self.autonomous_default,
             "badge_mode": self.badge_mode,
             "effort_levels": [
                 {"value": value, "label": label}

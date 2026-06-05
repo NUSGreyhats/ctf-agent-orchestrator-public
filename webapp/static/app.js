@@ -27,6 +27,8 @@ const pendingTools = new Map();
 let currentRuns = [];               // run objects for current challenge
 let activeRunId = null;             // which run tab is active
 let currentChallengeMode = "single";
+let currentChallengeDefaultSkills = [];
+let runSkillModalRunId = null;
 let wsConnections = new Map();      // run_id -> WebSocket
 let globalWs = null;
 let historyLoadingRuns = new Set(); // run_ids currently replaying saved chat history
@@ -96,17 +98,12 @@ function getAgentMeta(name) {
     effort_levels: [],
     default_effort: "",
     auth_connect_command: "claude auth login",
-    autonomous_default: false,
     badge_mode: "model",
   };
 }
 
 function isParallelMode(mode) {
   return mode === "parallel";
-}
-
-function getAgentAutonomousDefault(agentName) {
-  return Boolean(getAgentMeta(agentName).autonomous_default);
 }
 
 // === Agent UI Renderers ===
@@ -274,6 +271,18 @@ function renderSkillChecklist(container, selectedNames) {
   }).join("");
 }
 
+function renderSkillReadonlyList(container, selectedNames) {
+  if (!container) return;
+  const selected = normalizeSkillNames(selectedNames);
+  if (!selected.length) {
+    container.innerHTML = `<span class="skill-pill skill-pill-muted">None</span>`;
+    return;
+  }
+  container.innerHTML = selected.map((name) =>
+    `<span class="skill-pill">${esc(name)}</span>`
+  ).join("");
+}
+
 function getSelectedSkills(container) {
   if (!container) return [];
   return Array.from(container.querySelectorAll(".skill-cb:checked"))
@@ -297,6 +306,9 @@ document.addEventListener("click", (e) => {
   if (action === "all") setSkillChecklist(container, allSkillNames());
   if (action === "none") setSkillChecklist(container, []);
   if (action === "defaults") setSkillChecklist(container, defaultEnabledSkills);
+  if (action === "challenge-defaults") {
+    setSkillChecklist(container, currentChallengeDefaultSkills);
+  }
 });
 
 // === API ===
@@ -857,7 +869,6 @@ async function triggerSync(connId) {
   // Set up preview controls using saved agent settings
   populateAgentList($("#import-agent-list"));
   renderSkillChecklist($("#import-skill-list"), defaultEnabledSkills);
-  $("#import-autonomous").checked = getAgentAutonomousDefault(primaryAgentName());
   $("#import-flag").value = defaultFlagFormat;
 
   renderImportPreview();
@@ -944,7 +955,6 @@ $("#add-challenge-menu").addEventListener("click", (e) => {
 $("#btn-new-challenge").addEventListener("click", () => {
   populateAgentList($("#challenge-agent-list"));
   renderSkillChecklist($("#challenge-skill-list"), defaultEnabledSkills);
-  $("#challenge-autonomous").checked = getAgentAutonomousDefault(primaryAgentName());
   $("#challenge-flag").value = defaultFlagFormat;
   $("#modal-overlay").classList.remove("hidden");
   $("#challenge-name").focus();
@@ -1062,7 +1072,6 @@ $("#challenge-form").addEventListener("submit", async (e) => {
   fd.append("description", $("#challenge-desc").value);
   fd.append("flag_format", $("#challenge-flag").value);
   fd.append("mode", mode);
-  fd.append("autonomous", $("#challenge-autonomous").checked ? "true" : "false");
   fd.append("agents", JSON.stringify(agents));
   fd.append("enabled_skills", JSON.stringify(getSelectedSkills($("#challenge-skill-list"))));
 
@@ -1113,7 +1122,6 @@ $("#btn-bulk-upload").addEventListener("click", () => {
   resetBulkModal();
   populateAgentList($("#bulk-agent-list"));
   renderSkillChecklist($("#bulk-skill-list"), defaultEnabledSkills);
-  $("#bulk-autonomous").checked = getAgentAutonomousDefault(primaryAgentName());
   $("#bulk-flag").value = defaultFlagFormat;
   bulkOverlay.classList.remove("hidden");
 });
@@ -1246,7 +1254,6 @@ $("#btn-bulk-submit").addEventListener("click", async () => {
         enabled_skills: getSelectedSkills($("#bulk-skill-list")),
         model: "",
         effort: "",
-        autonomous: $("#bulk-autonomous").checked,
         paused: $("#bulk-paused") ? $("#bulk-paused").checked : false,
         challenges: challengeConfigs,
       }),
@@ -1331,8 +1338,8 @@ async function openChallenge(id) {
     : "";
   renderFlagFormats();
   $("#detail-files").textContent = c.files.length ? `Files: ${c.files.join(", ")}` : "No files";
-  const enabledSkillNames = c.enabled_skills || [];
-  renderSkillChecklist($("#detail-skill-list"), enabledSkillNames);
+  currentChallengeDefaultSkills = normalizeSkillNames(c.enabled_skills || []);
+  renderSkillReadonlyList($("#detail-skill-list"), currentChallengeDefaultSkills);
 
   const errorBanner = $("#error-banner");
   if (c.error) {
@@ -1540,7 +1547,6 @@ $("#flag-format-input").addEventListener("keydown", (e) => {
     addFlagFormatAndScan();
   }
 });
-$("#btn-save-challenge-skills").addEventListener("click", saveChallengeSkills);
 $("#btn-add-manual-flag").addEventListener("click", addManualFlag);
 $("#manual-flag-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
@@ -2275,7 +2281,10 @@ function initRunTabs(runs) {
     if (useSplit) {
       const pane = document.createElement("div");
       pane.className = "split-pane";
-      pane.innerHTML = `<div class="split-pane-header"><span class="run-tab-dot ${dotClass}"></span>${esc(label)}</div>`;
+      pane.innerHTML = `<div class="split-pane-header"><span class="run-tab-dot ${dotClass}"></span><span class="split-pane-title">${esc(label)}</span><button type="button" class="btn-ghost btn-xs split-skill-btn">Skills</button></div>`;
+      pane.querySelector(".split-skill-btn").addEventListener("click", () => {
+        openRunSkillsModal(run.id);
+      });
       const feed = document.createElement("div");
       feed.id = `feed-${run.id}`;
       feed.className = "panel-body run-feed active";
@@ -2348,7 +2357,10 @@ function addRunTab(run) {
   } else {
     const pane = document.createElement("div");
     pane.className = "split-pane";
-    pane.innerHTML = `<div class="split-pane-header"><span class="run-tab-dot ${dotClass}"></span>${esc(label)}</div>`;
+    pane.innerHTML = `<div class="split-pane-header"><span class="run-tab-dot ${dotClass}"></span><span class="split-pane-title">${esc(label)}</span><button type="button" class="btn-ghost btn-xs split-skill-btn">Skills</button></div>`;
+    pane.querySelector(".split-skill-btn").addEventListener("click", () => {
+      openRunSkillsModal(run.id);
+    });
     const feed = document.createElement("div");
     feed.id = `feed-${run.id}`;
     feed.className = "panel-body run-feed active";
@@ -2402,6 +2414,10 @@ function updateRunTabDot(runId, status) {
 // === Steer Run Select ===
 function updateSteerRunSelect() {
   const label = $("#steer-run-select");
+  const skillBtn = $("#btn-active-run-skills");
+  if (skillBtn) {
+    skillBtn.classList.toggle("hidden", !currentRuns.length);
+  }
   if (isParallelMode(currentChallengeMode) && currentRuns.length > 1) {
     const activeRun = currentRuns.find((r) => r.id === activeRunId);
     if (activeRun) {
@@ -2414,6 +2430,115 @@ function updateSteerRunSelect() {
   } else {
     label.classList.add("hidden");
   }
+}
+
+function updateRunFromSummary(summary) {
+  const run = currentRuns.find((r) => r.id === summary.id);
+  if (!run) return;
+  const wasSolving = run.status === "solving";
+  run.agent = summary.agent || run.agent;
+  run.model = summary.model || run.model;
+  run.effort = summary.effort || run.effort || "";
+  run.status = summary.status || run.status;
+  run.error = summary.error || null;
+  run.duration_ms = durationMs(summary.duration_ms);
+  run.enabled_skills = normalizeSkillNames(summary.enabled_skills || []);
+  run.skill_override = !!summary.skill_override;
+  if (run.status === "solving") {
+    if (!wasSolving || !run._timerStartedAt) run._timerStartedAt = Date.now();
+  } else {
+    delete run._timerStartedAt;
+  }
+  updateRunTabDot(run.id, run.status);
+}
+
+function openRunSkillsModal(runId) {
+  const run = currentRuns.find((r) => r.id === runId);
+  if (!run) {
+    showToast("Run not found", "error");
+    return;
+  }
+  runSkillModalRunId = run.id;
+  const meta = getAgentMeta(run.agent);
+  const label = runTabLabel(run, meta);
+  $("#run-skill-subtitle").textContent = `${label} · ${run.id}`;
+  const override = !!run.skill_override;
+  const challengeSolved = $("#detail-status").textContent === "solved";
+  $("#run-skill-inheritance").textContent = challengeSolved
+    ? "This challenge is solved; run skills are locked."
+    : override
+    ? "This run has custom skills."
+    : "This run is inheriting the challenge defaults.";
+  renderSkillChecklist(
+    $("#run-skill-list"),
+    run.enabled_skills || currentChallengeDefaultSkills
+  );
+  if (challengeSolved) {
+    $("#run-skill-list").querySelectorAll(".skill-cb").forEach((cb) => {
+      cb.disabled = true;
+    });
+  }
+  $("#btn-run-skills-apply").disabled = challengeSolved;
+  $("#btn-run-skills-apply-all").disabled = challengeSolved;
+  $("#btn-run-skills-reset").disabled = challengeSolved || !override;
+  $("#run-skill-overlay").classList.remove("hidden");
+}
+
+function closeRunSkillsModal() {
+  runSkillModalRunId = null;
+  $("#run-skill-overlay").classList.add("hidden");
+}
+
+function setRunSkillButtonsDisabled(disabled) {
+  [
+    "#btn-run-skills-apply",
+    "#btn-run-skills-apply-all",
+    "#btn-run-skills-reset",
+  ].forEach((sel) => {
+    const btn = $(sel);
+    if (btn) btn.disabled = disabled;
+  });
+}
+
+async function applyRunSkills(options = {}) {
+  if (!currentChallengeId || !runSkillModalRunId) return;
+  const body = {
+    resume: true,
+    apply_to_all: !!options.applyToAll,
+  };
+  if (options.reset) {
+    body.reset = true;
+  } else {
+    body.enabled_skills = getSelectedSkills($("#run-skill-list"));
+  }
+  setRunSkillButtonsDisabled(true);
+  const res = await api(
+    `/api/challenges/${currentChallengeId}/runs/${runSkillModalRunId}/skills`,
+    { method: "PUT", body: JSON.stringify(body) }
+  );
+  setRunSkillButtonsDisabled(false);
+  if (!res) return;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) {
+    showToast(data.error || "Failed to update run skills", "error");
+    return;
+  }
+  for (const summary of data.runs || []) {
+    updateRunFromSummary(summary);
+  }
+  if (data.status) {
+    updateStatusBadge(data.status);
+    updateButtons(data.status);
+    if (data.status === "solving") startTimer();
+  }
+  closeRunSkillsModal();
+  const count = (data.runs || []).length;
+  showToast(
+    options.applyToAll
+      ? `Updated ${count} run${count === 1 ? "" : "s"}`
+      : "Run skills updated",
+    "success"
+  );
 }
 
 // === Files Run Select ===
@@ -2584,29 +2709,6 @@ async function addManualFlag() {
     setFlagStatus(storedFlag, data.status, data.meta || null);
   }
   showToast(data.added ? "Flag added" : "Flag already exists");
-}
-
-async function saveChallengeSkills() {
-  if (!currentChallengeId) return;
-  const btn = $("#btn-save-challenge-skills");
-  const enabledSkills = getSelectedSkills($("#detail-skill-list"));
-  btn.disabled = true;
-  const oldText = btn.textContent;
-  btn.textContent = "Saving...";
-  const res = await api(`/api/challenges/${currentChallengeId}/skills`, {
-    method: "PUT",
-    body: JSON.stringify({ enabled_skills: enabledSkills }),
-  });
-  btn.disabled = false;
-  btn.textContent = oldText;
-  if (!res) return;
-  const data = await res.json();
-  if (data.error) {
-    showToast(data.error, "error");
-    return;
-  }
-  renderSkillChecklist($("#detail-skill-list"), data.enabled_skills || []);
-  showToast("Skills saved", "success");
 }
 
 function makeCopyBtn(getText) {
@@ -3060,6 +3162,28 @@ function renderRunEvent(runId, event) {
     }
     renderStats();
     updateTimer();
+    return;
+  }
+
+  if (event.type === "run_skills") {
+    const rid = event.run_id || runId;
+    const run = currentRuns.find((r) => r.id === rid);
+    if (run) {
+      run.enabled_skills = normalizeSkillNames(event.enabled_skills || []);
+      run.skill_override = !!event.skill_override;
+    }
+    const count = normalizeSkillNames(event.enabled_skills || []).length;
+    const mode = event.skill_override ? "custom" : "default";
+    appendMsg(
+      feed,
+      `${event.message || "Run skills updated."} ${count} ${mode} skill${count === 1 ? "" : "s"} enabled.`,
+      "system-msg",
+      event.ts
+    );
+    if (runSkillModalRunId === rid) {
+      openRunSkillsModal(rid);
+    }
+    scrollBottomIfActive(runId);
     return;
   }
 
@@ -4372,6 +4496,25 @@ $("#btn-steer").addEventListener("click", sendSteer);
 $("#steer-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendSteer(); }
 });
+$("#btn-active-run-skills").addEventListener("click", () => {
+  const runId = activeRunId && activeRunId !== "__default__"
+    ? activeRunId
+    : currentRuns[0]?.id;
+  if (runId) openRunSkillsModal(runId);
+});
+$("#run-skill-close").addEventListener("click", closeRunSkillsModal);
+$("#run-skill-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "run-skill-overlay") closeRunSkillsModal();
+});
+$("#btn-run-skills-apply").addEventListener("click", () => {
+  applyRunSkills();
+});
+$("#btn-run-skills-apply-all").addEventListener("click", () => {
+  applyRunSkills({ applyToAll: true });
+});
+$("#btn-run-skills-reset").addEventListener("click", () => {
+  applyRunSkills({ reset: true });
+});
 
 // === User Broadcast ===
 $("#btn-broadcast").addEventListener("click", sendBroadcast);
@@ -4612,7 +4755,6 @@ $("#btn-import").addEventListener("click", async () => {
   // Set up preview controls using saved agent settings
   populateAgentList($("#import-agent-list"));
   renderSkillChecklist($("#import-skill-list"), defaultEnabledSkills);
-  $("#import-autonomous").checked = getAgentAutonomousDefault(primaryAgentName());
   $("#import-flag").value = defaultFlagFormat;
   $("#import-overlay").classList.remove("hidden");
 });
@@ -4819,7 +4961,6 @@ $("#btn-import-submit").addEventListener("click", async () => {
         model: "",
         effort: "",
         flag_format: $("#import-flag").value.trim(),
-        autonomous: $("#import-autonomous").checked,
         paused: $("#import-paused").checked,
         progress_id: progressId,
       }),
