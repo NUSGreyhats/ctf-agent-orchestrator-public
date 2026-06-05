@@ -17,7 +17,7 @@ webapp/
 
 The backend runs provider-specific SDK/CLI integrations, normalizes their event streams into a shared UI format, and persists challenge state to `/root/ctf-agent-wrapper/state` so solver metadata stays out of challenge working directories.
 
-Methodology and domain skills live in `/root/ctf-agent-wrapper/skills/` and are installed into supported provider skill directories by `environment/013_install-skills.sh`.
+Methodology and domain skills live in `/root/ctf-agent-wrapper/skills/`. `environment/013_install-skills.sh` builds `/root/ctf-agent-wrapper/all-skills/`, and the web app symlinks the selected skills into each run workspace under `.claude/skills` and `.codex/skills`.
 
 ## Setup
 

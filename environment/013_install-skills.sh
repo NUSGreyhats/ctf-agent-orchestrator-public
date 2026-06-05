@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install CTF skills to all agent skill directories.
+# Install CTF skills into the runtime catalog used for per-challenge symlinks.
 
 set -euo pipefail
 set -x
@@ -8,8 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=environment/lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
 
-REPO_SKILLS="$SCRIPT_DIR/../skills"
-SKILL_DIRS=(
+APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_SKILLS="$APP_ROOT/skills"
+ALL_SKILLS="$APP_ROOT/all-skills"
+PROVIDER_SKILL_DIRS=(
   "$HOME/.claude/skills"
   "$HOME/.codex/skills"
 )
@@ -48,36 +50,25 @@ read_skill_name() {
   printf '%s\n' "$name"
 }
 
+install_skill_dir() {
+  local skill_src="$1"
+  local skill_name
+
+  skill_name="$(read_skill_name "$skill_src/SKILL.md")"
+  rm -rf "${ALL_SKILLS:?}/${skill_name:?}"
+  cp -r "$skill_src" "$ALL_SKILLS/$skill_name"
+}
+
 install_repo_skills() {
-  local dest="$1"
   local skill_file skill_src skill_name
 
   while IFS= read -r -d '' skill_file; do
     skill_src="$(dirname "$skill_file")"
     skill_name="$(read_skill_name "$skill_file")"
 
-    rm -rf "${dest:?}/${skill_name:?}"
-    cp -r "$skill_src" "$dest/$skill_name"
-    remove_legacy_skill_dir "$dest" "$skill_src" "$skill_name"
+    rm -rf "${ALL_SKILLS:?}/${skill_name:?}"
+    cp -r "$skill_src" "$ALL_SKILLS/$skill_name"
   done < <(find "$REPO_SKILLS" -type f -name SKILL.md -print0 | sort -z)
-}
-
-remove_legacy_skill_dir() {
-  local dest="$1"
-  local skill_src="$2"
-  local skill_name="$3"
-  local legacy_name legacy_dir legacy_skill_name
-
-  legacy_name="$(basename "$skill_src")"
-  legacy_dir="$dest/$legacy_name"
-  if [ "$legacy_name" = "$skill_name" ] || [ ! -f "$legacy_dir/SKILL.md" ]; then
-    return 0
-  fi
-
-  if legacy_skill_name="$(read_skill_name "$legacy_dir/SKILL.md")" \
-    && [ "$legacy_skill_name" = "$skill_name" ]; then
-    rm -rf "${dest:?}/${legacy_name:?}"
-  fi
 }
 
 remove_stale_group_dirs() {
@@ -91,22 +82,52 @@ remove_stale_group_dirs() {
   done
 }
 
-for dest in "${SKILL_DIRS[@]}"; do
-  log "Installing skills to $dest"
+remove_managed_provider_skills() {
+  local dest="$1"
+  local managed skill_name installed installed_skill_name provider_skill provider_skill_name
+
   mkdir -p "$dest"
-
-  install_repo_skills "$dest"
-  remove_stale_group_dirs "$dest"
-
-  for d in "$EXTERNAL_DIR"/*/; do
-    name="$(basename "$d")"
-    if [[ "$name" =~ ^($EXCLUDE)$ ]]; then
-      continue
+  for managed in "$ALL_SKILLS"/*; do
+    [ -d "$managed" ] || continue
+    skill_name="$(basename "$managed")"
+    installed="$dest/$skill_name"
+    if [ -L "$installed" ]; then
+      rm -f "$installed"
+    elif [ -f "$installed/SKILL.md" ]; then
+      installed_skill_name="$(read_skill_name "$installed/SKILL.md" || true)"
+      if [ "$installed_skill_name" = "$skill_name" ]; then
+        rm -rf "${installed:?}"
+      fi
     fi
-    rm -rf "${dest:?}/${name:?}"
-    cp -r "$d" "$dest/"
   done
+  for provider_skill in "$dest"/*; do
+    [ -f "$provider_skill/SKILL.md" ] || continue
+    if provider_skill_name="$(read_skill_name "$provider_skill/SKILL.md")" \
+      && [ -d "$ALL_SKILLS/$provider_skill_name" ]; then
+      rm -rf "${provider_skill:?}"
+    fi
+  done
+  remove_stale_group_dirs "$dest"
+}
+
+log "Installing skills to $ALL_SKILLS"
+rm -rf "$ALL_SKILLS"
+mkdir -p "$ALL_SKILLS"
+
+install_repo_skills
+
+for d in "$EXTERNAL_DIR"/*/; do
+  name="$(basename "$d")"
+  if [[ "$name" =~ ^($EXCLUDE)$ ]] || [ ! -f "$d/SKILL.md" ]; then
+    continue
+  fi
+  install_skill_dir "$d"
+done
+
+for dest in "${PROVIDER_SKILL_DIRS[@]}"; do
+  log "Removing managed global skills from $dest"
+  remove_managed_provider_skills "$dest"
 done
 
 rm -rf "$EXTERNAL_DIR"
-log "Skills installed to ${#SKILL_DIRS[@]} agent directories"
+log "Skills installed to $ALL_SKILLS for challenge-local symlinks"

@@ -7,6 +7,7 @@ set -x
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=environment/lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
+APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 failures=0
 failure_messages=()
@@ -67,6 +68,7 @@ check_cmd claude claude --version
 check_cmd codex codex --version
 check_cmd copilot copilot --version
 check_cmd opencode opencode --version
+check_path "$APP_ROOT/all-skills/ctf-methodology/SKILL.md"
 
 check_cmd apktool apktool --version
 check_cmd jadx jadx --version

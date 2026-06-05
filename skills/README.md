@@ -3,14 +3,16 @@
 Skills come from two sources:
 
 1. **This repo** — methodology, forensics, and tool-specific skills
-2. **[ljagiello/ctf-skills](https://github.com/ljagiello/ctf-skills)** — category skills (pwn, web, crypto, rev, misc, osint, malware) installed during environment setup
+2. **[ljagiello/ctf-skills](https://github.com/ljagiello/ctf-skills)** — category skills (pwn, web, crypto, rev, misc, osint, malware, AI/ML) copied into the runtime skill catalog during environment setup
 
 ## This Repo
 
 The repository groups skills by source domain for maintainability. During
-environment setup, `environment/013_install-skills.sh` installs each directory
-that contains a `SKILL.md` as a top-level skill directory named from its
-frontmatter `name:` field.
+environment setup, `environment/013_install-skills.sh` copies each directory
+that contains a `SKILL.md` into `all-skills/` as a top-level skill directory
+named from its frontmatter `name:` field. The web app symlinks selected skills
+from `all-skills/` into each challenge run's `.claude/skills` and
+`.codex/skills` directories.
 
 ### Methodology
 
@@ -38,7 +40,7 @@ frontmatter `name:` field.
 
 ## External (ljagiello/ctf-skills)
 
-Installed to agent skill directories by `environment/013_install-skills.sh`.
+Copied to `all-skills/` by `environment/013_install-skills.sh`.
 
 | Skill | Category |
 |---|---|
@@ -49,3 +51,4 @@ Installed to agent skill directories by `environment/013_install-skills.sh`.
 | ctf-misc | Mixed challenges (sandbox escapes, encodings, privilege escalation) |
 | ctf-osint | Open-source intelligence (geolocation, social media) |
 | ctf-malware | Malware analysis (obfuscated scripts, C2, dynamic analysis) |
+| ctf-ai-ml | AI/ML challenges (model attacks, adversarial examples, LLM attacks) |

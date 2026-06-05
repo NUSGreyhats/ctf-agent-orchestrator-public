@@ -155,6 +155,16 @@
         <div id="settings-agent-list"></div>
       </div>
 
+      <div class="settings-section">
+        <h2 class="settings-section-title">Default Skills</h2>
+        <p class="text-muted" style="font-size:0.72rem;margin-bottom:0.5rem;">Selected skills are enabled by default for new challenges.</p>
+        <div class="skill-toolbar">
+          <button type="button" class="btn-ghost btn-sm" data-skill-action="all" data-skill-target="#settings-skill-list">Select All</button>
+          <button type="button" class="btn-ghost btn-sm" data-skill-action="none" data-skill-target="#settings-skill-list">Select None</button>
+        </div>
+        <div id="settings-skill-list" class="skill-checklist"></div>
+      </div>
+
 
       <!-- VPN -->
       <div class="settings-section">
@@ -252,6 +262,16 @@
         </div>
 
         <div class="form-group">
+          <label>Skills</label>
+          <div class="skill-toolbar">
+            <button type="button" class="btn-ghost btn-sm" data-skill-action="defaults" data-skill-target="#challenge-skill-list">Defaults</button>
+            <button type="button" class="btn-ghost btn-sm" data-skill-action="all" data-skill-target="#challenge-skill-list">All</button>
+            <button type="button" class="btn-ghost btn-sm" data-skill-action="none" data-skill-target="#challenge-skill-list">None</button>
+          </div>
+          <div id="challenge-skill-list" class="skill-checklist skill-checklist-compact"></div>
+        </div>
+
+        <div class="form-group">
           <label for="challenge-desc">Description</label>
           <textarea id="challenge-desc" rows="3"
             placeholder="Paste the challenge description here..."></textarea>
@@ -317,6 +337,15 @@
             <label>Agents</label>
             <div id="bulk-agent-list" class="agent-row-list"></div>
             <button type="button" id="btn-add-bulk-agent" class="btn-ghost btn-sm">+ Add Agent</button>
+          </div>
+          <div class="form-group">
+            <label>Skills</label>
+            <div class="skill-toolbar">
+              <button type="button" class="btn-ghost btn-sm" data-skill-action="defaults" data-skill-target="#bulk-skill-list">Defaults</button>
+              <button type="button" class="btn-ghost btn-sm" data-skill-action="all" data-skill-target="#bulk-skill-list">All</button>
+              <button type="button" class="btn-ghost btn-sm" data-skill-action="none" data-skill-target="#bulk-skill-list">None</button>
+            </div>
+            <div id="bulk-skill-list" class="skill-checklist skill-checklist-compact"></div>
           </div>
           <div class="form-row">
             <div class="form-group flex-1">
@@ -418,6 +447,16 @@
               </div>
             </div>
             <div id="detail-files" class="info-meta"></div>
+            <div class="skill-edit-section">
+              <div class="flags-header">Skills</div>
+              <div class="skill-toolbar">
+                <button type="button" class="btn-ghost btn-sm" data-skill-action="defaults" data-skill-target="#detail-skill-list">Defaults</button>
+                <button type="button" class="btn-ghost btn-sm" data-skill-action="all" data-skill-target="#detail-skill-list">All</button>
+                <button type="button" class="btn-ghost btn-sm" data-skill-action="none" data-skill-target="#detail-skill-list">None</button>
+                <button type="button" id="btn-save-challenge-skills" class="btn-primary btn-sm">Save</button>
+              </div>
+              <div id="detail-skill-list" class="skill-checklist skill-checklist-compact"></div>
+            </div>
             <div class="manual-flag-section">
               <div class="flags-header">Manual Flag</div>
               <div class="manual-flag-add">
@@ -521,6 +560,15 @@
             <label>Agents</label>
             <div id="import-agent-list" class="agent-row-list"></div>
             <button type="button" id="btn-add-import-agent" class="btn-ghost btn-sm">+ Add Agent</button>
+          </div>
+          <div class="form-group">
+            <label>Skills</label>
+            <div class="skill-toolbar">
+              <button type="button" class="btn-ghost btn-sm" data-skill-action="defaults" data-skill-target="#import-skill-list">Defaults</button>
+              <button type="button" class="btn-ghost btn-sm" data-skill-action="all" data-skill-target="#import-skill-list">All</button>
+              <button type="button" class="btn-ghost btn-sm" data-skill-action="none" data-skill-target="#import-skill-list">None</button>
+            </div>
+            <div id="import-skill-list" class="skill-checklist skill-checklist-compact"></div>
           </div>
           <div class="form-row">
             <div class="form-group flex-1">

@@ -460,6 +460,13 @@ def detect_flag(text: str, flag_format: str = "") -> str | None:
 METADATA_FILE = "challenge.json"
 OUTPUT_FILE = "output.jsonl"
 SETTINGS_FILE = CHALLENGES_DIR / "settings.json"
+REPO_SKILLS_DIR = APP_ROOT_DIR / "skills"
+ALL_SKILLS_DIR = APP_ROOT_DIR / "all-skills"
+PROJECT_SKILL_DIRS = (
+    Path(".claude") / "skills",
+    Path(".codex") / "skills",
+)
+SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _PREVIEW_TTL = 3600
 _bulk_previews: dict[str, dict] = {}
 _platform_import_progress: dict[str, dict] = {}
@@ -1400,6 +1407,196 @@ def _aggregate_run_stats(run: dict, events: list[dict]) -> dict:
 # Settings
 # ---------------------------------------------------------------------------
 
+def _path_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (FileNotFoundError, ValueError):
+        return False
+
+
+def _read_skill_frontmatter(skill_file: Path) -> dict[str, str]:
+    try:
+        lines = skill_file.read_text(errors="replace").splitlines()
+    except OSError:
+        return {}
+    if not lines or lines[0].strip() != "---":
+        return {}
+
+    data: dict[str, str] = {}
+    active_key = ""
+    folded: list[str] = []
+
+    def flush_folded() -> None:
+        nonlocal active_key, folded
+        if active_key and folded:
+            data[active_key] = " ".join(part.strip() for part in folded).strip()
+        active_key = ""
+        folded = []
+
+    for line in lines[1:]:
+        if line.strip() == "---":
+            flush_folded()
+            break
+        if not line.startswith(" ") and ":" in line:
+            flush_folded()
+            key, raw_value = line.split(":", 1)
+            key = key.strip()
+            value = raw_value.strip()
+            if value in {">", "|"}:
+                active_key = key
+                folded = []
+            else:
+                data[key] = value.strip().strip('"').strip("'")
+            continue
+        if active_key and line.startswith(" "):
+            folded.append(line)
+    return data
+
+
+def _skill_entry_from_file(skill_file: Path, root: Path) -> dict | None:
+    frontmatter = _read_skill_frontmatter(skill_file)
+    name = (frontmatter.get("name") or skill_file.parent.name).strip()
+    if not SKILL_NAME_RE.match(name):
+        log.warning("Ignoring invalid skill name %r from %s", name, skill_file)
+        return None
+
+    description = frontmatter.get("description", "").strip()
+    try:
+        rel_path = skill_file.parent.relative_to(APP_ROOT_DIR).as_posix()
+    except ValueError:
+        rel_path = skill_file.parent.name
+    source = "catalog" if _path_under(skill_file, ALL_SKILLS_DIR) else "repo"
+    return {
+        "name": name,
+        "description": description,
+        "source": source,
+        "path": rel_path,
+        "_path": str(skill_file.parent),
+        "_root": str(root),
+    }
+
+
+def discover_skill_catalog() -> list[dict]:
+    """Return available skills, preferring the runtime all-skills catalog."""
+    entries: dict[str, dict] = {}
+    for root in (REPO_SKILLS_DIR, ALL_SKILLS_DIR):
+        if not root.exists():
+            continue
+        for skill_file in sorted(root.rglob("SKILL.md")):
+            entry = _skill_entry_from_file(skill_file, root)
+            if entry:
+                entries[entry["name"]] = entry
+    return sorted(entries.values(), key=lambda item: item["name"].lower())
+
+
+def skill_catalog_by_name() -> dict[str, dict]:
+    return {entry["name"]: entry for entry in discover_skill_catalog()}
+
+
+def default_enabled_skill_names() -> list[str]:
+    return [entry["name"] for entry in discover_skill_catalog()]
+
+
+def _coerce_skill_list(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = []
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed]
+            return []
+        return [part.strip() for part in raw.split(",")]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value]
+    return []
+
+
+def normalize_enabled_skills(
+    value: object,
+    *,
+    default: list[str] | None = None,
+) -> list[str]:
+    catalog = skill_catalog_by_name()
+    requested = _coerce_skill_list(value)
+    if requested is None:
+        requested = default if default is not None else default_enabled_skill_names()
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for name in requested:
+        if name in catalog and name not in seen:
+            normalized.append(name)
+            seen.add(name)
+    return normalized
+
+
+def public_skill_catalog(settings: dict | None = None) -> dict:
+    settings = settings or load_settings()
+    skills = []
+    for entry in discover_skill_catalog():
+        public = {
+            key: value
+            for key, value in entry.items()
+            if not key.startswith("_")
+        }
+        skills.append(public)
+    return {
+        "skills": skills,
+        "default_enabled_skills": normalize_enabled_skills(
+            settings.get("enabled_skills"),
+            default=default_enabled_skill_names(),
+        ),
+    }
+
+
+def challenge_enabled_skills(challenge: dict) -> list[str]:
+    settings = load_settings()
+    return normalize_enabled_skills(
+        challenge.get("enabled_skills"),
+        default=normalize_enabled_skills(settings.get("enabled_skills")),
+    )
+
+
+def sync_run_skill_links(challenge: dict, run: dict) -> None:
+    """Materialize selected project skills into this run's provider dirs."""
+    run_dir = get_run_cwd(challenge["id"], run)
+    selected = challenge_enabled_skills(challenge)
+    catalog = skill_catalog_by_name()
+
+    for rel_dir in PROJECT_SKILL_DIRS:
+        skills_dir = run_dir / rel_dir
+        skills_dir.mkdir(parents=True, exist_ok=True)
+
+        for child in list(skills_dir.iterdir()):
+            if child.is_symlink():
+                child.unlink()
+
+        for name in selected:
+            entry = catalog.get(name)
+            if not entry:
+                continue
+            source = Path(entry["_path"])
+            if not source.exists():
+                continue
+            dest = skills_dir / name
+            if dest.exists() or dest.is_symlink():
+                continue
+            dest.symlink_to(source)
+
+
+def sync_challenge_skill_links(challenge: dict) -> None:
+    for run in challenge.get("runs", {}).values():
+        sync_run_skill_links(challenge, run)
+
+
 def load_settings() -> dict:
     """Load global settings from disk."""
     defaults = {
@@ -1411,6 +1608,7 @@ def load_settings() -> dict:
         "enabled_agents": [],
         "agent_models": {},
         "agent_efforts": {},
+        "enabled_skills": None,
         "max_platform_import_size_gb": DEFAULT_MAX_PLATFORM_IMPORT_SIZE_GB,
         "discord_enabled": False,
         "discord_bot_token": "",
@@ -1432,6 +1630,10 @@ def load_settings() -> dict:
     )
     defaults["discord_challenge_layout"] = normalize_discord_challenge_layout(
         defaults.get("discord_challenge_layout")
+    )
+    defaults["enabled_skills"] = normalize_enabled_skills(
+        defaults.get("enabled_skills"),
+        default=default_enabled_skill_names(),
     )
     return defaults
 
@@ -1798,6 +2000,7 @@ def save_metadata(challenge: dict) -> None:
         "status": challenge["status"],
         "created_at": challenge["created_at"],
         "files": challenge["files"],
+        "enabled_skills": challenge_enabled_skills(challenge),
         "error": challenge.get("error"),
         "runs": _serialize_runs(challenge),
         "_plugin": challenge.get("_plugin", ""),
@@ -2023,6 +2226,12 @@ def load_challenges_from_disk() -> None:
             "description": meta.get("description", ""),
             "flag_format": meta.get("flag_format", ""),
             "extra_flag_formats": meta.get("extra_flag_formats", []),
+            "enabled_skills": normalize_enabled_skills(
+                meta.get("enabled_skills"),
+                default=normalize_enabled_skills(
+                    load_settings().get("enabled_skills")
+                ),
+            ),
             "mode": mode,
             "autonomous": meta.get("autonomous", False),
             "status": "pending",
@@ -2051,6 +2260,7 @@ def load_challenges_from_disk() -> None:
         }
         challenge["status"] = derive_challenge_status(challenge)
         challenges[challenge_id] = challenge
+        sync_challenge_skill_links(challenge)
 
 
 load_challenges_from_disk()
@@ -2326,6 +2536,7 @@ async def list_challenges(request: Request) -> JSONResponse:
             "error": c.get("error"),
             "created_at": c["created_at"],
             "files": c["files"],
+            "enabled_skills": challenge_enabled_skills(c),
             "points": c.get("_points", 0),
             "solves": c.get("_solves", 0),
             "flag_questions": c.get("_flag_questions", []),
@@ -2489,6 +2700,10 @@ async def create_challenge(request: Request) -> JSONResponse:
     model = form.get("model", "").strip()
     effort = form.get("effort", "").strip()
     autonomous = form.get("autonomous", "").strip() == "true"
+    enabled_skills = normalize_enabled_skills(
+        form.get("enabled_skills"),
+        default=normalize_enabled_skills(load_settings().get("enabled_skills")),
+    )
 
     if mode not in VALID_MODES:
         return JSONResponse(
@@ -2597,10 +2812,12 @@ async def create_challenge(request: Request) -> JSONResponse:
         "status": "solving",
         "created_at": datetime.now().isoformat(),
         "files": sorted(file_data.keys()),
+        "enabled_skills": enabled_skills,
         "error": None,
         "runs": runs,
     }
     challenges[challenge_id] = challenge
+    sync_challenge_skill_links(challenge)
     save_metadata(challenge)
     asyncio.create_task(discord_ensure_destination(challenge))
 
@@ -2834,6 +3051,10 @@ async def bulk_upload(request: Request) -> JSONResponse:
         effort = str_field(body.get("effort", "")).strip()
         autonomous = bool(body.get("autonomous", False))
         paused = bool(body.get("paused", False))
+        enabled_skills = normalize_enabled_skills(
+            body.get("enabled_skills"),
+            default=normalize_enabled_skills(load_settings().get("enabled_skills")),
+        )
         challenges_cfg = body.get("challenges", [])
         if not isinstance(challenges_cfg, list):
             return JSONResponse({"error": "challenges must be a list"}, status_code=400)
@@ -2923,10 +3144,12 @@ async def bulk_upload(request: Request) -> JSONResponse:
                 "status": challenge_status,
                 "created_at": datetime.now().isoformat(),
                 "files": file_names,
+                "enabled_skills": enabled_skills,
                 "error": None,
                 "runs": runs,
             }
             challenges[challenge_id] = challenge
+            sync_challenge_skill_links(challenge)
             save_metadata(challenge)
 
             if challenge_status == "solving":
@@ -3390,6 +3613,7 @@ TEXT_EXTS = {
 MAX_TEXT_SIZE = 512 * 1024
 MAX_HEX_SIZE = 64 * 1024
 MAX_DISCORD_FILE_READ = 64 * 1024
+PROJECT_SKILL_ROOTS = {".claude", ".codex"}
 
 
 def safe_user_path(raw: str) -> str | None:
@@ -3418,6 +3642,11 @@ def safe_user_dir(raw: str) -> str | None:
     if any(part in ("", ".", "..") for part in p.parts):
         return None
     return p.as_posix()
+
+
+def is_project_skill_relpath(raw: str) -> bool:
+    parts = PurePosixPath(str(raw or "").replace("\\", "/")).parts
+    return bool(parts and parts[0] in PROJECT_SKILL_ROOTS)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
@@ -3537,6 +3766,8 @@ async def list_files(request: Request) -> JSONResponse:
         )
         if safe_dir is None:
             return JSONResponse({"error": "forbidden"}, status_code=403)
+        if is_project_skill_relpath(safe_dir):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
         if not current_dir or not current_dir.is_dir():
             return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -3561,6 +3792,8 @@ async def list_files(request: Request) -> JSONResponse:
                 (PurePosixPath(safe_dir) / child.name).as_posix()
                 if safe_dir else child.name
             )
+            if is_project_skill_relpath(rel):
+                continue
             try:
                 if child.is_dir():
                     entries.append({
@@ -3597,6 +3830,8 @@ async def list_files(request: Request) -> JSONResponse:
         if not any(_is_relative_to(resolved, root) for root in allowed_roots):
             continue
         rel = str(p.relative_to(challenge_dir))
+        if is_project_skill_relpath(rel):
+            continue
         files.append({
             "path": rel,
             "size": p.stat().st_size,
@@ -3613,6 +3848,8 @@ async def get_file(request: Request) -> Response:
     if challenge_id not in challenges:
         return JSONResponse({"error": "not found"}, status_code=404)
     file_path = request.path_params["path"]
+    if is_project_skill_relpath(file_path):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
 
     run_id = request.query_params.get("run_id")
     challenge_dir = _resolve_file_dir(challenge_id, run_id)
@@ -3690,6 +3927,8 @@ async def download_file(request: Request) -> Response:
     if challenge_id not in challenges:
         return JSONResponse({"error": "not found"}, status_code=404)
     file_path = request.path_params["path"]
+    if is_project_skill_relpath(file_path):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
 
     run_id = request.query_params.get("run_id")
     challenge_dir = _resolve_file_dir(challenge_id, run_id)
@@ -4263,6 +4502,7 @@ def _export_challenge_to_zip(
         "mode": challenge["mode"],
         "status": challenge["status"],
         "created_at": challenge["created_at"],
+        "enabled_skills": challenge_enabled_skills(challenge),
         "detected_flags": challenge.get("detected_flags", {}),
         "detected_flag_meta": challenge.get("detected_flag_meta", {}),
         "flag_questions": challenge.get("_flag_questions", []),
@@ -4687,20 +4927,57 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
     notes_file = run_notes_filename(challenge, run)
     run_cwd = get_run_cwd(challenge["id"], run)
     notes_path = run_cwd / notes_file
+    enabled_skills = challenge_enabled_skills(challenge)
+    enabled_skill_set = set(enabled_skills)
 
     parts = [
         "You are solving a CTF challenge.",
-        "Load the ctf-methodology skill first and follow it for the full "
-        "solve. It contains the triage workflow and routes you to the "
-        "correct category and tool skills.",
+    ]
+    if enabled_skills:
+        parts.extend([
+            "Project skills enabled for this challenge:",
+            ", ".join(f"`{name}`" for name in enabled_skills),
+        ])
+        if "ctf-methodology" in enabled_skill_set:
+            parts.append(
+                "Load the ctf-methodology skill first and follow it for the "
+                "full solve. It contains the triage workflow and routes you "
+                "to the correct category and tool skills."
+            )
+        else:
+            parts.append(
+                "Use the enabled project skills when relevant. Do not assume "
+                "disabled project skills are available."
+            )
+    else:
+        parts.append(
+            "No project skills are enabled for this challenge. Use your "
+            "built-in knowledge and installed command-line tools."
+        )
+
+    key_tool_rules = []
+    if "analyze-with-ida-domain-api" in enabled_skill_set:
+        key_tool_rules.append(
+            "- For ANY binary (ELF/PE): use IDA Pro for static analysis "
+            "(load the analyze-with-ida-domain-api skill). Do NOT use objdump "
+            "or readelf as primary analysis; IDA is installed and licensed."
+        )
+    if "libdebug-debugging" in enabled_skill_set:
+        key_tool_rules.append(
+            "- For runtime debugging: use libdebug "
+            "(load the libdebug-debugging skill), not raw GDB."
+        )
+    if "kernel-gef-debugging" in enabled_skill_set:
+        key_tool_rules.append(
+            "- For kernel challenges: use GDB+GEF via MCP "
+            "(load the kernel-gef-debugging skill)."
+        )
+    key_tool_rules.append("- Run ctfgrep first for a quick flag search across encodings.")
+
+    parts.extend([
         "",
         "Key tool rules:",
-        "- For ANY binary (ELF/PE): use IDA Pro for static analysis "
-        "(load the analyze-with-ida-domain-api skill). Do NOT use objdump "
-        "or readelf as primary analysis — IDA is installed and licensed.",
-        "- For runtime debugging: use libdebug (load the libdebug-debugging skill), not raw GDB.",
-        "- For kernel challenges: use GDB+GEF via MCP (load the kernel-gef-debugging skill).",
-        "- Run ctfgrep first for a quick flag search across encodings.",
+        *key_tool_rules,
         "",
         f"Maintain this exact working notes file: `{notes_path}`",
         f"The file name is `{notes_file}`, but always write it at the absolute "
@@ -4722,7 +4999,7 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
         "Update this file as you work. Your context may be compacted "
         "during long solves — this file is your persistent memory. "
         "If you lose context, re-read it first.",
-    ]
+    ])
 
     # Parallel mode: team awareness
     if is_parallel:
@@ -5530,6 +5807,7 @@ async def run_agent_task(
     challenge = challenges[challenge_id]
     run = challenge["runs"][run_id]
     run_cwd = get_run_cwd(challenge_id, run)
+    sync_run_skill_links(challenge, run)
     seed_working_notes(challenge_id, run)
     write_submit_answer_helper(challenge_id, run_id)
     start_run_timer(run)
@@ -5991,6 +6269,12 @@ async def get_settings(request: Request) -> JSONResponse:
     return JSONResponse(load_settings())
 
 
+async def get_skills(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    return JSONResponse(public_skill_catalog())
+
+
 async def discord_test(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
@@ -6152,6 +6436,11 @@ async def update_settings(request: Request) -> JSONResponse:
                 str_field(k): str_field(v) for k, v in efforts.items()
                 if str_field(k) in VALID_AGENTS
             }
+    if "enabled_skills" in body:
+        settings["enabled_skills"] = normalize_enabled_skills(
+            body.get("enabled_skills"),
+            default=[],
+        )
     if "max_platform_import_size_gb" in body:
         settings["max_platform_import_size_gb"] = normalize_platform_import_size_gb(
             body.get("max_platform_import_size_gb")
@@ -6394,6 +6683,10 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
     autonomous = bool(body.get("autonomous", False))
     flag_format = str_field(body.get("flag_format", "")).strip()
     paused = bool(body.get("paused", False))
+    enabled_skills = normalize_enabled_skills(
+        body.get("enabled_skills"),
+        default=normalize_enabled_skills(load_settings().get("enabled_skills")),
+    )
     progress_id = str_field(body.get("progress_id", "")).strip()
     enabled_selected = [
         item for item in selected
@@ -6711,6 +7004,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "status": challenge_status,
             "created_at": datetime.now().isoformat(),
             "files": sorted(file_data.keys()),
+            "enabled_skills": enabled_skills,
             "error": None,
             "runs": runs,
             "_plugin": plugin_name,
@@ -6723,6 +7017,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "_connection_id": _conn_id,
         }
         challenges[challenge_id] = challenge
+        sync_challenge_skill_links(challenge)
         save_metadata(challenge)
         asyncio.create_task(discord_ensure_destination(challenge))
 
@@ -6939,6 +7234,35 @@ async def add_manual_flag(request: Request) -> JSONResponse:
         "status": status,
         "meta": detected_flag_meta(challenge, stored_flag),
     })
+
+
+async def update_challenge_skills(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+
+    enabled_skills = normalize_enabled_skills(
+        body.get("enabled_skills"),
+        default=[],
+    )
+    challenge["enabled_skills"] = enabled_skills
+    sync_challenge_skill_links(challenge)
+    save_metadata(challenge)
+    await broadcast_challenge(challenge_id, {
+        "type": "challenge_skills",
+        "enabled_skills": enabled_skills,
+    })
+    return JSONResponse({"enabled_skills": enabled_skills})
 
 
 async def plugin_submit_flag(request: Request) -> JSONResponse:
@@ -9325,6 +9649,7 @@ routes = [
     Route("/api/connections/poll", poll_connections, methods=["GET"]),
     Route("/api/settings", get_settings, methods=["GET"]),
     Route("/api/settings", update_settings, methods=["PUT"]),
+    Route("/api/skills", get_skills, methods=["GET"]),
     Route("/api/discord/test", discord_test, methods=["POST"]),
     Route("/api/discord/channels", discord_channels, methods=["POST"]),
     Route("/api/challenges", list_challenges, methods=["GET"]),
@@ -9344,6 +9669,7 @@ routes = [
     Route("/api/challenges/{id}/mark-solved", mark_solved, methods=["POST"]),
     Route("/api/challenges/{id}/flag-formats", add_flag_format, methods=["POST"]),
     Route("/api/challenges/{id}/flags", add_manual_flag, methods=["POST"]),
+    Route("/api/challenges/{id}/skills", update_challenge_skills, methods=["PUT"]),
     Route("/api/challenges/{id}/stats", get_challenge_stats, methods=["GET"]),
     Route("/api/challenges/{id}/runs/{run_id}/events", list_run_events, methods=["GET"]),
     Route("/api/challenges/{id}/transcript-search", search_challenge_transcript, methods=["GET"]),

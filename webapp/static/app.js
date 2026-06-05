@@ -17,6 +17,9 @@ let chatViewMode = "split";
 let csrfToken = null;
 let agentCatalog = [];
 let agentByName = new Map();
+let skillCatalog = [];
+let skillByName = new Map();
+let defaultEnabledSkills = [];
 
 const pendingTools = new Map();
 
@@ -225,6 +228,77 @@ async function loadAgentCatalog() {
   return true;
 }
 
+function normalizeSkillNames(names) {
+  const input = Array.isArray(names) ? names : [];
+  const seen = new Set();
+  const normalized = [];
+  for (const name of input) {
+    if (!skillByName.has(name) || seen.has(name)) continue;
+    seen.add(name);
+    normalized.push(name);
+  }
+  return normalized;
+}
+
+function allSkillNames() {
+  return skillCatalog.map((skill) => skill.name);
+}
+
+async function loadSkillCatalog() {
+  const res = await api("/api/skills");
+  if (!res) return false;
+  const data = await res.json();
+  skillCatalog = data.skills || [];
+  skillByName = new Map(skillCatalog.map((skill) => [skill.name, skill]));
+  defaultEnabledSkills = normalizeSkillNames(data.default_enabled_skills || allSkillNames());
+  return true;
+}
+
+function renderSkillChecklist(container, selectedNames) {
+  if (!container) return;
+  const selected = new Set(normalizeSkillNames(selectedNames));
+  if (!skillCatalog.length) {
+    container.innerHTML = `<div class="settings-hint">No skills found.</div>`;
+    return;
+  }
+  container.innerHTML = skillCatalog.map((skill) => {
+    const checked = selected.has(skill.name) ? "checked" : "";
+    const desc = skill.description || "";
+    return `<label class="skill-check">
+      <input type="checkbox" class="skill-cb" value="${esc(skill.name)}" ${checked}>
+      <span>
+        <span class="skill-name">${esc(skill.name)}</span>
+        ${desc ? `<span class="skill-desc">${esc(desc)}</span>` : ""}
+      </span>
+    </label>`;
+  }).join("");
+}
+
+function getSelectedSkills(container) {
+  if (!container) return [];
+  return Array.from(container.querySelectorAll(".skill-cb:checked"))
+    .map((cb) => cb.value);
+}
+
+function setSkillChecklist(container, names) {
+  if (!container) return;
+  const selected = new Set(names);
+  container.querySelectorAll(".skill-cb").forEach((cb) => {
+    cb.checked = selected.has(cb.value);
+  });
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-skill-action]");
+  if (!btn) return;
+  const container = document.querySelector(btn.dataset.skillTarget || "");
+  if (!container) return;
+  const action = btn.dataset.skillAction;
+  if (action === "all") setSkillChecklist(container, allSkillNames());
+  if (action === "none") setSkillChecklist(container, []);
+  if (action === "defaults") setSkillChecklist(container, defaultEnabledSkills);
+});
+
 // === API ===
 async function api(path, opts = {}) {
   const headers = { ...opts.headers };
@@ -343,7 +417,7 @@ $("#login-form").addEventListener("submit", async (e) => {
   if (loginRes.ok) {
     const data = await loginRes.json();
     csrfToken = data.csrf_token;
-    if (await loadAgentCatalog()) {
+    if (await loadAgentCatalog() && await loadSkillCatalog()) {
       showView("dashboard");
       connectGlobalWS();
       await handleDeepLink();
@@ -380,6 +454,7 @@ async function loadDefaultAgent() {
     : [defaultAgent];
   agentModels = settings.agent_models || {};
   agentEfforts = settings.agent_efforts || {};
+  defaultEnabledSkills = normalizeSkillNames(settings.enabled_skills || allSkillNames());
   applyTheme(currentTheme);
 }
 
@@ -781,6 +856,7 @@ async function triggerSync(connId) {
 
   // Set up preview controls using saved agent settings
   populateAgentList($("#import-agent-list"));
+  renderSkillChecklist($("#import-skill-list"), defaultEnabledSkills);
   $("#import-autonomous").checked = getAgentAutonomousDefault(primaryAgentName());
   $("#import-flag").value = defaultFlagFormat;
 
@@ -867,6 +943,7 @@ $("#add-challenge-menu").addEventListener("click", (e) => {
 // === New Challenge Modal ===
 $("#btn-new-challenge").addEventListener("click", () => {
   populateAgentList($("#challenge-agent-list"));
+  renderSkillChecklist($("#challenge-skill-list"), defaultEnabledSkills);
   $("#challenge-autonomous").checked = getAgentAutonomousDefault(primaryAgentName());
   $("#challenge-flag").value = defaultFlagFormat;
   $("#modal-overlay").classList.remove("hidden");
@@ -987,6 +1064,7 @@ $("#challenge-form").addEventListener("submit", async (e) => {
   fd.append("mode", mode);
   fd.append("autonomous", $("#challenge-autonomous").checked ? "true" : "false");
   fd.append("agents", JSON.stringify(agents));
+  fd.append("enabled_skills", JSON.stringify(getSelectedSkills($("#challenge-skill-list"))));
 
   for (const upload of pendingChallengeUploads) {
     fd.append("files", upload.file, upload.path);
@@ -1034,6 +1112,7 @@ function resetBulkModal() {
 $("#btn-bulk-upload").addEventListener("click", () => {
   resetBulkModal();
   populateAgentList($("#bulk-agent-list"));
+  renderSkillChecklist($("#bulk-skill-list"), defaultEnabledSkills);
   $("#bulk-autonomous").checked = getAgentAutonomousDefault(primaryAgentName());
   $("#bulk-flag").value = defaultFlagFormat;
   bulkOverlay.classList.remove("hidden");
@@ -1164,6 +1243,7 @@ $("#btn-bulk-submit").addEventListener("click", async () => {
         flag_format: $("#bulk-flag").value.trim(),
         mode: mode,
         agents: JSON.stringify(agentRows),
+        enabled_skills: getSelectedSkills($("#bulk-skill-list")),
         model: "",
         effort: "",
         autonomous: $("#bulk-autonomous").checked,
@@ -1251,6 +1331,8 @@ async function openChallenge(id) {
     : "";
   renderFlagFormats();
   $("#detail-files").textContent = c.files.length ? `Files: ${c.files.join(", ")}` : "No files";
+  const enabledSkillNames = c.enabled_skills || [];
+  renderSkillChecklist($("#detail-skill-list"), enabledSkillNames);
 
   const errorBanner = $("#error-banner");
   if (c.error) {
@@ -1458,6 +1540,7 @@ $("#flag-format-input").addEventListener("keydown", (e) => {
     addFlagFormatAndScan();
   }
 });
+$("#btn-save-challenge-skills").addEventListener("click", saveChallengeSkills);
 $("#btn-add-manual-flag").addEventListener("click", addManualFlag);
 $("#manual-flag-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
@@ -2501,6 +2584,29 @@ async function addManualFlag() {
     setFlagStatus(storedFlag, data.status, data.meta || null);
   }
   showToast(data.added ? "Flag added" : "Flag already exists");
+}
+
+async function saveChallengeSkills() {
+  if (!currentChallengeId) return;
+  const btn = $("#btn-save-challenge-skills");
+  const enabledSkills = getSelectedSkills($("#detail-skill-list"));
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = "Saving...";
+  const res = await api(`/api/challenges/${currentChallengeId}/skills`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled_skills: enabledSkills }),
+  });
+  btn.disabled = false;
+  btn.textContent = oldText;
+  if (!res) return;
+  const data = await res.json();
+  if (data.error) {
+    showToast(data.error, "error");
+    return;
+  }
+  renderSkillChecklist($("#detail-skill-list"), data.enabled_skills || []);
+  showToast("Skills saved", "success");
 }
 
 function makeCopyBtn(getText) {
@@ -4505,6 +4611,7 @@ $("#btn-import").addEventListener("click", async () => {
   $("#import-status").classList.add("hidden");
   // Set up preview controls using saved agent settings
   populateAgentList($("#import-agent-list"));
+  renderSkillChecklist($("#import-skill-list"), defaultEnabledSkills);
   $("#import-autonomous").checked = getAgentAutonomousDefault(primaryAgentName());
   $("#import-flag").value = defaultFlagFormat;
   $("#import-overlay").classList.remove("hidden");
@@ -4708,6 +4815,7 @@ $("#btn-import-submit").addEventListener("click", async () => {
         challenges: selected,
         mode: mode,
         agents: JSON.stringify(agentRows),
+        enabled_skills: getSelectedSkills($("#import-skill-list")),
         model: "",
         effort: "",
         flag_format: $("#import-flag").value.trim(),
@@ -4795,6 +4903,7 @@ function updateSettingsVpnStatus(data) {
 }
 
 $("#btn-settings").addEventListener("click", async () => {
+  await loadSkillCatalog();
   const res = await api("/api/settings");
   if (!res) return;
   const s = await res.json();
@@ -4831,6 +4940,8 @@ $("#btn-settings").addEventListener("click", async () => {
       ${effortHtml}
     </div>`;
   }).join("");
+
+  renderSkillChecklist($("#settings-skill-list"), s.enabled_skills || defaultEnabledSkills);
 
   // Discord
   $("#settings-discord-enabled").checked = !!s.discord_enabled;
@@ -4892,6 +5003,7 @@ $("#btn-settings-save").addEventListener("click", async () => {
     enabled_agents: selectedAgents,
     agent_models: models,
     agent_efforts: efforts,
+    enabled_skills: getSelectedSkills($("#settings-skill-list")),
     default_agent: selectedAgents[0] || defaultAgent,
     discord_enabled: $("#settings-discord-enabled").checked,
     discord_bot_token: $("#settings-discord-token").value.trim(),
@@ -4908,6 +5020,7 @@ $("#btn-settings-save").addEventListener("click", async () => {
       ? saved.enabled_agents : [defaultAgent];
     agentModels = saved.agent_models || {};
     agentEfforts = saved.agent_efforts || {};
+    defaultEnabledSkills = normalizeSkillNames(saved.enabled_skills || allSkillNames());
     defaultAgent = saved.default_agent || enabledAgents[0];
     applyTheme(currentTheme);
     showToast("Settings saved", "success");
@@ -5033,15 +5146,16 @@ window.addEventListener("hashchange", () => {
 // === Init ===
 (async () => {
   // Page is served behind HTTP Basic Auth — session is already valid.
-  const [csrfRes, catalogOk] = await Promise.all([
+  const [csrfRes, catalogOk, skillsOk] = await Promise.all([
     fetch("/api/csrf-token"),
     loadAgentCatalog(),
+    loadSkillCatalog(),
   ]);
   if (csrfRes.ok) {
     const data = await csrfRes.json();
     csrfToken = data.csrf_token;
   }
-  if (!catalogOk) return;
+  if (!catalogOk || !skillsOk) return;
 
   connectGlobalWS();
   await handleDeepLink();
