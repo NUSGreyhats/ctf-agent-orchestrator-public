@@ -97,7 +97,7 @@ ALLOWED_ORIGINS = {
     for origin in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if origin.strip()
 }
-APP_ROOT_DIR = Path("/root/ctf-agent-wrapper")
+APP_ROOT_DIR = Path(os.environ.get("APP_ROOT_DIR", "/root/ctf-agent-wrapper"))
 CHALLENGES_DIR = APP_ROOT_DIR / "challenges"
 CHALLENGES_DIR.mkdir(parents=True, exist_ok=True)
 STATE_ROOT_DIR = APP_ROOT_DIR / "state"
@@ -3301,7 +3301,10 @@ async def stop_challenge(request: Request) -> JSONResponse:
         "type": "challenge_status",
         "status": challenge["status"],
     })
-    return JSONResponse({"status": challenge["status"]})
+    return JSONResponse({
+        "status": challenge["status"],
+        "run_ids": changed_run_ids,
+    })
 
 
 async def broadcast_to_agents(request: Request) -> JSONResponse:

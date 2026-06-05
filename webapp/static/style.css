@@ -941,7 +941,14 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap;
 }
+.split-pane-actions {
+  display: flex; align-items: center; gap: 0.25rem; flex-shrink: 0;
+}
 .split-skill-btn {
+  flex-shrink: 0; padding: 0.15rem 0.35rem; font-size: 0.62rem;
+  text-transform: none; letter-spacing: 0;
+}
+.split-run-stop-btn {
   flex-shrink: 0; padding: 0.15rem 0.35rem; font-size: 0.62rem;
   text-transform: none; letter-spacing: 0;
 }
@@ -1244,6 +1251,12 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   cursor: pointer; font-weight: 600;
 }
 .btn-xs:hover { background: var(--accent); color: #212121; border-color: var(--accent); }
+.btn-xs.btn-danger {
+  background: var(--red); color: #212121; border-color: var(--red);
+}
+.btn-xs.btn-danger:hover {
+  background: var(--red); color: #212121; border-color: var(--red);
+}
 
 /* === Scroll to Bottom === */
 .btn-scroll-bottom {
