@@ -559,6 +559,25 @@
     </div>
   </div>
 
+  <div id="run-goal-overlay" class="modal-overlay hidden">
+    <div class="modal run-goal-modal">
+      <div class="modal-header">
+        <h2>Run Goal</h2>
+        <button id="run-goal-close" class="btn-icon">&times;</button>
+      </div>
+      <p id="run-goal-subtitle" class="modal-subtitle"></p>
+      <div class="form-group">
+        <label for="run-goal-objective">Objective</label>
+        <textarea id="run-goal-objective" rows="8" placeholder="Set the Codex goal objective"></textarea>
+      </div>
+      <div class="run-skill-actions">
+        <button type="button" id="btn-run-goal-clear" class="btn-ghost">Clear Goal</button>
+        <button type="button" id="btn-run-goal-cancel" class="btn-ghost">Cancel</button>
+        <button type="button" id="btn-run-goal-save" class="btn-primary">Save Goal</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Creation Skills Modal -->
   <div id="challenge-create-skill-overlay" class="modal-overlay hidden">
     <div class="modal run-skills-modal">

@@ -33,6 +33,7 @@ let activeRunId = null;             // which run tab is active
 let currentChallengeMode = "single";
 let currentChallengeDefaultSkills = [];
 let runSkillModalRunId = null;
+let runGoalModalRunId = null;
 let wsConnections = new Map();      // run_id -> WebSocket
 let globalWs = null;
 let historyLoadingRuns = new Set(); // run_ids currently replaying saved chat history
@@ -311,6 +312,13 @@ function setSkillChecklist(container, names) {
 }
 
 document.addEventListener("click", (e) => {
+  const goalBtn = e.target.closest(".goal-edit-btn");
+  if (goalBtn) {
+    e.preventDefault();
+    openRunGoalModal(goalBtn.dataset.run || "");
+    return;
+  }
+
   const btn = e.target.closest("[data-skill-action]");
   if (!btn) return;
   const container = document.querySelector(btn.dataset.skillTarget || "");
@@ -2541,6 +2549,10 @@ function formatGoalUsage(goal) {
   return parts.join(" · ");
 }
 
+function canEditRunGoal(run) {
+  return !!run && run.agent === "codex" && (!!run.goal_editable || !!run.goal);
+}
+
 function createGoalBar(runId, extraClass = "") {
   const bar = document.createElement("div");
   bar.className = `goal-bar hidden${extraClass ? ` ${extraClass}` : ""}`;
@@ -2551,21 +2563,23 @@ function createGoalBar(runId, extraClass = "") {
 function updateGoalBarForRun(bar, run) {
   if (!bar) return;
   const goal = normalizeRunGoal(run?.goal);
-  if (!goal) {
+  const editable = canEditRunGoal(run);
+  if (!goal && !editable) {
     bar.classList.add("hidden");
     bar.innerHTML = "";
     bar.removeAttribute("title");
     return;
   }
-  const statusClass = goalStatusClass(goal.status);
-  const usage = formatGoalUsage(goal);
+  const statusClass = goal ? goalStatusClass(goal.status) : "goal-status-paused";
+  const usage = goal ? formatGoalUsage(goal) : "";
   bar.className = `${bar.classList.contains("split-goal-bar") ? "goal-bar split-goal-bar" : "goal-bar"} ${statusClass}`;
-  bar.title = goal.objective || goalStatusLabel(goal.status);
+  bar.title = goal?.objective || "No goal set";
   bar.innerHTML = `
     <span class="goal-label">Goal</span>
-    <span class="goal-status">${esc(goalStatusLabel(goal.status))}</span>
-    <span class="goal-objective">${esc(goal.objective || "No objective")}</span>
+    <span class="goal-status">${esc(goal ? goalStatusLabel(goal.status) : "None")}</span>
+    <span class="goal-objective">${esc(goal?.objective || "No goal set")}</span>
     ${usage ? `<span class="goal-usage">${esc(usage)}</span>` : ""}
+    ${editable ? `<span class="goal-actions"><button type="button" class="btn-ghost btn-xs goal-edit-btn" data-run="${esc(run.id)}">Edit</button></span>` : ""}
   `;
 }
 
@@ -2851,6 +2865,7 @@ function updateRunFromSummary(summary) {
   run.enabled_skills = normalizeSkillNames(summary.enabled_skills || []);
   run.skill_override = !!summary.skill_override;
   run.goal = normalizeRunGoal(summary.goal);
+  run.goal_editable = !!summary.goal_editable;
   if (run.status === "solving") {
     if (!wasSolving || !run._timerStartedAt) run._timerStartedAt = Date.now();
   } else {
@@ -2948,6 +2963,76 @@ async function applyRunSkills(options = {}) {
       : "Run skills updated",
     "success"
   );
+}
+
+function openRunGoalModal(runId) {
+  const run = currentRuns.find((r) => r.id === runId);
+  if (!run || !canEditRunGoal(run)) {
+    showToast("Goal editing is not available for this run", "error");
+    return;
+  }
+  runGoalModalRunId = run.id;
+  const meta = getAgentMeta(run.agent);
+  $("#run-goal-subtitle").textContent = `${runTabLabel(run, meta)} · ${run.id}`;
+  $("#run-goal-objective").value = run.goal?.objective || "";
+  $("#btn-run-goal-clear").disabled = !run.goal;
+  $("#run-goal-overlay").classList.remove("hidden");
+  $("#run-goal-objective").focus();
+}
+
+function closeRunGoalModal() {
+  runGoalModalRunId = null;
+  $("#run-goal-overlay").classList.add("hidden");
+}
+
+function setRunGoalButtonsDisabled(disabled) {
+  ["#btn-run-goal-save", "#btn-run-goal-clear"].forEach((sel) => {
+    const btn = $(sel);
+    if (btn) btn.disabled = disabled;
+  });
+}
+
+async function saveRunGoal() {
+  if (!currentChallengeId || !runGoalModalRunId) return;
+  const objective = $("#run-goal-objective").value.trim();
+  if (!objective) {
+    showToast("Goal objective required", "error");
+    return;
+  }
+  setRunGoalButtonsDisabled(true);
+  const res = await api(
+    `/api/challenges/${currentChallengeId}/runs/${runGoalModalRunId}/goal`,
+    { method: "PUT", body: JSON.stringify({ objective }) }
+  );
+  setRunGoalButtonsDisabled(false);
+  if (!res) return;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) {
+    showToast(data.error || "Failed to update goal", "error");
+    return;
+  }
+  if (data.run) updateRunFromSummary(data.run);
+  closeRunGoalModal();
+  showToast("Goal updated", "success");
+}
+
+async function clearRunGoal() {
+  if (!currentChallengeId || !runGoalModalRunId) return;
+  setRunGoalButtonsDisabled(true);
+  const res = await api(
+    `/api/challenges/${currentChallengeId}/runs/${runGoalModalRunId}/goal`,
+    { method: "DELETE" }
+  );
+  setRunGoalButtonsDisabled(false);
+  if (!res) return;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) {
+    showToast(data.error || "Failed to clear goal", "error");
+    return;
+  }
+  if (data.run) updateRunFromSummary(data.run);
+  closeRunGoalModal();
+  showToast("Goal cleared", "success");
 }
 
 // === Files Run Select ===
@@ -3580,16 +3665,12 @@ function renderRunEvent(runId, event) {
     const run = currentRuns.find((r) => r.id === rid);
     const goal = normalizeRunGoal(event.goal);
     if (!suppressHistoricalStateUpdates) {
-      if (run) run.goal = goal;
+      if (run) {
+        run.goal = goal;
+        if (run.agent === "codex") run.goal_editable = true;
+      }
       updateGoalBars();
     }
-    appendMsg(
-      feed,
-      event.message || (goal ? `Goal ${goalStatusLabel(goal.status)}: ${goal.objective || "No objective"}` : "Goal cleared"),
-      "system-msg goal-event-msg",
-      event.ts
-    );
-    scrollBottomIfActive(runId);
     return;
   }
 
@@ -4960,6 +5041,13 @@ $("#btn-run-skills-apply-all").addEventListener("click", () => {
 $("#btn-run-skills-reset").addEventListener("click", () => {
   applyRunSkills({ reset: true });
 });
+$("#run-goal-close").addEventListener("click", closeRunGoalModal);
+$("#btn-run-goal-cancel").addEventListener("click", closeRunGoalModal);
+$("#run-goal-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "run-goal-overlay") closeRunGoalModal();
+});
+$("#btn-run-goal-save").addEventListener("click", saveRunGoal);
+$("#btn-run-goal-clear").addEventListener("click", clearRunGoal);
 
 // === User Broadcast ===
 $("#btn-broadcast").addEventListener("click", sendBroadcast);

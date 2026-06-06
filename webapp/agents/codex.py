@@ -1143,6 +1143,154 @@ def _goal_event_key(goal: object) -> tuple:
     )
 
 
+async def _codex_app_server_request(
+    method: str,
+    params: dict,
+    cwd: str | Path,
+    *,
+    resume_thread_id: str = "",
+) -> dict:
+    """Run a short-lived Codex app-server request for idle thread updates."""
+    cwd_str = str(Path(cwd).resolve())
+    proc = await asyncio.create_subprocess_exec(
+        "codex", "app-server", "--listen", "stdio://",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd_str,
+        limit=2 ** 24,
+    )
+
+    async def _drain_stderr() -> None:
+        if proc.stderr is None:
+            return
+        async for raw in proc.stderr:
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if line:
+                log.debug("codex app-server stderr: %s", line[:2000])
+
+    stderr_task = asyncio.create_task(_drain_stderr())
+    request_id = 0
+
+    async def _send(msg: dict) -> None:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(msg, separators=(",", ":")).encode() + b"\n")
+        await proc.stdin.drain()
+
+    async def _send_request(req_method: str, req_params: dict | None) -> int:
+        nonlocal request_id
+        request_id += 1
+        msg: dict = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": req_method,
+        }
+        if req_params is not None:
+            msg["params"] = req_params
+        await _send(msg)
+        return request_id
+
+    async def _read_response(expected_id: int) -> dict:
+        assert proc.stdout is not None
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                return {}
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(msg, dict) or msg.get("id") != expected_id:
+                continue
+            if "error" in msg:
+                err = msg["error"]
+                if isinstance(err, dict):
+                    raise RuntimeError(str(err.get("message") or err))
+                raise RuntimeError(str(err))
+            return msg.get("result", {})
+
+    try:
+        rid = await _send_request(
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "ctf-agent-wrapper",
+                    "version": "1.0.0",
+                },
+                "capabilities": {
+                    "experimentalApi": True,
+                    "requestAttestation": False,
+                },
+            },
+        )
+        await _read_response(rid)
+        await _send({"jsonrpc": "2.0", "method": "initialized"})
+
+        if resume_thread_id:
+            rid = await _send_request(
+                "thread/resume",
+                {
+                    "threadId": resume_thread_id,
+                    "approvalPolicy": "never",
+                    "sandbox": "danger-full-access",
+                },
+            )
+            await _read_response(rid)
+
+        rid = await _send_request(method, params)
+        return await _read_response(rid)
+    finally:
+        if stderr_task and not stderr_task.done():
+            stderr_task.cancel()
+        try:
+            if proc.stdin and not proc.stdin.is_closing():
+                proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
+
+async def _set_thread_goal(
+    thread_id: str,
+    objective: str,
+    cwd: str | Path = ".",
+) -> dict | None:
+    result = await _codex_app_server_request(
+        "thread/goal/set",
+        {
+            "threadId": thread_id,
+            "objective": objective,
+            "status": "active",
+        },
+        cwd,
+        resume_thread_id=thread_id,
+    )
+    return _normalize_goal(result.get("goal"))
+
+
+async def _clear_thread_goal(thread_id: str, cwd: str | Path = ".") -> bool:
+    result = await _codex_app_server_request(
+        "thread/goal/clear",
+        {"threadId": thread_id},
+        cwd,
+        resume_thread_id=thread_id,
+    )
+    return bool(result.get("cleared", True))
+
+
 def _copy_permission_profile(value: object) -> dict:
     if not isinstance(value, dict):
         return {}
@@ -1717,6 +1865,17 @@ async def _run_agent_sdk(
     """Run Codex via the app-server JSON-RPC protocol over stdio."""
     if session_state is None:
         session_state = {}
+    run_ref = kwargs.get("_run")
+    if not isinstance(run_ref, dict):
+        run_ref = None
+    goal_command_queue: asyncio.Queue | None = None
+    if run_ref is not None:
+        existing_queue = run_ref.get("_codex_goal_commands")
+        if isinstance(existing_queue, asyncio.Queue):
+            goal_command_queue = existing_queue
+        else:
+            goal_command_queue = asyncio.Queue()
+            run_ref["_codex_goal_commands"] = goal_command_queue
 
     cwd_str = str(Path(cwd).resolve())
 
@@ -2135,10 +2294,73 @@ async def _run_agent_sdk(
         done_seen = False
         done_drain_seconds = 0.5
 
+        async def _process_goal_command(command: dict) -> dict | None:
+            action = command.get("action")
+            future = command.get("future")
+            try:
+                if action == "set":
+                    objective = str(command.get("objective") or "").strip()
+                    if not objective:
+                        raise ValueError("objective required")
+                    rid = await _send_request(
+                        "thread/goal/set",
+                        {
+                            "threadId": thread_id,
+                            "objective": objective,
+                            "status": "active",
+                        },
+                    )
+                    goal_result = await _read_response(rid)
+                    raw_goal = goal_result.get("goal")
+                    goal = _normalize_goal(raw_goal)
+                    emitted_goal_event_keys.add(_goal_event_key(raw_goal))
+                    event = {
+                        "type": "run_goal",
+                        "provider": "codex",
+                        "goal": goal,
+                        "message": "Goal updated",
+                    }
+                elif action == "clear":
+                    rid = await _send_request(
+                        "thread/goal/clear",
+                        {"threadId": thread_id},
+                    )
+                    await _read_response(rid)
+                    event = {
+                        "type": "run_goal",
+                        "provider": "codex",
+                        "goal": None,
+                        "message": "Goal cleared",
+                    }
+                else:
+                    raise ValueError(f"unknown goal action: {action}")
+
+                if isinstance(future, asyncio.Future) and not future.done():
+                    future.set_result(event)
+                return event
+            except Exception as exc:
+                if isinstance(future, asyncio.Future) and not future.done():
+                    future.set_exception(exc)
+                log.warning("Codex goal command failed: %s", exc)
+                return None
+
         while True:
             # Drain broadcast UI events from inject task
             while not _broadcast_ui_events.empty():
                 yield _broadcast_ui_events.get_nowait()
+
+            if goal_command_queue is not None:
+                while True:
+                    try:
+                        goal_command = goal_command_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    event = await _process_goal_command(goal_command)
+                    if deferred_msgs:
+                        msg_queue.extend(deferred_msgs)
+                        deferred_msgs.clear()
+                    if event:
+                        yield event
 
             # Drain queued messages first
             if msg_queue:
@@ -2150,9 +2372,16 @@ async def _run_agent_sdk(
                             proc.stdout.readline(),
                             timeout=done_drain_seconds,
                         )
+                    elif goal_command_queue is not None:
+                        raw_line = await asyncio.wait_for(
+                            proc.stdout.readline(),
+                            timeout=0.25,
+                        )
                     else:
                         raw_line = await proc.stdout.readline()
                 except asyncio.TimeoutError:
+                    if not done_seen:
+                        continue
                     event = _flush_reasoning_event()
                     if event:
                         yield event
@@ -2856,6 +3085,8 @@ async def _run_agent_sdk(
                 proc.kill()
             except ProcessLookupError:
                 pass
+        if run_ref is not None and run_ref.get("_codex_goal_commands") is goal_command_queue:
+            run_ref.pop("_codex_goal_commands", None)
         log.info("Codex app-server subprocess cleaned up")
 
 
@@ -2874,4 +3105,6 @@ provider = AgentProvider(
     effort_levels=_discover_effort_levels(),
     default_effort="xhigh",
     run_agent=_run_agent_sdk,
+    set_thread_goal=_set_thread_goal,
+    clear_thread_goal=_clear_thread_goal,
 )

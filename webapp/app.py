@@ -753,6 +753,19 @@ def normalize_run_goal(goal: object, provider: str = "") -> dict | None:
     return normalized
 
 
+def run_codex_thread_id(run: dict) -> str:
+    session_state = run.get("_session_state") or {}
+    thread_id = session_state.get("codex_thread_id")
+    if isinstance(thread_id, str) and thread_id:
+        return thread_id
+    thread_id = run.get("_codex_thread_id")
+    return thread_id if isinstance(thread_id, str) else ""
+
+
+def run_goal_editable(run: dict) -> bool:
+    return run.get("agent") == "codex" and bool(run_codex_thread_id(run))
+
+
 def apply_run_goal_event(run: dict, event: dict) -> bool:
     if event.get("type") != "run_goal":
         return False
@@ -827,6 +840,7 @@ def public_run_summary(challenge: dict, run: dict) -> dict:
         "enabled_skills": run_enabled_skills(challenge, run),
         "skill_override": run_has_skill_override(run),
         "goal": normalize_run_goal(run.get("goal"), str(run.get("agent") or "")),
+        "goal_editable": run_goal_editable(run),
     }
     if run.get("custom_prompt"):
         summary["custom_prompt"] = run["custom_prompt"]
@@ -8200,6 +8214,154 @@ async def update_challenge_skills(request: Request) -> JSONResponse:
     )
 
 
+async def _record_run_goal_event(
+    challenge_id: str,
+    run_id: str,
+    challenge: dict,
+    run: dict,
+    event: dict,
+) -> None:
+    if "ts" not in event and run.get("solve_start"):
+        event["ts"] = run_elapsed_seconds(run)
+    apply_run_goal_event(run, event)
+    run["output_lines"].append(event)
+    append_output_event(challenge_id, run_id, event)
+    await broadcast(challenge_id, run_id, event)
+    save_metadata(challenge)
+
+
+async def _mutate_run_goal(
+    challenge_id: str,
+    run_id: str,
+    challenge: dict,
+    run: dict,
+    *,
+    objective: str = "",
+    clear: bool = False,
+) -> dict:
+    if run.get("agent") != "codex":
+        raise ValueError("goals are only supported for Codex runs")
+    thread_id = run_codex_thread_id(run)
+    if not thread_id:
+        raise RuntimeError("Codex thread is not ready yet")
+
+    event: dict | None = None
+    queue = run.get("_codex_goal_commands")
+    if run.get("status") == "solving" and isinstance(queue, asyncio.Queue):
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        await queue.put({
+            "action": "clear" if clear else "set",
+            "objective": objective,
+            "future": future,
+        })
+        event = await asyncio.wait_for(future, timeout=10.0)
+        apply_run_goal_event(run, event)
+        save_metadata(challenge)
+        return public_run_summary(challenge, run)
+
+    provider = get_provider(run.get("agent", ""))
+    run_cwd = get_run_cwd(challenge_id, run)
+    if clear:
+        if not provider.clear_thread_goal:
+            raise RuntimeError("provider does not support clearing goals")
+        await provider.clear_thread_goal(thread_id, run_cwd)
+        event = {
+            "type": "run_goal",
+            "provider": "codex",
+            "goal": None,
+            "message": "Goal cleared",
+        }
+    else:
+        if not provider.set_thread_goal:
+            raise RuntimeError("provider does not support editing goals")
+        goal = await provider.set_thread_goal(thread_id, objective, run_cwd)
+        event = {
+            "type": "run_goal",
+            "provider": "codex",
+            "goal": normalize_run_goal(goal, "codex"),
+            "message": "Goal updated",
+        }
+
+    await _record_run_goal_event(challenge_id, run_id, challenge, run, event)
+    return public_run_summary(challenge, run)
+
+
+async def update_run_goal(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    run_id = request.path_params["run_id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    run = challenge.get("runs", {}).get(run_id)
+    if not run:
+        return JSONResponse({"error": "run not found"}, status_code=404)
+
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    objective = str_field(body.get("objective", "")).strip()
+    if not objective:
+        return JSONResponse({"error": "objective required"}, status_code=400)
+
+    try:
+        summary = await _mutate_run_goal(
+            challenge_id,
+            run_id,
+            challenge,
+            run,
+            objective=objective,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except (asyncio.TimeoutError, RuntimeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except Exception as exc:
+        log.error("Failed to update run goal: %s", exc, exc_info=True)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse({"run": summary})
+
+
+async def clear_run_goal(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    run_id = request.path_params["run_id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    run = challenge.get("runs", {}).get(run_id)
+    if not run:
+        return JSONResponse({"error": "run not found"}, status_code=404)
+
+    try:
+        summary = await _mutate_run_goal(
+            challenge_id,
+            run_id,
+            challenge,
+            run,
+            clear=True,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except (asyncio.TimeoutError, RuntimeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except Exception as exc:
+        log.error("Failed to clear run goal: %s", exc, exc_info=True)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse({"run": summary})
+
+
 async def update_run_skills(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
@@ -8292,17 +8454,7 @@ async def update_run_skills(request: Request) -> JSONResponse:
             }
             await broadcast(challenge_id, target_id, status_event)
 
-        updated_runs.append({
-            "id": target_run["id"],
-            "agent": target_run["agent"],
-            "model": target_run["model"],
-            "effort": target_run.get("effort", ""),
-            "status": target_run["status"],
-            "error": target_run.get("error"),
-            "duration_ms": effective_run_duration_ms(target_run),
-            "enabled_skills": run_enabled_skills(challenge, target_run),
-            "skill_override": run_has_skill_override(target_run),
-        })
+        updated_runs.append(public_run_summary(challenge, target_run))
 
     challenge["status"] = derive_challenge_status(challenge)
     save_metadata(challenge)
@@ -10805,6 +10957,8 @@ routes = [
     Route("/api/challenges/{id}/flag-formats", add_flag_format, methods=["POST"]),
     Route("/api/challenges/{id}/flags", add_manual_flag, methods=["POST"]),
     Route("/api/challenges/{id}/skills", update_challenge_skills, methods=["PUT"]),
+    Route("/api/challenges/{id}/runs/{run_id}/goal", update_run_goal, methods=["PUT"]),
+    Route("/api/challenges/{id}/runs/{run_id}/goal", clear_run_goal, methods=["DELETE"]),
     Route("/api/challenges/{id}/runs/{run_id}/skills", update_run_skills, methods=["PUT"]),
     Route("/api/challenges/{id}/stats", get_challenge_stats, methods=["GET"]),
     Route("/api/challenges/{id}/runs/{run_id}/events", list_run_events, methods=["GET"]),
