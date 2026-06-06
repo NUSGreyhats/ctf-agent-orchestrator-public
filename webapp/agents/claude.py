@@ -18,6 +18,14 @@ CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 CLAUDE_CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 CLAUDE_USAGE_API = "https://api.anthropic.com/api/oauth/usage"
 
+# Claude CLI `system` message subtypes that are internal status noise. These
+# carry no useful human-readable text, so the parser would otherwise fall back
+# to rendering the bare subtype string as a yellow status pill in the UI.
+# Add new offenders here as they surface.
+_DROP_SYSTEM_SUBTYPES = {
+    "thinking_tokens",
+}
+
 
 # ---------------------------------------------------------------------------
 # SDK-based agent runner
@@ -51,6 +59,8 @@ async def _run_agent_sdk(
         ThinkingBlock,
         ToolUseBlock,
         ToolResultBlock,
+        ServerToolUseBlock,
+        ServerToolResultBlock,
         create_sdk_mcp_server,
         tool,
     )
@@ -121,6 +131,19 @@ async def _run_agent_sdk(
                         "content": str(getattr(block, "content", "")),
                         "is_error": getattr(block, "is_error", False),
                     })
+                elif isinstance(block, ServerToolUseBlock):
+                    content.append({
+                        "type": "tool_use", "id": block.id,
+                        "name": block.name, "input": block.input,
+                        "server": True,
+                    })
+                elif isinstance(block, ServerToolResultBlock):
+                    content.append({
+                        "type": "tool_result",
+                        "tool_use_id": getattr(block, "tool_use_id", ""),
+                        "content": str(getattr(block, "content", "")),
+                        "server": True,
+                    })
             if msg.error:
                 content.append({
                     "type": "text",
@@ -138,6 +161,14 @@ async def _run_agent_sdk(
             return event
 
         elif isinstance(msg, UserMessage):
+            # UserMessage.content is normally a list of blocks. The CLI also
+            # echoes back user turns we sent with plain-string content (the
+            # initial prompt and broadcast injections) as a raw str. Those
+            # are already rendered in the UI by app.py (the "user_prompt" and
+            # "teammate_broadcast" events), so drop the echo here. Guard
+            # explicitly — iterating a str would yield characters, not blocks.
+            if isinstance(msg.content, str):
+                return None
             content = []
             for block in msg.content:
                 if isinstance(block, ToolResultBlock):
@@ -169,9 +200,14 @@ async def _run_agent_sdk(
         elif isinstance(msg, SystemMessage):
             subtype = getattr(msg, "subtype", "")
             data = getattr(msg, "data", {}) or {}
+            if session_state is not None and data.get("session_id"):
+                session_state["claude_session_id"] = data["session_id"]
             if subtype == "init":
-                if session_state is not None and data.get("session_id"):
-                    session_state["claude_session_id"] = data["session_id"]
+                return None
+            # Skip internal status subtypes that would otherwise render as
+            # yellow status pills in the UI (see _DROP_SYSTEM_SUBTYPES).
+            if subtype in _DROP_SYSTEM_SUBTYPES:
+                log.debug("Dropping blacklisted Claude system subtype: %s", subtype)
                 return None
             text = data.get("message", "") or subtype
             if text:
@@ -179,6 +215,12 @@ async def _run_agent_sdk(
 
         elif isinstance(msg, ResultMessage):
             event: dict = {"type": "result", "subtype": msg.subtype}
+            if msg.is_error:
+                event["is_error"] = True
+            if msg.errors:
+                event["errors"] = msg.errors
+            if msg.api_error_status:
+                event["api_error_status"] = msg.api_error_status
             if msg.result:
                 event["result"] = msg.result
             if msg.total_cost_usd:
