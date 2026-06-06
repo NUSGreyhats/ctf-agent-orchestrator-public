@@ -171,6 +171,8 @@ _runs/{run_id}/
 
 When run skills are changed mid-run, the wrapper stops the selected run or all selected runs, refreshes the symlinks, records a `run_skills` event, and resumes by default. The prompt does not enumerate available skills; it only adds `Follow ctf-methodology and solve the CTF challenge` when that skill is enabled.
 
+Codex does not currently auto-discover workspace-local `.codex/skills` symlinks in its session skill inventory. The wrapper therefore also attaches the selected `.codex/skills/*/SKILL.md` files as structured Codex `skill` inputs on each turn, including after a mid-run skill change.
+
 ## Status and Solve Lifecycle
 
 Challenge status is derived from run statuses:

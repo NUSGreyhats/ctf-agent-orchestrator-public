@@ -28,6 +28,53 @@ REASONING_LABELS = {
 DEFAULT_COMMON_REASONING_LEVELS = {"low", "medium", "high", "xhigh"}
 
 
+def _read_skill_name(skill_file: Path, fallback: str) -> str:
+    try:
+        lines = skill_file.read_text(errors="replace").splitlines()
+    except OSError:
+        return fallback
+    if not lines or lines[0].strip() != "---":
+        return fallback
+    for line in lines[1:80]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        if not stripped.startswith("name:"):
+            continue
+        name = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+        return name or fallback
+    return fallback
+
+
+def _workspace_skill_inputs(cwd: str | Path) -> list[dict]:
+    """Return Codex structured skill inputs selected for this run workspace."""
+    skills_dir = Path(cwd) / ".codex" / "skills"
+    if not skills_dir.is_dir():
+        return []
+
+    inputs = []
+    try:
+        children = sorted(skills_dir.iterdir(), key=lambda path: path.name.lower())
+    except OSError:
+        return []
+
+    seen: set[str] = set()
+    for child in children:
+        skill_file = child / "SKILL.md"
+        if not skill_file.is_file():
+            continue
+        name = _read_skill_name(skill_file, child.name)
+        if name in seen:
+            continue
+        seen.add(name)
+        inputs.append({
+            "type": "skill",
+            "name": name,
+            "path": str(skill_file),
+        })
+    return inputs
+
+
 def _model_reasoning_map() -> dict[str, set[str]]:
     if not CODEX_MODELS_CACHE_FILE.exists():
         return {}
@@ -1900,9 +1947,27 @@ async def _run_agent_sdk(
             log.info("Started new Codex thread: %s", thread_id)
 
         # --- Send turn ---
+        skill_inputs = _workspace_skill_inputs(cwd_str)
+        if skill_inputs:
+            try:
+                rid = await _send_request(
+                    "skills/list",
+                    {"cwds": [cwd_str], "forceReload": True},
+                )
+                await _read_response(rid)
+            except Exception as exc:
+                log.warning("Codex skills/list forceReload failed: %s", exc)
+            log.info(
+                "Attaching %d Codex workspace skill input(s): %s",
+                len(skill_inputs),
+                ", ".join(item["name"] for item in skill_inputs),
+            )
         turn_params: dict = {
             "threadId": thread_id,
-            "input": [{"type": "text", "text": prompt}],
+            "input": [
+                *skill_inputs,
+                {"type": "text", "text": prompt},
+            ],
         }
         if model:
             turn_params["model"] = model

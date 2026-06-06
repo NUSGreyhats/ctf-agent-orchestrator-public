@@ -10,7 +10,7 @@ This project streamlines that setup. It provisions an isolated cloud VM with the
 
 Out of the box, agents are already effective. But we can do better by providing **skills** — structured workflows that guide how the agent should approach different challenge types (forensics, reversing, crypto, pwn, web, etc.). Skills act as a feedback loop: when you notice an agent going down a rabbithole or missing an obvious technique, you encode that knowledge into a skill so it does not repeat the mistake. Over time, the skill library compounds and the solve rate improves.
 
-Repo-owned skills live in `skills/`. During install-script setup, repo-owned and external skills are copied into the generated `all-skills/` catalog. The web app then symlinks the selected skills into each challenge run's project-level agent skill directories, such as `.claude/skills` and `.codex/skills`. Additional skills can be uploaded from Settings as a `.zip` bundle or single `SKILL.md`, and are installed into the same runtime catalog.
+Repo-owned skills live in `skills/`. During install-script setup, repo-owned and external skills are copied into the generated `all-skills/` catalog. The web app then symlinks the selected skills into each challenge run's project-level agent skill directories, such as `.claude/skills` and `.codex/skills`; Codex runs also receive the selected `.codex/skills` entries as structured skill inputs. Additional skills can be uploaded from Settings as a `.zip` bundle or single `SKILL.md`, and are installed into the same runtime catalog.
 
 ## Supported Agents
 
