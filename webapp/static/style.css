@@ -1371,6 +1371,9 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   background: var(--bg); color: var(--text); font: 0.76rem/1.45 var(--mono);
   white-space: pre-wrap; word-break: break-word;
 }
+.auth-terminal-output a {
+  color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+}
 .auth-terminal-input-row {
   display: flex; gap: 0.5rem; padding: 0.75rem 0.9rem;
   border-top: 1px solid var(--border); background: var(--bg-panel);
