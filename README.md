@@ -10,7 +10,7 @@ This project streamlines that setup. It provisions an isolated cloud VM with the
 
 Out of the box, agents are already effective. But we can do better by providing **skills** — structured workflows that guide how the agent should approach different challenge types (forensics, reversing, crypto, pwn, web, etc.). Skills act as a feedback loop: when you notice an agent going down a rabbithole or missing an obvious technique, you encode that knowledge into a skill so it does not repeat the mistake. Over time, the skill library compounds and the solve rate improves.
 
-Repo-owned skills live in `skills/`. During environment setup, repo-owned and external skills are copied into the generated `all-skills/` catalog. The web app then symlinks the selected skills into each challenge run's project-level agent skill directories, such as `.claude/skills` and `.codex/skills`. Additional skills can be uploaded from Settings as a `.zip` bundle or single `SKILL.md`, and are installed into the same runtime catalog.
+Repo-owned skills live in `skills/`. During install-script setup, repo-owned and external skills are copied into the generated `all-skills/` catalog. The web app then symlinks the selected skills into each challenge run's project-level agent skill directories, such as `.claude/skills` and `.codex/skills`. Additional skills can be uploaded from Settings as a `.zip` bundle or single `SKILL.md`, and are installed into the same runtime catalog.
 
 ## Supported Agents
 
@@ -97,14 +97,14 @@ Optional Discord bot for team coordination:
 ### Infrastructure and Deployment
 
 - **Cloud providers** — Terraform configs for Hetzner Cloud, DigitalOcean, and GCP.
-- **Runtime allowlist deploy** — Deploys copy only runtime project files (`environment`, `webapp`, `skills`, `mcps`, `hooks`, `README.md`, `DESIGN.md`) instead of the whole repo. Local `.git/`, `infra/`, Terraform state/vars, and local caches are not copied to the VM. Runtime `challenges`, `state`, and generated `all-skills` are preserved.
+- **Runtime allowlist deploy** — Deploys copy only runtime project files (`install_scripts`, `webapp`, `skills`, `mcps`, `hooks`, `README.md`, `DESIGN.md`) instead of the whole repo. Local `.git/`, `infra/`, Terraform state/vars, and local caches are not copied to the VM. Runtime `challenges`, `state`, and generated `all-skills` are preserved.
 - **Runtime data preservation** — Deploy sync preserves `/root/ctf-agent-wrapper/challenges` and `/root/ctf-agent-wrapper/state` on the VM.
 - **GDB MCP server** — Persistent GDB session for kernel/binary debugging, registered for Claude and Codex.
 - **IDA Pro skill** — Headless static analysis through the `analyze-with-ida-domain-api` skill, backed by IDA Pro's Python Domain API.
 - **WireGuard VPN** — Built-in VPN management for challenges that require network access to a CTF infrastructure. Configure, start/stop, generate client configs, and route Linux client-side internal CIDRs back to the server through a reverse WireGuard tunnel.
-- **uv-based Python installs** — Environment scripts install most Python dependencies with `uv pip install --system` for faster provisioning while keeping `pip` available for vendor-local wheels.
-- **Parallel environment setup** — `environment/run.sh` runs independent tooling categories concurrently with package-manager locks; set `ENVIRONMENT_PARALLEL=0` for sequential setup.
-- **Provisioning validation** — `environment/990_validate.sh` checks critical commands and Python imports at the end of setup.
+- **uv-based Python installs** — Install scripts install most Python dependencies with `uv pip install --system` for faster provisioning while keeping `pip` available for vendor-local wheels.
+- **Parallel install setup** — `install_scripts/run.sh` runs independent tooling categories concurrently with package-manager locks; set `INSTALL_SCRIPTS_PARALLEL=0` for sequential setup.
+- **Provisioning validation** — `install_scripts/990_validate.sh` checks critical commands and Python imports at the end of setup.
 
 ### Persistence
 
@@ -192,7 +192,7 @@ terraform destroy
 
 ```text
 infra/          Terraform configs (Hetzner Cloud, DigitalOcean, GCP)
-environment/    Setup scripts (tools, CLIs, dependencies)
+install_scripts/ Setup scripts (tools, CLIs, dependencies)
   lib/          Shared shell helpers used by setup scripts
 webapp/         Starlette/ASGI app for challenge management and agent streaming
   agents/       Agent provider implementations (Claude, Codex)

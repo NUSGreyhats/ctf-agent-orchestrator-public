@@ -3,12 +3,12 @@
 Skills come from two sources:
 
 1. **This repo** — methodology, forensics, and tool-specific skills
-2. **[ljagiello/ctf-skills](https://github.com/ljagiello/ctf-skills)** — category skills (pwn, web, crypto, rev, misc, osint, malware, AI/ML) copied into the runtime skill catalog during environment setup
+2. **[ljagiello/ctf-skills](https://github.com/ljagiello/ctf-skills)** — category skills (pwn, web, crypto, rev, misc, osint, malware, AI/ML) copied into the runtime skill catalog during install-script setup
 
 ## This Repo
 
 The repository groups skills by source domain for maintainability. During
-environment setup, `environment/013_install-skills.sh` copies each directory
+install-script setup, `install_scripts/013_install-skills.sh` copies each directory
 that contains a `SKILL.md` into `all-skills/` as a top-level skill directory
 named from its frontmatter `name:` field. The web app symlinks selected skills
 from `all-skills/` into each challenge run's `.claude/skills` and
@@ -40,7 +40,7 @@ from `all-skills/` into each challenge run's `.claude/skills` and
 
 ## External (ljagiello/ctf-skills)
 
-Copied to `all-skills/` by `environment/013_install-skills.sh`.
+Copied to `all-skills/` by `install_scripts/013_install-skills.sh`.
 
 | Skill | Category |
 |---|---|

@@ -19,7 +19,7 @@ ssh -i ~/.ssh/id_rsa root@$(terraform output -raw external_ip)
 # Get the web UI password:
 terraform output -raw webapp_password
 
-# Re-run only the long environment bootstrap:
+# Re-run only the long install-script bootstrap:
 terraform apply -replace=null_resource.setup_environment
 
 # Re-deploy only the web app / service:
@@ -30,7 +30,7 @@ terraform destroy
 ```
 
 You can also omit `hcloud_token` from `terraform.tfvars` and export `HCLOUD_TOKEN` instead. Set `ssh_public_key_path` and `ssh_private_key_path` to a matching keypair if you are not using `~/.ssh/id_rsa(.pub)`.
-Set `repo_path` to the repository root that contains `environment/` and `webapp/`. The default `../..` is correct when running from `infra/hetzner/`.
+Set `repo_path` to the repository root that contains `install_scripts/` and `webapp/`. The default `../..` is correct when running from `infra/hetzner/`.
 
 Hetzner VM specs are controlled in `variables.tf` / `terraform.tfvars` with `instance_name`, `location`, `server_type`, and `image`.
 

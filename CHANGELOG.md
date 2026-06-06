@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Install Scripts Rename
+
+Renamed the provisioning script directory from `environment/` to
+`install_scripts/`. Terraform deploy syncs, setup commands, docs, and
+shellcheck references now use the new path. The setup runner now uses
+`INSTALL_SCRIPTS_PARALLEL` and `INSTALL_SCRIPTS_LOG_DIR`.
+
 ### IDA Pro via Skill
 
 Restored the `analyze-with-ida-domain-api` skill for headless IDA Pro

@@ -262,7 +262,7 @@ Terraform supports Hetzner Cloud, DigitalOcean, and GCP.
 Deploy syncs use a runtime allowlist instead of copying the entire repository. The copied paths are:
 
 ```text
-environment
+install_scripts
 webapp
 skills
 mcps
@@ -280,11 +280,11 @@ Remote runtime data is preserved during sync:
 /root/ctf-agent-wrapper/state
 ```
 
-DigitalOcean and GCP provisioners include a `sync_hash` trigger so runtime changes cause a new sync and service restart. Hetzner splits sync, environment setup, and webapp restart into separate resources; skill changes are included in the environment setup hash because skills are installed into agent skill directories.
+DigitalOcean and GCP provisioners include a `sync_hash` trigger so runtime changes cause a new sync and service restart. Hetzner splits sync, install-script setup, and webapp restart into separate resources; skill changes are included in the install-script setup hash because skills are installed into agent skill directories.
 
-## Environment Setup
+## Install Scripts
 
-Environment scripts remain numbered and executable by `environment/run.sh`, but share common helper functions from `environment/lib/common.sh` for logging, retries, package installs, downloads, package-manager locks, and shell-profile updates. By default, `run.sh` uses a dependency-aware parallel plan: the base bootstrap runs first, independent tooling categories run concurrently, agent registration runs after the local MCP tooling is available, and validation runs last. Set `ENVIRONMENT_PARALLEL=0` to force the old sequential order.
+Install scripts remain numbered and executable by `install_scripts/run.sh`, but share common helper functions from `install_scripts/lib/common.sh` for logging, retries, package installs, downloads, package-manager locks, and shell-profile updates. By default, `run.sh` uses a dependency-aware parallel plan: the base bootstrap runs first, independent tooling categories run concurrently, agent registration runs after the local MCP tooling is available, and validation runs last. Set `INSTALL_SCRIPTS_PARALLEL=0` to force the old sequential order.
 
 Most Python dependencies are installed with:
 
@@ -294,7 +294,7 @@ uv pip install --system ...
 
 This keeps the disposable VM's global Python workflow while improving install speed and resolver/cache behavior. `python3 -m pip` is retained only for vendor-local wheels such as IDA's `idapro*.whl`.
 
-The last setup script, `environment/990_validate.sh`, validates critical commands and Python imports. It catches incomplete provisioning before the webapp is used.
+The last setup script, `install_scripts/990_validate.sh`, validates critical commands and Python imports. It catches incomplete provisioning before the webapp is used.
 
 ## Persistence
 

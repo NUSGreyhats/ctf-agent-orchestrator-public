@@ -1,5 +1,5 @@
 #!/bin/bash
-# Shared helpers for environment provisioning scripts.
+# Shared helpers for install/provisioning scripts.
 # shellcheck shell=bash
 
 LOCK_ROOT="${CTF_AGENT_LOCK_ROOT:-/var/lock/ctf-agent-wrapper}"

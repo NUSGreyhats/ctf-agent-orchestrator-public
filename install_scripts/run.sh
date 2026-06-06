@@ -3,12 +3,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=environment/lib/common.sh
+# shellcheck source=install_scripts/lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
 
 START=$SECONDS
-PARALLEL_MODE="${ENVIRONMENT_PARALLEL:-1}"
-LOG_BASE="${ENVIRONMENT_LOG_DIR:-/var/log/ctf-agent-wrapper/environment}"
+PARALLEL_MODE="${INSTALL_SCRIPTS_PARALLEL:-1}"
+LOG_BASE="${INSTALL_SCRIPTS_LOG_DIR:-/var/log/ctf-agent-wrapper/install_scripts}"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 LOG_DIR="$LOG_BASE/$RUN_ID"
 
@@ -34,7 +34,7 @@ run_one() {
   local script_start=$SECONDS
 
   if [ ! -f "$script" ]; then
-    warn "Missing environment script: $name"
+    warn "Missing install script: $name"
     return 1
   fi
 
@@ -59,7 +59,7 @@ run_sequential() {
   local index=0
 
   if [ "$total" -eq 0 ]; then
-    warn "No environment scripts to run"
+    warn "No install scripts to run"
     return 1
   fi
 
@@ -147,17 +147,17 @@ run_dependency_graph() {
 mapfile -t ALL_SCRIPTS < <(find "$SCRIPT_DIR" -maxdepth 1 -type f -name '[0-9]*.sh' -printf '%f\n' | sort)
 
 if [ "${#ALL_SCRIPTS[@]}" -eq 0 ]; then
-  warn "No environment scripts found in $SCRIPT_DIR"
+  warn "No install scripts found in $SCRIPT_DIR"
   exit 1
 fi
 
-log "Environment logs: $LOG_DIR"
+log "Install script logs: $LOG_DIR"
 
 if [[ "$PARALLEL_MODE" == "0" || "$PARALLEL_MODE" == "false" || "$PARALLEL_MODE" == "no" ]]; then
-  log "Running environment setup sequentially (ENVIRONMENT_PARALLEL=$PARALLEL_MODE)"
+  log "Running install scripts sequentially (INSTALL_SCRIPTS_PARALLEL=$PARALLEL_MODE)"
   run_sequential "${ALL_SCRIPTS[@]}"
 else
-  log "Running environment setup with dependency-aware parallelism"
+  log "Running install scripts with dependency-aware parallelism"
   run_dependency_graph
 fi
 
