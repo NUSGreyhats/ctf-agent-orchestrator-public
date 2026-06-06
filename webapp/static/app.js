@@ -5426,6 +5426,12 @@ function renderUsage(data) {
   document.querySelectorAll(".agent-auth-start").forEach((btn) => {
     btn.addEventListener("click", () => startAgentAuth(btn.dataset.agent || ""));
   });
+  document.querySelectorAll(".agent-env-auth-save").forEach((btn) => {
+    btn.addEventListener("click", () => saveAgentEnvAuth(btn.dataset.agent || ""));
+  });
+  document.querySelectorAll(".agent-env-auth-clear").forEach((btn) => {
+    btn.addEventListener("click", () => clearAgentEnvAuth(btn.dataset.agent || ""));
+  });
 
   const dailySection = $("#usage-daily");
   const dailyEntry = agentCatalog
@@ -5447,7 +5453,74 @@ function renderAuthActions(agent, connected, auth) {
   return `<div class="usage-auth-actions">
     <button type="button" class="btn-ghost btn-sm agent-auth-start" data-agent="${esc(agent.name)}" ${disabled}>${label}</button>
     ${command ? `<span class="text-muted"><code>${esc(command)}</code></span>` : ""}
+  </div>${agent.name === "claude" ? renderClaudeEnvAuth(auth) : ""}`;
+}
+
+function renderClaudeEnvAuth(auth) {
+  const envAuth = auth.env_auth || {};
+  const configured = !!envAuth.configured;
+  const baseUrl = envAuth.base_url || "";
+  const source = envAuth.source === "process" ? "process env" : "saved env";
+  const status = configured
+    ? `ANTHROPIC_AUTH_TOKEN configured from ${source}`
+    : "No ANTHROPIC_AUTH_TOKEN configured";
+  const clearDisabled = envAuth.saved ? "" : "disabled";
+  return `<div class="usage-env-auth" data-agent="claude">
+    <div class="usage-env-auth-title">Environment Login</div>
+    <label class="usage-env-auth-field">
+      <span>ANTHROPIC_BASE_URL</span>
+      <input type="url" class="agent-env-base-url" value="${esc(baseUrl)}" placeholder="https://api.anthropic.com">
+    </label>
+    <label class="usage-env-auth-field">
+      <span>ANTHROPIC_AUTH_TOKEN</span>
+      <input type="password" class="agent-env-auth-token" autocomplete="off" placeholder="${configured ? "Configured; leave blank to keep" : "Token"}">
+    </label>
+    <div class="usage-env-auth-actions">
+      <button type="button" class="btn-ghost btn-sm agent-env-auth-save" data-agent="claude">Save Env Login</button>
+      <button type="button" class="btn-ghost btn-sm agent-env-auth-clear" data-agent="claude" ${clearDisabled}>Clear</button>
+      <span class="text-muted">${esc(status)}</span>
+    </div>
   </div>`;
+}
+
+async function saveAgentEnvAuth(agentName) {
+  if (agentName !== "claude") return;
+  const form = document.querySelector(`.usage-env-auth[data-agent="${agentName}"]`);
+  if (!form) return;
+  const baseUrl = form.querySelector(".agent-env-base-url")?.value.trim() || "";
+  const authToken = form.querySelector(".agent-env-auth-token")?.value.trim() || "";
+  const res = await api("/api/agents/auth/env", {
+    method: "POST",
+    body: JSON.stringify({
+      agent: agentName,
+      base_url: baseUrl,
+      auth_token: authToken,
+    }),
+  });
+  if (!res) return;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) {
+    showToast(data.error || "Failed to save Claude env login", "error");
+    return;
+  }
+  showToast("Claude env login saved", "success");
+  await loadUsage();
+}
+
+async function clearAgentEnvAuth(agentName) {
+  if (agentName !== "claude") return;
+  const res = await api("/api/agents/auth/env", {
+    method: "POST",
+    body: JSON.stringify({ agent: agentName, clear: true }),
+  });
+  if (!res) return;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) {
+    showToast(data.error || "Failed to clear Claude env login", "error");
+    return;
+  }
+  showToast("Claude env login cleared", "success");
+  await loadUsage();
 }
 
 function setAgentAuthTerminal(agent, command) {
