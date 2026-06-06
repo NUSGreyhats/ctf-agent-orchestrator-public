@@ -17,15 +17,15 @@ webapp/
 
 The backend runs provider-specific SDK/CLI integrations, normalizes their event streams into a shared UI format, and persists challenge state to `/root/ctf-agent-wrapper/state` so solver metadata stays out of challenge working directories.
 
-Methodology and domain skills live in `/root/ctf-agent-wrapper/skills/`. `environment/013_install-skills.sh` builds `/root/ctf-agent-wrapper/all-skills/`, and the web app symlinks the selected skills into each run workspace under `.claude/skills` and `.codex/skills`.
+Methodology and domain skills live in `/root/ctf-agent-wrapper/skills/`. `install_scripts/013_install-skills.sh` builds `/root/ctf-agent-wrapper/all-skills/`, and the web app symlinks the selected skills into each run workspace under `.claude/skills` and `.codex/skills`.
 
 ## Setup
 
 ### Prerequisites
 
 - Python 3.12+ with `starlette` and `uvicorn`
-- Claude Code CLI (`claude`) — install via `environment/003_install-claude-code.sh`
-- Codex CLI (`codex`) — install via `environment/010_install-codex.sh`
+- Claude Code CLI (`claude`) — install via `install_scripts/003_install-claude-code.sh`
+- Codex CLI (`codex`) — install via `install_scripts/010_install-codex.sh`
 - At least one agent authenticated (`claude auth login` or `codex login`)
 
 ### Running

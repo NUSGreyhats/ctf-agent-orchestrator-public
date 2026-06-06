@@ -22,8 +22,8 @@ provider "hcloud" {
 locals {
   repo_root = abspath("${path.module}/../..")
 
-  environment_files = sort(fileset(local.repo_root, "environment/**"))
-  hook_files        = sort(fileset(local.repo_root, "hooks/**"))
+  install_script_files = sort(fileset(local.repo_root, "install_scripts/**"))
+  hook_files           = sort(fileset(local.repo_root, "hooks/**"))
   mcp_files = sort([
     for f in fileset(local.repo_root, "mcps/**") : f
     if !can(regex("(^|/)__pycache__/", f)) && !can(regex("\\.py[co]$", f))
@@ -36,7 +36,7 @@ locals {
   doc_files   = ["README.md", "DESIGN.md"]
 
   sync_files = distinct(concat(
-    local.environment_files,
+    local.install_script_files,
     local.hook_files,
     local.mcp_files,
     local.webapp_files,
@@ -44,8 +44,8 @@ locals {
     local.doc_files,
   ))
 
-  environment_hash = sha256(join("", [
-    for f in concat(local.environment_files, local.hook_files, local.skill_files) : "${f}:${filesha256("${local.repo_root}/${f}")}"
+  install_scripts_hash = sha256(join("", [
+    for f in concat(local.install_script_files, local.hook_files, local.skill_files) : "${f}:${filesha256("${local.repo_root}/${f}")}"
   ]))
 
   webapp_hash = sha256(join("", [
@@ -143,7 +143,7 @@ resource "null_resource" "sync_repo" {
       tar -C "$SRC_PATH" --exclude-vcs \
         --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
         --exclude='.DS_Store' -cf - \
-        environment webapp skills mcps hooks README.md DESIGN.md \
+        install_scripts webapp skills mcps hooks README.md DESIGN.md \
         | ssh $SSH_OPTS root@"$IP" "TMP_DIR=\$(mktemp -d /root/ctf-agent-wrapper.sync.XXXXXX) && trap 'rm -rf \"\$TMP_DIR\"' EXIT && mkdir -p /root/ctf-agent-wrapper /root/ctf-agent-wrapper/challenges /root/ctf-agent-wrapper/state /root/ctf-agent-wrapper/all-skills && tar -C \"\$TMP_DIR\" -xf - && find /root/ctf-agent-wrapper -mindepth 1 -maxdepth 1 -not -name challenges -not -name state -not -name all-skills -exec rm -rf {} + && cp -a \"\$TMP_DIR\"/. /root/ctf-agent-wrapper/"
     EOT
   }
@@ -153,7 +153,7 @@ resource "null_resource" "setup_environment" {
   depends_on = [null_resource.sync_repo]
 
   triggers = {
-    environment_hash = local.environment_hash
+    install_scripts_hash = local.install_scripts_hash
   }
 
   provisioner "local-exec" {
@@ -171,8 +171,8 @@ resource "null_resource" "setup_environment" {
         sleep 5
       done
 
-      step "Running environment setup"
-      ssh $SSH_OPTS root@"$IP" "bash /root/ctf-agent-wrapper/environment/run.sh"
+      step "Running install script setup"
+      ssh $SSH_OPTS root@"$IP" "bash /root/ctf-agent-wrapper/install_scripts/run.sh"
     EOT
   }
 }
