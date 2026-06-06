@@ -68,6 +68,11 @@ let runStepCounts = new Map();
 let runStats = new Map();
 let statsUseSnapshot = false;
 let statsRefreshTimer = null;
+let runResources = new Map();
+let runResourceHistory = new Map();
+let challengeResources = new Map();
+let challengeResourceHistory = new Map();
+const RESOURCE_HISTORY_POINTS = 150;
 
 // Timer & cost
 let timerInterval = null;
@@ -590,6 +595,12 @@ async function loadChallenges() {
   const res = await api("/api/challenges");
   if (!res) return;
   const challenges = await res.json();
+  for (const c of challenges) {
+    applyChallengeResource(c.id, c.resource_usage, c.resource_history);
+    for (const run of c.runs || []) {
+      applyRunResource(run.id, run.resource_usage, run.resource_history);
+    }
+  }
   const list = $("#challenges-list");
   const empty = $("#empty-state");
 
@@ -653,6 +664,7 @@ async function loadChallenges() {
         <span class="card-info-line">${esc(challengeInfo)}</span>
         <span class="card-info-line card-info-dim">${esc(runInfo)}</span>
         ${dur ? `<span class="card-info-line card-info-dim">${esc(dur)}</span>` : ""}
+        ${renderChallengeResourceCard(c.id)}
         ${isPending ? `<button class="btn-card-start" data-id="${c.id}">&#9654; Start</button>` : ""}
         <button class="btn-card-delete" data-id="${c.id}" title="Delete">&times;</button>
       </div>`;
@@ -1482,6 +1494,10 @@ async function openChallenge(id) {
     ...run,
     goal: normalizeRunGoal(run.goal),
   }));
+  applyChallengeResource(c.id, c.resource_usage, c.resource_history);
+  for (const run of currentRuns) {
+    applyRunResource(run.id, run.resource_usage, run.resource_history);
+  }
 
   $("#detail-name").textContent = c.name;
   updateStatusBadge(c.status);
@@ -1888,6 +1904,11 @@ function connectGlobalWS() {
     if (event.type === "challenge_status" && event.challenge_id) {
       updateDashboardChallengeStatus(event.challenge_id, event.status);
     }
+    if (event.type === "challenge_resource_usage" && event.challenge_id) {
+      applyChallengeResource(event.challenge_id, event.usage, event.history);
+      updateDashboardResourceCard(event.challenge_id);
+      if (event.challenge_id === currentChallengeId) renderStats();
+    }
   };
   globalWs.onclose = () => {
     globalWs = null;
@@ -1912,7 +1933,14 @@ function updateDashboardChallengeStatus(challengeId, status) {
 }
 
 function isTranscriptEvent(event) {
-  return !["run_status", "challenge_status", "run_added", "flag_found"].includes(event.type);
+  return ![
+    "run_status",
+    "challenge_status",
+    "challenge_resource_usage",
+    "run_resource_usage",
+    "run_added",
+    "flag_found",
+  ].includes(event.type);
 }
 
 function rememberTranscriptEvent(runId, event) {
@@ -2866,6 +2894,7 @@ function updateRunFromSummary(summary) {
   run.skill_override = !!summary.skill_override;
   run.goal = normalizeRunGoal(summary.goal);
   run.goal_editable = !!summary.goal_editable;
+  applyRunResource(run.id, summary.resource_usage, summary.resource_history);
   if (run.status === "solving") {
     if (!wasSolving || !run._timerStartedAt) run._timerStartedAt = Date.now();
   } else {
@@ -3660,6 +3689,13 @@ function renderRunEvent(runId, event) {
     return;
   }
 
+  if (event.type === "run_resource_usage") {
+    const rid = event.run_id || runId;
+    applyRunResource(rid, event.usage, event.history);
+    renderStats();
+    return;
+  }
+
   if (event.type === "run_goal") {
     const rid = event.run_id || runId;
     const run = currentRuns.find((r) => r.id === rid);
@@ -3701,6 +3737,7 @@ function renderRunEvent(runId, event) {
     const r = event.run;
     if (currentRuns.some((x) => x.id === r.id)) return;
     r.goal = normalizeRunGoal(r.goal);
+    applyRunResource(r.id, r.resource_usage, r.resource_history);
     currentRuns.push(r);
     if (r.status === "solving") activateRunTimer(r);
     addRunTab(r);
@@ -4334,6 +4371,185 @@ function fmtCost(usd) {
   return "$" + usd.toFixed(4);
 }
 
+function normalizeResourceUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  return {
+    ts: Number(usage.ts || Date.now() / 1000),
+    pgid: usage.pgid ?? null,
+    cpu_percent: Number(usage.cpu_percent || 0),
+    rss_bytes: Number(usage.rss_bytes || 0),
+    process_count: Number(usage.process_count || 0),
+    warning: !!usage.warning,
+    processes: Array.isArray(usage.processes) ? usage.processes : [],
+  };
+}
+
+function normalizeResourceHistory(history, usage) {
+  const points = Array.isArray(history) ? history : [];
+  const normalized = points
+    .map((point) => normalizeResourceUsage(point))
+    .filter(Boolean)
+    .slice(-RESOURCE_HISTORY_POINTS);
+  const current = normalizeResourceUsage(usage);
+  if (current && !normalized.some((point) => point.ts === current.ts)) {
+    normalized.push(current);
+  }
+  return normalized.slice(-RESOURCE_HISTORY_POINTS);
+}
+
+function applyRunResource(runId, usage, history = null) {
+  const normalized = normalizeResourceUsage(usage);
+  if (!normalized) return;
+  runResources.set(runId, normalized);
+  if (history) {
+    runResourceHistory.set(runId, normalizeResourceHistory(history, normalized));
+  } else {
+    const points = runResourceHistory.get(runId) || [];
+    points.push(normalized);
+    runResourceHistory.set(runId, points.slice(-RESOURCE_HISTORY_POINTS));
+  }
+}
+
+function applyChallengeResource(challengeId, usage, history = null) {
+  const normalized = normalizeResourceUsage(usage);
+  if (!normalized) return;
+  challengeResources.set(challengeId, normalized);
+  if (history) {
+    challengeResourceHistory.set(challengeId, normalizeResourceHistory(history, normalized));
+  } else {
+    const points = challengeResourceHistory.get(challengeId) || [];
+    points.push(normalized);
+    challengeResourceHistory.set(challengeId, points.slice(-RESOURCE_HISTORY_POINTS));
+  }
+}
+
+function fmtBytes(bytes) {
+  const n = Number(bytes || 0);
+  if (n >= 1024 ** 3) return `${(n / (1024 ** 3)).toFixed(1)} GB`;
+  if (n >= 1024 ** 2) return `${(n / (1024 ** 2)).toFixed(0)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${Math.round(n)} B`;
+}
+
+function fmtCpu(value) {
+  return `${Number(value || 0).toFixed(0)}%`;
+}
+
+function sparklinePoints(values, width, height, pad) {
+  if (!values.length) return "";
+  const max = Math.max(...values, 1);
+  const usableW = width - pad * 2;
+  const usableH = height - pad * 2;
+  return values.map((value, index) => {
+    const x = pad + (values.length === 1 ? usableW : (index / (values.length - 1)) * usableW);
+    const y = pad + usableH - (Math.max(0, value) / max) * usableH;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+}
+
+function renderResourceSparkline(history) {
+  const points = (history || []).filter(Boolean);
+  if (!points.length) return "";
+  const width = 180;
+  const height = 38;
+  const pad = 3;
+  const cpu = sparklinePoints(points.map((p) => p.cpu_percent || 0), width, height, pad);
+  const rss = sparklinePoints(points.map((p) => p.rss_bytes || 0), width, height, pad);
+  return `<svg class="resource-sparkline" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+    <polyline class="resource-line resource-line-rss" points="${rss}"></polyline>
+    <polyline class="resource-line resource-line-cpu" points="${cpu}"></polyline>
+  </svg>`;
+}
+
+function renderChallengeResourceCard(challengeId) {
+  const usage = challengeResources.get(challengeId);
+  const history = challengeResourceHistory.get(challengeId) || (usage ? [usage] : []);
+  if (!usage) return `<div class="challenge-resource" data-resource-id="${esc(challengeId)}"></div>`;
+  const warn = usage.warning ? " resource-warning" : "";
+  return `<div class="challenge-resource${warn}" data-resource-id="${esc(challengeId)}">
+    <div class="resource-metrics">
+      <span>CPU ${esc(fmtCpu(usage.cpu_percent))}</span>
+      <span>RAM ${esc(fmtBytes(usage.rss_bytes))}</span>
+      <span>${esc(String(usage.process_count))} proc${usage.process_count === 1 ? "" : "s"}</span>
+    </div>
+    ${renderResourceSparkline(history)}
+  </div>`;
+}
+
+function updateDashboardResourceCard(challengeId) {
+  const card = document.querySelector(`[data-id="${CSS.escape(challengeId)}"]`);
+  if (!card) return;
+  const existing = card.querySelector(".challenge-resource");
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = renderChallengeResourceCard(challengeId);
+  const next = wrapper.firstElementChild;
+  if (!next) return;
+  if (existing) existing.replaceWith(next);
+  else card.appendChild(next);
+}
+
+function renderResourceProcessTable(processes) {
+  if (!processes || !processes.length) {
+    return '<div class="resource-empty">No live processes in this group.</div>';
+  }
+  const rows = processes.map((proc) => `<tr>
+    <td>${esc(String(proc.pid || ""))}</td>
+    <td>${esc(String(proc.ppid || ""))}</td>
+    <td>${esc(fmtCpu(proc.cpu_percent))}</td>
+    <td>${esc(fmtBytes(proc.rss_bytes))}</td>
+    <td title="${esc(proc.command || "")}">${esc(proc.command || "")}</td>
+  </tr>`).join("");
+  return `<div class="resource-process-wrap"><table class="resource-process-table">
+    <thead><tr><th>PID</th><th>PPID</th><th>CPU</th><th>RSS</th><th>Command</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+}
+
+function aggregateCurrentRunResources() {
+  const samples = currentRuns
+    .map((run) => runResources.get(run.id))
+    .filter(Boolean);
+  if (!samples.length) return null;
+  return {
+    ts: Math.max(...samples.map((sample) => sample.ts || 0)),
+    cpu_percent: samples.reduce((sum, sample) => sum + (sample.cpu_percent || 0), 0),
+    rss_bytes: samples.reduce((sum, sample) => sum + (sample.rss_bytes || 0), 0),
+    process_count: samples.reduce((sum, sample) => sum + (sample.process_count || 0), 0),
+    warning: samples.some((sample) => sample.warning),
+    processes: [],
+  };
+}
+
+function appendResourceUsageSection(parent, title, usage, history) {
+  if (!usage) return;
+  const section = document.createElement("div");
+  section.className = `resource-detail${usage.warning ? " resource-warning" : ""}`;
+  const header = document.createElement("div");
+  header.className = "resource-detail-header";
+  header.textContent = title;
+  section.appendChild(header);
+  const grid = document.createElement("div");
+  grid.className = "stats-grid";
+  [
+    ["CPU", fmtCpu(usage.cpu_percent)],
+    ["RSS", fmtBytes(usage.rss_bytes)],
+    ["Processes", String(usage.process_count)],
+    ["PGID", usage.pgid ? String(usage.pgid) : "-"],
+  ].forEach(([lbl, val]) => {
+    const item = document.createElement("div");
+    item.className = "stat-item";
+    item.innerHTML = `<span class="stat-label">${esc(lbl)}</span><span class="stat-value">${esc(val)}</span>`;
+    grid.appendChild(item);
+  });
+  section.appendChild(grid);
+  const graph = document.createElement("div");
+  graph.className = "resource-detail-graph";
+  graph.innerHTML = renderResourceSparkline(history || [usage]);
+  section.appendChild(graph);
+  section.insertAdjacentHTML("beforeend", renderResourceProcessTable(usage.processes || []));
+  parent.appendChild(section);
+}
+
 function flushDeferredStats() {
   if (historyRenderDepth > 0 || !statsRenderPending) return;
   statsRenderPending = false;
@@ -4349,7 +4565,8 @@ function renderStats() {
   if (!panel) return;
   panel.innerHTML = "";
 
-  if (!runStats.size) {
+  const hasResources = currentRuns.some((run) => runResources.has(run.id));
+  if (!runStats.size && !hasResources) {
     panel.innerHTML = '<div style="padding:1rem;color:var(--text-dim);font-size:0.8rem">No statistics yet</div>';
     return;
   }
@@ -4391,10 +4608,23 @@ function renderStats() {
       grid.appendChild(item);
     }
     section.appendChild(grid);
+    const aggregateUsage = challengeResources.get(currentChallengeId)
+      || aggregateCurrentRunResources();
+    appendResourceUsageSection(
+      section,
+      "Live Resources",
+      aggregateUsage,
+      challengeResourceHistory.get(currentChallengeId) || (aggregateUsage ? [aggregateUsage] : [])
+    );
     panel.appendChild(section);
   }
 
-  for (const [runId, s] of runStats) {
+  const renderRunIds = new Set([
+    ...Array.from(runStats.keys()),
+    ...currentRuns.map((run) => run.id),
+  ]);
+  for (const runId of renderRunIds) {
+    const s = runStats.get(runId) || emptyRunStatsState();
     const run = currentRuns.find(r => r.id === runId);
     const agent = run ? run.agent : "unknown";
     const agentMeta = getAgentMeta(agent);
@@ -4469,6 +4699,13 @@ function renderStats() {
         section.appendChild(msec);
       }
     }
+
+    appendResourceUsageSection(
+      section,
+      "Live Process Group",
+      runResources.get(runId),
+      runResourceHistory.get(runId)
+    );
 
     panel.appendChild(section);
   }

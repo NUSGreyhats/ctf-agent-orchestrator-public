@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import subprocess
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -25,6 +28,27 @@ CLAUDE_USAGE_API = "https://api.anthropic.com/api/oauth/usage"
 _DROP_SYSTEM_SUBTYPES = {
     "thinking_tokens",
 }
+
+
+def _session_wrapper_path(real_cli: str) -> str:
+    """Return an executable wrapper that starts Claude in a new session."""
+    digest = hashlib.sha256(real_cli.encode()).hexdigest()[:16]
+    path = Path(tempfile.gettempdir()) / f"ctf-agent-claude-{digest}.py"
+    content = (
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import sys\n"
+        f"REAL_CLI = {real_cli!r}\n"
+        "os.setsid()\n"
+        "os.execv(REAL_CLI, [REAL_CLI, *sys.argv[1:]])\n"
+    )
+    try:
+        if not path.exists() or path.read_text() != content:
+            path.write_text(content)
+            path.chmod(0o700)
+    except OSError:
+        return real_cli
+    return str(path)
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +114,7 @@ async def _run_agent_sdk(
 
     import shutil
     system_claude = shutil.which("claude")
+    cli_path = _session_wrapper_path(system_claude) if system_claude else None
 
     _stderr_lines: list[str] = []
 
@@ -105,7 +130,7 @@ async def _run_agent_sdk(
         effort=effort or None,
         resume=resume_session_id if resume_session_id else None,
         mcp_servers=mcp_servers if mcp_servers else {},
-        cli_path=system_claude,
+        cli_path=cli_path,
         stderr=_stderr_handler,
         env={"IS_SANDBOX": "1"},
     )
@@ -339,6 +364,16 @@ async def _run_agent_sdk(
         # connect() with async generator spawns stream_input as a
         # background task — messages are delivered between tool calls.
         await client.connect(_message_stream())
+        if _run is not None:
+            transport = getattr(client, "_transport", None)
+            proc = getattr(transport, "_process", None) if transport else None
+            pid = getattr(proc, "pid", None)
+            if pid:
+                _run["_agent_root_pid"] = pid
+                try:
+                    _run["_agent_pgid"] = os.getpgid(pid)
+                except OSError:
+                    _run["_agent_pgid"] = None
 
         async for msg in client.receive_messages():
                 # Drain broadcast UI events
