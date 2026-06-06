@@ -5954,7 +5954,7 @@ async def _run_agent_sdk_path(
                 )
             if etype == "result" and provider.name == "claude":
                 await _mark_run_completed_from_result(
-                    challenge_id, run_id, challenge, run
+                    challenge_id, run_id, challenge, run, event
                 )
                 break
 
@@ -6119,13 +6119,33 @@ async def _append_run_event(
 
 
 async def _mark_run_completed_from_result(
-    challenge_id: str, run_id: str, challenge: dict, run: dict
+    challenge_id: str, run_id: str, challenge: dict, run: dict,
+    event: dict | None = None,
 ) -> None:
-    """Mark a run completed as soon as a provider emits its final result."""
+    """Finalize a run when a provider emits its final result.
+
+    Marks the run failed (not completed) when the result carries an error,
+    so an errored agent run isn't reported as a clean finish.
+    """
     if run.get("_stop_reason") or run.get("status") != "solving":
         return
-    run["status"] = "completed"
-    run["error"] = None
+    event = event or {}
+    if event.get("is_error"):
+        errors = event.get("errors")
+        if errors:
+            message = "; ".join(str(e) for e in errors)
+        else:
+            message = event.get("result") or (
+                f"Agent ended with error: {event.get('subtype') or 'unknown'}"
+            )
+        api_status = event.get("api_error_status")
+        if api_status:
+            message = f"{message} (HTTP {api_status})"
+        run["status"] = "failed"
+        run["error"] = message
+    else:
+        run["status"] = "completed"
+        run["error"] = None
     finish_run_timer(run)
     challenge["status"] = derive_challenge_status(challenge)
     save_metadata(challenge)
