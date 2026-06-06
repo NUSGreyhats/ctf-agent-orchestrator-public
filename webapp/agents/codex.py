@@ -126,12 +126,12 @@ def _normalize_skill_mentions(value: object) -> list[str]:
     return mentions
 
 
-def _skill_mention_prefix(
+def _skill_mention_tokens(
     skill_inputs: list[dict],
     requested_mentions: list[str],
-) -> str:
+) -> list[str]:
     if not requested_mentions:
-        return ""
+        return []
     available = {
         item.get("name")
         for item in skill_inputs
@@ -141,7 +141,29 @@ def _skill_mention_prefix(
     for name in requested_mentions:
         if name in available:
             mentions.append(f"${name}")
-    return " ".join(mentions)
+    return mentions
+
+
+def _text_elements_for_skill_mentions(
+    text: str,
+    mention_tokens: list[str],
+) -> list[dict]:
+    elements: list[dict] = []
+    search_start = 0
+    for token in mention_tokens:
+        idx = text.find(token, search_start)
+        if idx < 0:
+            idx = text.find(token)
+        if idx < 0:
+            continue
+        start = len(text[:idx].encode("utf-8"))
+        end = start + len(token.encode("utf-8"))
+        elements.append({
+            "byteRange": {"start": start, "end": end},
+            "placeholder": token,
+        })
+        search_start = idx + len(token)
+    return elements
 
 
 def _model_reasoning_map() -> dict[str, set[str]]:
@@ -2288,25 +2310,18 @@ async def _run_agent_sdk(
                 len(skill_inputs),
                 ", ".join(item["name"] for item in skill_inputs),
             )
-        skill_mention_prefix = _skill_mention_prefix(
+        skill_mention_tokens = _skill_mention_tokens(
             skill_inputs,
             requested_skill_mentions,
         )
-        turn_prompt = prompt
-        text_elements = []
-        if skill_mention_prefix:
-            turn_prompt = f"{skill_mention_prefix}\n{prompt}"
-            offset = 0
-            for mention in skill_mention_prefix.split():
-                end = offset + len(mention)
-                text_elements.append({
-                    "byteRange": {"start": offset, "end": end},
-                    "placeholder": mention,
-                })
-                offset = end + 1
+        text_elements = _text_elements_for_skill_mentions(
+            prompt,
+            skill_mention_tokens,
+        )
+        if skill_mention_tokens:
             log.info(
                 "Explicitly invoking Codex skill mention(s): %s",
-                skill_mention_prefix,
+                ", ".join(skill_mention_tokens),
             )
         turn_params: dict = {
             "threadId": thread_id,
@@ -2316,7 +2331,7 @@ async def _run_agent_sdk(
                 *skill_inputs,
                 {
                     "type": "text",
-                    "text": turn_prompt,
+                    "text": prompt,
                     "text_elements": text_elements,
                 },
             ],

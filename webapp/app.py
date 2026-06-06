@@ -3815,10 +3815,24 @@ async def _steer_run_with_message(
     )
 
 
-def _skill_resume_message(run: dict) -> str | None:
+def _format_skill_mentions(skill_names: list[str]) -> str:
+    mentions = [f"${name}" for name in skill_names if name]
+    if len(mentions) <= 1:
+        return "".join(mentions)
+    return f"{', '.join(mentions[:-1])} and {mentions[-1]}"
+
+
+def _skill_resume_message(
+    run: dict,
+    codex_skill_mentions: list[str] | None = None,
+) -> str | None:
     if run.get("status") == "pending" and not run.get("output_lines"):
         return None
-    return "Continue solving the challenge."
+    message = "Continue solving the challenge."
+    mention_text = _format_skill_mentions(codex_skill_mentions or [])
+    if mention_text:
+        message += f" You may use {mention_text} if you see fit."
+    return message
 
 
 async def _start_run_after_skill_change(
@@ -8426,7 +8440,6 @@ async def update_run_skills(request: Request) -> JSONResponse:
     updated_runs = []
     for target_id, target_run in targets:
         old_effective_skills = run_enabled_skills(challenge, target_run)
-        continue_msg = _skill_resume_message(target_run) if resume else None
         if resume:
             await stop_run(target_run, "skills_changed")
             finish_run_timer(target_run)
@@ -8444,6 +8457,13 @@ async def update_run_skills(request: Request) -> JSONResponse:
             codex_skill_mentions = [
                 name for name in effective_skills if name not in previous
             ]
+        continue_msg = (
+            _skill_resume_message(
+                target_run,
+                codex_skill_mentions=codex_skill_mentions,
+            )
+            if resume else None
+        )
         skills_event = {
             "type": "run_skills",
             "run_id": target_id,
