@@ -10,14 +10,14 @@ This project streamlines that setup. It provisions an isolated cloud VM with the
 
 Out of the box, agents are already effective. But we can do better by providing **skills** — structured workflows that guide how the agent should approach different challenge types (forensics, reversing, crypto, pwn, web, etc.). Skills act as a feedback loop: when you notice an agent going down a rabbithole or missing an obvious technique, you encode that knowledge into a skill so it does not repeat the mistake. Over time, the skill library compounds and the solve rate improves.
 
-Repo-owned skills live in `skills/`. During environment setup, repo-owned and external skills are copied into the generated `all-skills/` catalog. The web app then symlinks the selected skills into each challenge run's project-level agent skill directories, such as `.claude/skills` and `.codex/skills`.
+Repo-owned skills live in `skills/`. During environment setup, repo-owned and external skills are copied into the generated `all-skills/` catalog. The web app then symlinks the selected skills into each challenge run's project-level agent skill directories, such as `.claude/skills` and `.codex/skills`. Additional skills can be uploaded from Settings as a `.zip` bundle or single `SKILL.md`, and are installed into the same runtime catalog.
 
 ## Supported Agents
 
 | Agent | Models | Effort levels | Session resume | Collaboration | Steering |
 |-------|--------|---------------|----------------|---------------|----------|
-| Claude Code | Provider default, Opus 4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5 | Provider default, Low, Medium, High, Max | Yes | `notify_teammates`, working notes | Yes |
-| Codex | Discovered from local cache/config | Per-model, discovered from local cache | Yes | Dynamic `notify_teammates`, working notes | Yes |
+| Claude Code | Provider default, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5. Default: Opus 4.6 (1M) | Provider default, Low, Medium, High, Max | Yes | `notify_teammates`, working notes | Yes |
+| Codex | Discovered from local cache/config | Per-model, discovered from local cache; common fallback includes Low, Medium, High, XHigh. Default: XHigh | Yes | Dynamic `notify_teammates`, working notes | Yes |
 
 Both agents run through their provider integration paths. Multiple agents can race the same challenge by adding multiple agent rows when creating, bulk uploading, or importing challenges; two or more agent rows automatically create a parallel challenge.
 
@@ -27,8 +27,9 @@ Both agents run through their provider integration paths. Multiple agents can ra
 
 - **Live streaming** — Agent output streams in real time over WebSocket. Thinking blocks, tool calls, tool results, raw output, and text are rendered with syntax highlighting and collapsible sections.
 - **Per-run views** — Single challenges have one run. Parallel challenges have one run per agent and can be viewed side-by-side or as tabs.
-- **Flag detection** — Flags matching known patterns (`flag{...}`, `CTF{...}`, `HTB{...}`, `picoCTF{...}`, or custom formats) are automatically detected and surfaced in the sidebar. Flags show as neutral until submitted — green for correct, red for rejected. State persists across page navigations.
-- **Steering** — Send guidance to a running agent mid-solve. The agent receives your message and continues from the current session where supported.
+- **Flag detection** — Flags matching known patterns (`flag{...}`, `CTF{...}`, `HTB{...}`, `picoCTF{...}`, or custom formats) are automatically detected and surfaced in the sidebar. A fresh run also performs a silent `ctfgrep` preflight over challenge files and adds bounded matches as detected flag candidates without putting scan output into the agent prompt. Flags show as neutral until submitted — green for correct, red for rejected. State persists across page navigations.
+- **Steering** — Send guidance to a running agent mid-solve. The agent is stopped and resumed with your message from the current session where supported.
+- **Runtime agent controls** — Stop a single active agent, stop all active agents, or add new agents to an existing unsolved challenge with a custom prompt and skill list.
 - **Resume & Retry** — Resume continues from saved session state when available. Retry starts fresh. Mark Solved and Unsolve let you manually override challenge status.
 - **Chat view modes** — Split view (agents side-by-side) or tabbed view (click to switch), configurable in settings.
 - **File browser** — Browse challenge files and agent workspaces. Challenge files are stored separately from provider working directories; each run sees them through `./challenge_files/`. The browser can view images, text with syntax highlighting, and binaries as hex.
@@ -40,7 +41,8 @@ Both agents run through their provider integration paths. Multiple agents can ra
 
 - **Single challenges** — Create with name, description, flag format, agent/model/effort choices, and file uploads.
 - **Bulk upload** — Upload `.zip` or `.7z` archives with one folder per challenge. Preview and edit metadata before importing.
-- **Platform import** — Fetch challenges directly from CTFd, rCTF, or Hack The Box CTF instances. Saves connections for future syncs with automatic points/solves updates. HTB challenges with on-demand instances are started automatically at solve time.
+- **Skills per challenge/run** — Select default skills globally, lock challenge-level skills at creation/import time, and adjust skills for individual active runs. Skill changes stop the target agent, refresh `.claude/skills` and `.codex/skills` symlinks, then resume by default.
+- **Platform import** — Fetch challenges directly from CTFd, rCTF, Hack The Box CTF, CDDC, or Cywaria/Cympire instances. Saves connections for future syncs with automatic points/solves updates where supported. HTB and Cywaria challenges with on-demand instances are started automatically at solve time.
 - **Multi-answer HTB support** — HTB `flagsInfo` questions are injected into the agent prompt, and agents get a `submit_answer.py` helper for answer-checking when there is no fixed flag format.
 - **Auto-submit** — Detected flags can be automatically submitted to the connected CTF platform. Correct submissions mark the challenge solved and stop other active runs.
 - **TLS verification by default** — CTFd and rCTF verify TLS certificates by default and expose an explicit “Disable TLS certificate verification” checkbox for self-signed/local events. HTB uses normal TLS verification.
@@ -99,7 +101,7 @@ Optional Discord bot for team coordination:
 - **Runtime data preservation** — Deploy sync preserves `/root/ctf-agent-wrapper/challenges` and `/root/ctf-agent-wrapper/state` on the VM.
 - **GDB MCP server** — Persistent GDB session for kernel/binary debugging, registered for Claude and Codex.
 - **IDA Pro skill** — Headless static analysis through the `analyze-with-ida-domain-api` skill, backed by IDA Pro's Python Domain API.
-- **WireGuard VPN** — Built-in VPN management for challenges that require network access to a CTF infrastructure. Configure, start/stop, and generate client configs from the web UI.
+- **WireGuard VPN** — Built-in VPN management for challenges that require network access to a CTF infrastructure. Configure, start/stop, generate client configs, and route Linux client-side internal CIDRs back to the server through a reverse WireGuard tunnel.
 - **uv-based Python installs** — Environment scripts install most Python dependencies with `uv pip install --system` for faster provisioning while keeping `pip` available for vendor-local wheels.
 - **Parallel environment setup** — `environment/run.sh` runs independent tooling categories concurrently with package-manager locks; set `ENVIRONMENT_PARALLEL=0` for sequential setup.
 - **Provisioning validation** — `environment/990_validate.sh` checks critical commands and Python imports at the end of setup.
@@ -159,9 +161,7 @@ claude auth login      # Claude Code
 codex login            # Codex
 ```
 
-### 3. Solve Challenges
-
-#### Option A: Web UI
+### 3. Solve Challenges from the Web UI
 
 Open `https://<VM_IP>` in your browser and log in.
 
@@ -172,20 +172,14 @@ Open `https://<VM_IP>` in your browser and log in.
 5. Steer the agent if it gets stuck, or Resume/Retry if it finishes without solving.
 6. Use the Files tab to inspect original challenge files or per-run workspaces.
 
-#### Option B: Terminal
+### 4. Use the Discord Bot
 
-Upload challenges and use an agent directly:
+Enable Discord in Settings by providing a bot token and channel. The bot creates per-challenge threads and supports slash commands for team workflows:
 
-```bash
-scp -r ./my-ctf-challenges root@<VM_IP>:/root/challenges/
-ssh root@<VM_IP>
-
-# Claude Code
-cd /root/challenges && yolo
-
-# Codex
-cd /root/challenges && codex --dangerously-bypass-approvals-and-sandbox
-```
+- `/ctf` to list or open challenge context
+- `/status`, `/flags`, and `/files` to inspect progress
+- `/broadcast` and `/steer` to guide active agents
+- `/submit`, `/solved`, `/resume`, and `/stop` to control solving state
 
 ### Teardown
 
@@ -202,10 +196,10 @@ environment/    Setup scripts (tools, CLIs, dependencies)
   lib/          Shared shell helpers used by setup scripts
 webapp/         Starlette/ASGI app for challenge management and agent streaming
   agents/       Agent provider implementations (Claude, Codex)
-  plugins/      CTF platform integrations (CTFd, rCTF, HTB CTF)
+  plugins/      CTF platform integrations (CTFd, rCTF, HTB CTF, CDDC, Cywaria)
   static/       Frontend (vanilla JS, CSS)
 skills/         Agent skills (methodology, forensics, tool-specific, community)
-all-skills/     Generated runtime skill catalog populated by environment setup
+all-skills/     Runtime skill catalog populated by setup and Settings uploads
 hooks/          Agent hook/tool files
 mcps/           MCP servers (GDB debugger)
 state/          Runtime state on the VM: metadata, output logs, connections
