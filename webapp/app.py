@@ -232,6 +232,71 @@ def save_plugin_connection(
     return conn_id
 
 
+def load_agent_env_auth() -> dict:
+    """Load persisted provider environment credentials."""
+    if AGENT_ENV_AUTH_FILE.exists():
+        try:
+            data = json.loads(AGENT_ENV_AUTH_FILE.read_text())
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def save_agent_env_auth(data: dict) -> None:
+    """Persist provider environment credentials with owner-only perms."""
+    AGENT_ENV_AUTH_FILE.write_text(json.dumps(data, indent=2))
+    try:
+        AGENT_ENV_AUTH_FILE.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _stored_agent_env_auth(agent: str) -> dict:
+    data = load_agent_env_auth()
+    entry = data.get(agent)
+    return entry if isinstance(entry, dict) else {}
+
+
+def agent_runtime_env(agent: str) -> dict[str, str]:
+    """Return persisted/process env vars needed by a provider at runtime."""
+    env: dict[str, str] = {}
+    if agent != "claude":
+        return env
+    stored = _stored_agent_env_auth(agent)
+    for key in CLAUDE_ENV_AUTH_KEYS:
+        value = str_field(stored.get(key, "")).strip()
+        if not value:
+            value = os.environ.get(key, "").strip()
+        if value:
+            env[key] = value
+    return env
+
+
+def public_agent_env_auth(agent: str) -> dict:
+    """Return non-secret env credential metadata for the UI/status API."""
+    if agent != "claude":
+        return {"supported": False, "configured": False}
+    stored = _stored_agent_env_auth(agent)
+    runtime = agent_runtime_env(agent)
+    stored_token = bool(str_field(stored.get("ANTHROPIC_AUTH_TOKEN", "")).strip())
+    process_token = bool(os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip())
+    stored_value = any(
+        str_field(stored.get(key, "")).strip()
+        for key in CLAUDE_ENV_AUTH_KEYS
+    )
+    source = "stored" if stored_token else "process" if process_token else ""
+    return {
+        "supported": True,
+        "configured": bool(runtime.get("ANTHROPIC_AUTH_TOKEN")),
+        "base_url": runtime.get("ANTHROPIC_BASE_URL", ""),
+        "token_set": bool(runtime.get("ANTHROPIC_AUTH_TOKEN")),
+        "saved": stored_value,
+        "source": source,
+    }
+
+
 def utc_now_iso() -> str:
     """Return an explicit UTC timestamp for browser-safe JSON metadata."""
     return datetime.now(timezone.utc).isoformat()
@@ -550,6 +615,8 @@ def detect_flag(text: str, flag_format: str = "") -> str | None:
 METADATA_FILE = "challenge.json"
 OUTPUT_FILE = "output.jsonl"
 SETTINGS_FILE = CHALLENGES_DIR / "settings.json"
+AGENT_ENV_AUTH_FILE = STATE_ROOT_DIR / "agent-env-auth.json"
+CLAUDE_ENV_AUTH_KEYS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
 REPO_SKILLS_DIR = APP_ROOT_DIR / "skills"
 ALL_SKILLS_DIR = APP_ROOT_DIR / "all-skills"
 PROJECT_SKILL_DIRS = (
@@ -6435,6 +6502,7 @@ async def _run_agent_sdk_path(
             challenge_id=challenge_id if is_parallel else "",
             run_id=run_id if is_parallel else "",
             _codex_skill_mentions=codex_skill_mentions or [],
+            _env=agent_runtime_env(run["agent"]),
             _run=run,
         ):
             # Check if we've been stopped externally
@@ -6937,6 +7005,7 @@ async def run_agent_task(
     # --- CLI fallback path ---
     env = os.environ.copy()
     env["IS_SANDBOX"] = "1"
+    env.update(agent_runtime_env(run["agent"]))
 
     # Build command using run data instead of challenge data
     # We pass a dict that looks like the old challenge format for provider compatibility
@@ -7326,11 +7395,13 @@ def _agent_auth_status_command(agent: str) -> tuple[str, ...] | None:
 def _run_auth_status_command(agent: str) -> dict:
     command = _agent_auth_status_command(agent)
     login_command = _agent_auth_command(agent)
+    env_auth = public_agent_env_auth(agent)
     result: dict = {
         "agent": agent,
         "available": False,
         "connected": False,
         "command": " ".join(login_command or ()),
+        "env_auth": env_auth,
         "rows": [],
     }
     if not command:
@@ -7341,6 +7412,24 @@ def _run_auth_status_command(agent: str) -> dict:
         return result
 
     result["available"] = True
+    if agent == "claude" and env_auth.get("configured"):
+        source = env_auth.get("source")
+        source_label = "Process env vars" if source == "process" else "Saved env vars"
+        rows = [
+            {"label": "Method", "value": source_label},
+            {"label": "Token", "value": "ANTHROPIC_AUTH_TOKEN configured"},
+        ]
+        if env_auth.get("base_url"):
+            rows.append({
+                "label": "Base URL",
+                "value": str(env_auth["base_url"]),
+            })
+        result["connected"] = True
+        result["rows"] = rows
+        return result
+
+    env = os.environ.copy()
+    env.update(agent_runtime_env(agent))
     try:
         completed = subprocess.run(
             list(command),
@@ -7349,6 +7438,7 @@ def _run_auth_status_command(agent: str) -> dict:
             capture_output=True,
             timeout=AUTH_STATUS_TIMEOUT_SECONDS,
             check=False,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         result["error"] = "Auth status timed out"
@@ -7456,6 +7546,63 @@ async def start_agent_auth(request: Request) -> JSONResponse:
         "session_id": session_id,
         "agent": agent,
         "command": " ".join(command),
+    })
+
+
+async def set_agent_env_auth(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+
+    agent = str_field(body.get("agent", "")).strip()
+    if agent != "claude":
+        return JSONResponse(
+            {"error": "Environment auth is only supported for Claude"},
+            status_code=400,
+        )
+
+    data = load_agent_env_auth()
+    current = data.get(agent) if isinstance(data.get(agent), dict) else {}
+    if body.get("clear"):
+        data.pop(agent, None)
+        save_agent_env_auth(data)
+        return JSONResponse({
+            "ok": True,
+            "agent": agent,
+            "status": _run_auth_status_command(agent),
+        })
+
+    base_url = str_field(body.get("base_url", "")).strip()
+    auth_token = str_field(body.get("auth_token", "")).strip()
+    existing_token = str_field(current.get("ANTHROPIC_AUTH_TOKEN", "")).strip()
+    process_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
+    if not auth_token and not existing_token and not process_token:
+        return JSONResponse(
+            {"error": "ANTHROPIC_AUTH_TOKEN is required"},
+            status_code=400,
+        )
+
+    entry = dict(current)
+    if base_url:
+        entry["ANTHROPIC_BASE_URL"] = base_url
+    else:
+        entry.pop("ANTHROPIC_BASE_URL", None)
+    if auth_token:
+        entry["ANTHROPIC_AUTH_TOKEN"] = auth_token
+
+    if entry:
+        data[agent] = entry
+    else:
+        data.pop(agent, None)
+    save_agent_env_auth(data)
+    return JSONResponse({
+        "ok": True,
+        "agent": agent,
+        "status": _run_auth_status_command(agent),
     })
 
 
@@ -11399,6 +11546,7 @@ routes = [
     Route("/api/agents", list_agents, methods=["GET"]),
     Route("/api/agents/auth/status", agent_auth_status, methods=["GET"]),
     Route("/api/agents/auth/start", start_agent_auth, methods=["POST"]),
+    Route("/api/agents/auth/env", set_agent_env_auth, methods=["POST"]),
     Route("/api/usage", get_usage, methods=["GET"]),
     Route("/api/vpn", vpn_status, methods=["GET"]),
     Route("/api/vpn/configure", vpn_configure, methods=["POST"]),

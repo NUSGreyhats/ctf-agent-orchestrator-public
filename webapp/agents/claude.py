@@ -123,6 +123,15 @@ async def _run_agent_sdk(
         log.warning("Claude CLI stderr: %s", stripped)
         _stderr_lines.append(stripped)
 
+    claude_env = {"IS_SANDBOX": "1"}
+    for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
+        value = os.environ.get(key, "")
+        if value:
+            claude_env[key] = value
+    for key, value in (kwargs.get("_env") or {}).items():
+        if key in {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"} and value:
+            claude_env[key] = str(value)
+
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(cwd),
@@ -132,7 +141,7 @@ async def _run_agent_sdk(
         mcp_servers=mcp_servers if mcp_servers else {},
         cli_path=cli_path,
         stderr=_stderr_handler,
-        env={"IS_SANDBOX": "1"},
+        env=claude_env,
     )
 
     def _normalize_msg(msg) -> dict | None:

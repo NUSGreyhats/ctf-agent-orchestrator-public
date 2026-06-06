@@ -1469,6 +1469,24 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   margin-top: 0.35rem; display: flex; align-items: center; gap: 0.45rem;
   flex-wrap: wrap;
 }
+.usage-env-auth {
+  margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 0.45rem;
+}
+.usage-env-auth-title {
+  font-size: 0.74rem; font-weight: 700; color: var(--text-muted);
+  text-transform: uppercase;
+}
+.usage-env-auth-field {
+  display: grid; grid-template-columns: minmax(150px, 0.42fr) 1fr;
+  align-items: center; gap: 0.45rem; font-size: 0.72rem; color: var(--text-muted);
+}
+.usage-env-auth-field input {
+  min-width: 0; font-family: var(--mono); font-size: 0.72rem;
+}
+.usage-env-auth-actions {
+  display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;
+}
 .usage-stats {
   display: flex; flex-direction: column; gap: 0.15rem;
   font-size: 0.8rem; border-top: 1px solid var(--border);
