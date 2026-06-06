@@ -1117,6 +1117,15 @@ def provider_state_for_metadata(run: dict) -> dict:
     return state
 
 
+def reset_codex_session_state(run: dict) -> None:
+    """Clear the Codex thread binding so the next start gets fresh repo skills."""
+    run.pop("_codex_thread_id", None)
+    session_state = run.get("_session_state")
+    if isinstance(session_state, dict):
+        session_state.pop("codex_thread_id", None)
+    run["goal"] = None
+
+
 # ---------------------------------------------------------------------------
 # State directories and persistence
 # ---------------------------------------------------------------------------
@@ -8415,7 +8424,12 @@ async def update_run_skills(request: Request) -> JSONResponse:
 
     updated_runs = []
     for target_id, target_run in targets:
-        continue_msg = _skill_resume_message(target_run) if resume else None
+        restart_codex_for_skills = resume and target_run.get("agent") == "codex"
+        continue_msg = (
+            None
+            if restart_codex_for_skills
+            else (_skill_resume_message(target_run) if resume else None)
+        )
         if resume:
             await stop_run(target_run, "skills_changed")
             finish_run_timer(target_run)
@@ -8425,6 +8439,9 @@ async def update_run_skills(request: Request) -> JSONResponse:
         else:
             target_run["enabled_skills"] = enabled_skills
         sync_run_skill_links(challenge, target_run)
+
+        if restart_codex_for_skills:
+            reset_codex_session_state(target_run)
 
         effective_skills = run_enabled_skills(challenge, target_run)
         skills_event = {
