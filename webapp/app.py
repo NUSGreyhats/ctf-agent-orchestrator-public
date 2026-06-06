@@ -5372,14 +5372,6 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
         parts.extend([
             "",
             "The challenge files are in ./challenge_files/ (some may be symlinks).",
-            "Use `ls -la challenge_files` to list files, not `find . -type f` "
-            "which misses symlinks.",
-            "Do not inspect parent directories, repository root files, .git metadata, "
-            "or unrelated system paths.",
-            "If ./challenge_files/ has no challenge files, report that clearly and stop. "
-            "Do not search elsewhere for surrogate targets.",
-            "Keep command output bounded: avoid unbounded recursive listings, and use "
-            "targeted commands with limits (for example, head/tail).",
         ])
     elif not has_declared_files:
         parts.extend([
@@ -10082,7 +10074,12 @@ async def _handle_discord_interaction(interaction: dict) -> None:
                 run["status"] = "solving"
                 run.pop("_stop_reason", None)
                 run["task"] = asyncio.create_task(
-                    run_agent_task(ch_id, run_id, continue_msg="Resume from Discord"))
+                    run_agent_task(
+                        ch_id,
+                        run_id,
+                        continue_msg="Continue solving the challenge",
+                    )
+                )
                 count += 1
         if count:
             challenge["status"] = derive_challenge_status(challenge)
