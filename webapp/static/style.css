@@ -972,6 +972,49 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .split-steer-input:focus { border-color: var(--accent); }
 .split-steer-input::placeholder { color: var(--text-dim); }
 
+/* === Goal Bar === */
+.goal-bar {
+  display: flex; align-items: center; gap: 0.35rem;
+  min-height: 28px; padding: 0.3rem 0.55rem;
+  border-top: 1px solid var(--border); background: var(--bg-card);
+  font-size: 0.68rem; flex-shrink: 0; min-width: 0;
+}
+.goal-bar.hidden { display: none; }
+.goal-bar:not(.hidden) + .steer-bar { border-top: none; }
+.split-goal-bar { border-top: 1px solid var(--border); }
+.goal-label {
+  flex-shrink: 0; font-size: 0.58rem; font-weight: 800;
+  color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em;
+}
+.goal-status {
+  flex-shrink: 0; padding: 0.08rem 0.3rem; border-radius: 4px;
+  font-size: 0.58rem; font-weight: 800; text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.goal-status-active .goal-status {
+  color: var(--accent); background: var(--accent-dim);
+}
+.goal-status-warning .goal-status {
+  color: var(--orange); background: rgba(255, 158, 100, 0.12);
+}
+.goal-status-complete .goal-status {
+  color: var(--green); background: var(--green-dim);
+}
+.goal-status-paused .goal-status {
+  color: var(--text-muted); background: var(--bg-input);
+}
+.goal-objective {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text);
+}
+.goal-usage {
+  flex-shrink: 0; color: var(--text-dim); font-family: var(--mono);
+  white-space: nowrap;
+}
+.goal-event-msg {
+  color: var(--text-muted); background: var(--bg-input);
+}
+
 /* === Steer Bar === */
 .steer-bar {
   display: flex; gap: 0.4rem; padding: 0.4rem 0.5rem;

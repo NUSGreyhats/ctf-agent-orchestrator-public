@@ -50,6 +50,7 @@ let scrollFramePending = false;
 let queuedRunEvents = [];
 let queuedRunEventFrame = false;
 let renderedEventNodes = new Map();
+let suppressHistoricalStateUpdates = 0;
 let transcriptSearchResults = [];
 let transcriptSearchActiveIndex = -1;
 let metadataLastSyncAt = null;
@@ -1469,7 +1470,10 @@ async function openChallenge(id) {
   if (!c) return;
 
   currentChallengeMode = c.mode || "single";
-  currentRuns = c.runs || [];
+  currentRuns = (c.runs || []).map((run) => ({
+    ...run,
+    goal: normalizeRunGoal(run.goal),
+  }));
 
   $("#detail-name").textContent = c.name;
   updateStatusBadge(c.status);
@@ -1983,6 +1987,7 @@ async function renderEventsChunked(runId, events, options = {}) {
   }
 
   historyRenderDepth++;
+  if (options.suppressStateUpdates) suppressHistoricalStateUpdates++;
   try {
     for (let i = 0; i < events.length; i += TRANSCRIPT_RENDER_BATCH) {
       const chunk = events.slice(i, i + TRANSCRIPT_RENDER_BATCH);
@@ -1995,6 +2000,7 @@ async function renderEventsChunked(runId, events, options = {}) {
       if (!prepend && i + TRANSCRIPT_RENDER_BATCH < events.length) await yieldToBrowser();
     }
   } finally {
+    if (options.suppressStateUpdates) suppressHistoricalStateUpdates--;
     historyRenderDepth--;
     if (prepend && insertMarker?.parentNode && appendMarker?.parentNode) {
       const fragment = document.createDocumentFragment();
@@ -2065,6 +2071,7 @@ async function loadHistoryPage(runId, state, challengeId, token, limit) {
   await renderEventsChunked(runId, data.events || [], {
     prepend: true,
     startIndex: data.start || 0,
+    suppressStateUpdates: true,
   });
   return true;
 }
@@ -2471,6 +2478,108 @@ function runTabLabel(run, agentMeta) {
   return parts.length ? `${base} (${parts.join(", ")})` : base;
 }
 
+function normalizeRunGoal(goal) {
+  if (!goal || typeof goal !== "object") return null;
+  const textField = (snake, camel = null) => {
+    const value = goal[snake] ?? (camel ? goal[camel] : undefined);
+    return typeof value === "string" ? value.trim() : "";
+  };
+  const intField = (snake, camel = null) => {
+    const value = goal[snake] ?? (camel ? goal[camel] : undefined);
+    return Number.isFinite(value) ? Math.trunc(value) : null;
+  };
+  const normalized = {
+    provider: textField("provider"),
+    thread_id: textField("thread_id", "threadId"),
+    objective: textField("objective"),
+    status: textField("status"),
+    token_budget: intField("token_budget", "tokenBudget"),
+    tokens_used: intField("tokens_used", "tokensUsed"),
+    time_used_seconds: intField("time_used_seconds", "timeUsedSeconds"),
+    created_at: intField("created_at", "createdAt"),
+    updated_at: intField("updated_at", "updatedAt"),
+  };
+  if (!normalized.objective && !normalized.status) return null;
+  return normalized;
+}
+
+function goalStatusLabel(status) {
+  const labels = {
+    active: "Active",
+    paused: "Paused",
+    blocked: "Blocked",
+    usageLimited: "Usage Limited",
+    usage_limited: "Usage Limited",
+    budgetLimited: "Budget Limited",
+    budget_limited: "Budget Limited",
+    complete: "Complete",
+  };
+  return labels[status] || (status ? status.replace(/[_-]+/g, " ") : "Goal");
+}
+
+function goalStatusClass(status) {
+  if (status === "complete") return "goal-status-complete";
+  if (status === "paused") return "goal-status-paused";
+  if (["blocked", "usageLimited", "usage_limited", "budgetLimited", "budget_limited"].includes(status)) {
+    return "goal-status-warning";
+  }
+  return "goal-status-active";
+}
+
+function formatGoalUsage(goal) {
+  const parts = [];
+  const used = Number.isFinite(goal.tokens_used) ? goal.tokens_used : null;
+  const budget = Number.isFinite(goal.token_budget) ? goal.token_budget : null;
+  if (budget !== null) {
+    parts.push(`${(used || 0).toLocaleString()}/${budget.toLocaleString()} tokens`);
+  } else if (used) {
+    parts.push(`${used.toLocaleString()} tokens`);
+  }
+  if (Number.isFinite(goal.time_used_seconds) && goal.time_used_seconds > 0) {
+    parts.push(fmtElapsed(goal.time_used_seconds));
+  }
+  return parts.join(" · ");
+}
+
+function createGoalBar(runId, extraClass = "") {
+  const bar = document.createElement("div");
+  bar.className = `goal-bar hidden${extraClass ? ` ${extraClass}` : ""}`;
+  bar.dataset.run = runId;
+  return bar;
+}
+
+function updateGoalBarForRun(bar, run) {
+  if (!bar) return;
+  const goal = normalizeRunGoal(run?.goal);
+  if (!goal) {
+    bar.classList.add("hidden");
+    bar.innerHTML = "";
+    bar.removeAttribute("title");
+    return;
+  }
+  const statusClass = goalStatusClass(goal.status);
+  const usage = formatGoalUsage(goal);
+  bar.className = `${bar.classList.contains("split-goal-bar") ? "goal-bar split-goal-bar" : "goal-bar"} ${statusClass}`;
+  bar.title = goal.objective || goalStatusLabel(goal.status);
+  bar.innerHTML = `
+    <span class="goal-label">Goal</span>
+    <span class="goal-status">${esc(goalStatusLabel(goal.status))}</span>
+    <span class="goal-objective">${esc(goal.objective || "No objective")}</span>
+    ${usage ? `<span class="goal-usage">${esc(usage)}</span>` : ""}
+  `;
+}
+
+function updateGoalBars() {
+  const globalBar = $("#goal-bar");
+  const activeRun = currentRuns.find((r) => r.id === activeRunId);
+  if (globalBar) updateGoalBarForRun(globalBar, isSplitView() ? null : activeRun);
+
+  document.querySelectorAll(".split-goal-bar").forEach((bar) => {
+    const run = currentRuns.find((r) => r.id === bar.dataset.run);
+    updateGoalBarForRun(bar, run);
+  });
+}
+
 function initRunTabs(runs) {
   currentRuns = runs;
   const tabBar = $("#run-tabs");
@@ -2501,6 +2610,7 @@ function initRunTabs(runs) {
     feed.className = "panel-body run-feed active";
     feedsEl.insertBefore(feed, scrollBtn);
     setupFeedScroll(feed);
+    updateGoalBars();
     return;
   }
 
@@ -2551,6 +2661,10 @@ function initRunTabs(runs) {
       feed.className = "panel-body run-feed active";
       pane.appendChild(feed);
 
+      const goalBar = createGoalBar(run.id, "split-goal-bar");
+      updateGoalBarForRun(goalBar, run);
+      pane.appendChild(goalBar);
+
       const steer = document.createElement("div");
       steer.className = "steer-bar split-steer";
       steer.innerHTML = `<input type="text" class="split-steer-input" placeholder="Guide ${esc(label)}..." autocomplete="off"><button class="btn-primary btn-sm split-steer-btn">Send</button>`;
@@ -2573,6 +2687,7 @@ function initRunTabs(runs) {
       setupFeedScroll(feed);
     }
   }
+  updateGoalBars();
 }
 
 function switchRunTab(runId) {
@@ -2584,6 +2699,7 @@ function switchRunTab(runId) {
   const feed = document.getElementById(`feed-${runId}`);
   if (feed) { feed.classList.add("active"); autoScroll = true; scrollBottom(); }
   updateSteerRunSelect();
+  updateGoalBars();
 }
 
 function addRunTab(run) {
@@ -2630,6 +2746,10 @@ function addRunTab(run) {
     feed.className = "panel-body run-feed active";
     pane.appendChild(feed);
 
+    const goalBar = createGoalBar(run.id, "split-goal-bar");
+    updateGoalBarForRun(goalBar, run);
+    pane.appendChild(goalBar);
+
     const steer = document.createElement("div");
     steer.className = "steer-bar split-steer";
     steer.innerHTML = `<input type="text" class="split-steer-input" placeholder="Guide ${esc(label)}..." autocomplete="off"><button class="btn-primary btn-sm split-steer-btn">Send</button>`;
@@ -2645,6 +2765,7 @@ function addRunTab(run) {
     feedsEl.insertBefore(pane, scrollBtn);
     setupFeedScroll(feed);
   }
+  updateGoalBars();
 }
 
 function updateRunTabDot(runId, status) {
@@ -2714,6 +2835,7 @@ function updateSteerRunSelect() {
     label.classList.add("hidden");
   }
   updateRunControlButtons();
+  updateGoalBars();
 }
 
 function updateRunFromSummary(summary) {
@@ -2728,6 +2850,7 @@ function updateRunFromSummary(summary) {
   run.duration_ms = durationMs(summary.duration_ms);
   run.enabled_skills = normalizeSkillNames(summary.enabled_skills || []);
   run.skill_override = !!summary.skill_override;
+  run.goal = normalizeRunGoal(summary.goal);
   if (run.status === "solving") {
     if (!wasSolving || !run._timerStartedAt) run._timerStartedAt = Date.now();
   } else {
@@ -2735,6 +2858,7 @@ function updateRunFromSummary(summary) {
   }
   updateRunTabDot(run.id, run.status);
   updateRunControlButtons();
+  updateGoalBars();
 }
 
 function openRunSkillsModal(runId) {
@@ -3451,6 +3575,24 @@ function renderRunEvent(runId, event) {
     return;
   }
 
+  if (event.type === "run_goal") {
+    const rid = event.run_id || runId;
+    const run = currentRuns.find((r) => r.id === rid);
+    const goal = normalizeRunGoal(event.goal);
+    if (!suppressHistoricalStateUpdates) {
+      if (run) run.goal = goal;
+      updateGoalBars();
+    }
+    appendMsg(
+      feed,
+      event.message || (goal ? `Goal ${goalStatusLabel(goal.status)}: ${goal.objective || "No objective"}` : "Goal cleared"),
+      "system-msg goal-event-msg",
+      event.ts
+    );
+    scrollBottomIfActive(runId);
+    return;
+  }
+
   if (event.type === "run_skills") {
     const rid = event.run_id || runId;
     const run = currentRuns.find((r) => r.id === rid);
@@ -3477,6 +3619,7 @@ function renderRunEvent(runId, event) {
   if (event.type === "run_added" && event.run) {
     const r = event.run;
     if (currentRuns.some((x) => x.id === r.id)) return;
+    r.goal = normalizeRunGoal(r.goal);
     currentRuns.push(r);
     if (r.status === "solving") activateRunTimer(r);
     addRunTab(r);
