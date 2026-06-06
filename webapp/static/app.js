@@ -17,6 +17,9 @@ let chatViewMode = "split";
 let csrfToken = null;
 let agentCatalog = [];
 let agentByName = new Map();
+let agentAuthStatus = {};
+let agentAuthWs = null;
+let activeAgentAuthSession = null;
 let skillCatalog = [];
 let skillByName = new Map();
 let defaultEnabledSkills = [];
@@ -528,15 +531,16 @@ function applyTheme(theme) {
 
 // === Agent Auth Check ===
 async function checkAgentAuth() {
-  const res = await api("/api/usage");
+  const res = await api("/api/agents/auth/status");
   if (!res) return;
   const data = await res.json();
-  const usage = data.agents || {};
+  const statuses = data.agents || {};
   const missing = agentCatalog
-    .filter((agent) => !usage[agent.name])
+    .filter((agent) => !statuses[agent.name]?.connected)
     .map((agent) => ({
+      agent: agent.name,
       name: agent.label,
-      command: agent.auth_connect_command,
+      command: statuses[agent.name]?.command || agent.auth_connect_command,
     }));
 
   if (missing.length === 0) return;
@@ -546,8 +550,16 @@ async function checkAgentAuth() {
     <div class="auth-warning-item">
       <span class="auth-warning-agent">${esc(m.name)}</span>
       <code class="auth-warning-cmd">${esc(m.command)}</code>
+      <button type="button" class="btn-ghost btn-sm auth-warning-login" data-agent="${esc(m.agent)}">Login</button>
     </div>
   `).join("");
+  container.querySelectorAll(".auth-warning-login").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      $("#auth-warning-overlay").classList.add("hidden");
+      showView("usage");
+      loadUsage().then(() => startAgentAuth(btn.dataset.agent || ""));
+    });
+  });
 
   $("#auth-warning-overlay").classList.remove("hidden");
 }
@@ -4730,9 +4742,16 @@ $("#btn-usage-back").addEventListener("click", () => {
 $("#btn-usage-refresh").addEventListener("click", loadUsage);
 
 async function loadUsage() {
-  const res = await api("/api/usage");
-  if (!res) return;
-  const data = await res.json();
+  const [usageRes, authRes] = await Promise.all([
+    api("/api/usage"),
+    api("/api/agents/auth/status"),
+  ]);
+  if (!usageRes) return;
+  const data = await usageRes.json();
+  if (authRes) {
+    const authData = await authRes.json();
+    agentAuthStatus = authData.agents || {};
+  }
   renderUsage(data);
 }
 
@@ -4746,24 +4765,44 @@ function renderUsage(data) {
     const stats = $(`#${agent.name}-stats`);
     const challengeStats = $(`#${agent.name}-challenge-stats`);
     const entry = usage[agent.name];
+    const auth = agentAuthStatus[agent.name] || {};
+    const connected = !!entry || !!auth.connected;
 
-    if (entry) {
+    if (connected) {
       badge.textContent = "connected";
       badge.className = "badge badge-solved";
-      info.innerHTML = (entry.auth_rows || [])
-        .map((row) => kvRow(row.label, row.value))
-        .join("");
-      stats.innerHTML = (entry.stat_rows || [])
-        .map((row) => kvRow(row.label, row.value, row.bar))
-        .join("");
+    } else if (auth.available === false) {
+      badge.textContent = "not installed";
+      badge.className = "badge badge-failed";
     } else {
       badge.textContent = "not connected";
       badge.className = "badge badge-pending";
-      info.innerHTML = `<span class="text-muted">Run <code>${esc(agent.auth_connect_command)}</code> to connect</span>`;
+    }
+
+    if (entry) {
+      info.innerHTML = (entry.auth_rows || [])
+        .map((row) => kvRow(row.label, row.value))
+        .join("") + renderAuthActions(agent, connected, auth);
+      stats.innerHTML = (entry.stat_rows || [])
+        .map((row) => kvRow(row.label, row.value, row.bar))
+        .join("");
+    } else if (connected) {
+      info.innerHTML = (auth.rows || [])
+        .map((row) => kvRow(row.label, row.value))
+        .join("") + renderAuthActions(agent, connected, auth);
+      stats.innerHTML = "";
+    } else {
+      const detail = auth.error
+        ? `<span class="text-muted">${esc(auth.error)}</span>`
+        : `<span class="text-muted">Run <code>${esc(agent.auth_connect_command)}</code> to connect</span>`;
+      info.innerHTML = detail + renderAuthActions(agent, connected, auth);
       stats.innerHTML = "";
     }
 
     challengeStats.innerHTML = renderChallengeStats(cs[agent.name]);
+  });
+  document.querySelectorAll(".agent-auth-start").forEach((btn) => {
+    btn.addEventListener("click", () => startAgentAuth(btn.dataset.agent || ""));
   });
 
   const dailySection = $("#usage-daily");
@@ -4778,6 +4817,117 @@ function renderUsage(data) {
     dailySection.classList.add("hidden");
   }
 }
+
+function renderAuthActions(agent, connected, auth) {
+  const disabled = auth.available === false ? "disabled" : "";
+  const label = connected ? "Reconnect" : "Login";
+  const command = auth.command || agent.auth_connect_command || "";
+  return `<div class="usage-auth-actions">
+    <button type="button" class="btn-ghost btn-sm agent-auth-start" data-agent="${esc(agent.name)}" ${disabled}>${label}</button>
+    ${command ? `<span class="text-muted"><code>${esc(command)}</code></span>` : ""}
+  </div>`;
+}
+
+function setAgentAuthTerminal(agent, command) {
+  const terminal = $("#agent-auth-terminal");
+  terminal.classList.remove("hidden");
+  $("#agent-auth-title").textContent = `${agent.label || agent.name} Login`;
+  $("#agent-auth-subtitle").textContent = command || "";
+  $("#agent-auth-output").textContent = "";
+  $("#agent-auth-input").value = "";
+  $("#agent-auth-input").focus();
+}
+
+function appendAgentAuthOutput(text) {
+  const output = $("#agent-auth-output");
+  output.textContent += text;
+  if (output.textContent.length > 120000) {
+    output.textContent = output.textContent.slice(-100000);
+  }
+  output.scrollTop = output.scrollHeight;
+}
+
+function closeAgentAuthWs(cancel = false) {
+  if (!agentAuthWs) return;
+  if (cancel && agentAuthWs.readyState === WebSocket.OPEN) {
+    agentAuthWs.send(JSON.stringify({ type: "cancel" }));
+  }
+  agentAuthWs.close();
+  agentAuthWs = null;
+  activeAgentAuthSession = null;
+}
+
+async function startAgentAuth(agentName) {
+  const agent = getAgentMeta(agentName);
+  if (!agent?.name) return;
+  closeAgentAuthWs(true);
+  const res = await api("/api/agents/auth/start", {
+    method: "POST",
+    body: JSON.stringify({ agent: agent.name }),
+  });
+  if (!res) return;
+  const data = await res.json();
+  if (!res.ok) {
+    showToast(data.error || "Could not start login", "error");
+    return;
+  }
+
+  activeAgentAuthSession = data.session_id;
+  setAgentAuthTerminal(agent, data.command || agent.auth_connect_command || "");
+  appendAgentAuthOutput(`Starting ${data.command}\n\n`);
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(
+    `${proto}://${location.host}/ws/agents/auth/${encodeURIComponent(data.session_id)}`
+  );
+  agentAuthWs = ws;
+
+  ws.onmessage = async (event) => {
+    let msg;
+    try {
+      msg = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (msg.type === "output") {
+      appendAgentAuthOutput(msg.data || "");
+    } else if (msg.type === "start") {
+      $("#agent-auth-subtitle").textContent = msg.command || "";
+    } else if (msg.type === "exit") {
+      const status = msg.cancelled
+        ? "cancelled"
+        : Number(msg.returncode) === 0 ? "completed" : `exited ${msg.returncode}`;
+      appendAgentAuthOutput(`\n[login ${status}]\n`);
+      agentAuthWs = null;
+      activeAgentAuthSession = null;
+      await loadUsage();
+    } else if (msg.type === "error") {
+      appendAgentAuthOutput(`\n[error] ${msg.message || "Login failed"}\n`);
+    }
+  };
+  ws.onclose = () => {
+    if (agentAuthWs === ws) {
+      agentAuthWs = null;
+      activeAgentAuthSession = null;
+    }
+  };
+  ws.onerror = () => {
+    appendAgentAuthOutput("\n[connection error]\n");
+  };
+}
+
+$("#agent-auth-input-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = $("#agent-auth-input");
+  if (!agentAuthWs || agentAuthWs.readyState !== WebSocket.OPEN) return;
+  agentAuthWs.send(JSON.stringify({ type: "input", data: `${input.value}\n` }));
+  input.value = "";
+});
+
+$("#btn-agent-auth-cancel").addEventListener("click", () => {
+  closeAgentAuthWs(true);
+  appendAgentAuthOutput("\n[cancel requested]\n");
+});
 
 function kvRow(key, value, bar) {
   let html = `<span class="usage-kv"><span class="usage-k">${esc(String(key))}</span> ${esc(String(value))}`;
