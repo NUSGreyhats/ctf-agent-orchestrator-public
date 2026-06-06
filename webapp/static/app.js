@@ -20,6 +20,7 @@ let agentByName = new Map();
 let agentAuthStatus = {};
 let agentAuthWs = null;
 let activeAgentAuthSession = null;
+let agentAuthOutputText = "";
 let skillCatalog = [];
 let skillByName = new Map();
 let defaultEnabledSkills = [];
@@ -4833,17 +4834,54 @@ function setAgentAuthTerminal(agent, command) {
   terminal.classList.remove("hidden");
   $("#agent-auth-title").textContent = `${agent.label || agent.name} Login`;
   $("#agent-auth-subtitle").textContent = command || "";
-  $("#agent-auth-output").textContent = "";
+  agentAuthOutputText = "";
+  $("#agent-auth-output").innerHTML = "";
   $("#agent-auth-input").value = "";
   $("#agent-auth-input").focus();
 }
 
+function stripAnsiSequences(text) {
+  return String(text || "")
+    .replace(
+      /\x1b\]8;;(https?:\/\/[^\x07\x1b]+)(?:\x07|\x1b\\)(.*?)\x1b\]8;;(?:\x07|\x1b\\)/gis,
+      (_match, url, label) => label && label !== url ? `${label} (${url})` : url,
+    )
+    .replace(
+      /\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[PX^_][\s\S]*?\x1b\\)/g,
+      "",
+    )
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+}
+
+function linkifyPlainText(text) {
+  const urlRe = /https?:\/\/[^\s<>"'`]+/g;
+  let html = "";
+  let lastIndex = 0;
+  for (const match of text.matchAll(urlRe)) {
+    const rawUrl = match[0];
+    const start = match.index || 0;
+    html += esc(text.slice(lastIndex, start));
+
+    const trailing = rawUrl.match(/[)\].,;:!?]+$/)?.[0] || "";
+    const url = trailing ? rawUrl.slice(0, -trailing.length) : rawUrl;
+    if (url) {
+      html += `<a href="${esc(url)}" target="_blank" rel="noreferrer noopener">${esc(url)}</a>`;
+    }
+    if (trailing) html += esc(trailing);
+    lastIndex = start + rawUrl.length;
+  }
+  html += esc(text.slice(lastIndex));
+  return html;
+}
+
 function appendAgentAuthOutput(text) {
   const output = $("#agent-auth-output");
-  output.textContent += text;
-  if (output.textContent.length > 120000) {
-    output.textContent = output.textContent.slice(-100000);
+  agentAuthOutputText += stripAnsiSequences(text);
+  if (agentAuthOutputText.length > 120000) {
+    agentAuthOutputText = agentAuthOutputText.slice(-100000);
   }
+  output.innerHTML = linkifyPlainText(agentAuthOutputText);
   output.scrollTop = output.scrollHeight;
 }
 
