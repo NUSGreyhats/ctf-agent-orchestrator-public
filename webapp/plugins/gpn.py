@@ -105,6 +105,10 @@ def _response_json(resp) -> dict | list | None:
 
 
 def _api_message(data, resp=None) -> str:
+    if isinstance(data, str):
+        value = _clean(data)
+        if value:
+            return _API_MESSAGES.get(value, value)
     if isinstance(data, dict):
         error = data.get("error")
         if isinstance(error, dict):
@@ -117,7 +121,7 @@ def _api_message(data, resp=None) -> str:
                 return f"{message}: {reason}"
             if message:
                 return message
-        for key in ("message", "detail", "code", "type"):
+        for key in ("message", "detail", "code", "type", "value"):
             value = _clean(data.get(key))
             if value:
                 return _API_MESSAGES.get(value, value)
@@ -127,6 +131,34 @@ def _api_message(data, resp=None) -> str:
             return text
         return f"HTTP {resp.status_code}"
     return "unknown error"
+
+
+def _submit_result_from_response(resp, data) -> SubmitResult:
+    message = _api_message(data, resp)
+    normalized = message.casefold()
+    if normalized == "submitted":
+        return SubmitResult(correct=True, message="Submitted")
+    if normalized == "invalid flag":
+        return SubmitResult(correct=False, message="Invalid flag")
+
+    if isinstance(data, dict):
+        solved_by_me = data.get("solvedByMe")
+        if isinstance(solved_by_me, bool):
+            return SubmitResult(
+                correct=solved_by_me,
+                message="Submitted" if solved_by_me else (message or "Invalid flag"),
+            )
+        for key in ("status", "result", "type", "message", "value"):
+            value = _clean(data.get(key))
+            value_l = value.casefold()
+            if value_l == "submitted":
+                return SubmitResult(correct=True, message="Submitted")
+            if value_l in {"invalidflag", "invalid flag"}:
+                return SubmitResult(correct=False, message="Invalid flag")
+
+    if resp.status_code >= 400:
+        return SubmitResult(correct=False, message=message or "Invalid flag")
+    return SubmitResult(correct=True, message=message or "Submitted")
 
 
 async def _raise_for_api_error(resp) -> dict | list | None:
@@ -642,15 +674,4 @@ class GPNPlugin(CTFPlatformPlugin):
                 json={"challengeId": str(remote_id), "flag": flag},
             )
             data = _response_json(resp)
-            if resp.status_code >= 400:
-                return SubmitResult(
-                    correct=False,
-                    message=_api_message(data, resp) or "Incorrect flag",
-                )
-            if isinstance(data, dict):
-                solved = bool(data.get("solvedByMe"))
-                return SubmitResult(
-                    correct=solved,
-                    message="Correct" if solved else "Submitted",
-                )
-            return SubmitResult(correct=True, message="Submitted")
+            return _submit_result_from_response(resp, data)

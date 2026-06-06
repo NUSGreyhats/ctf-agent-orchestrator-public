@@ -168,6 +168,55 @@ def save_connections(connections: list[dict]) -> None:
     CONNECTIONS_FILE.write_text(json.dumps(connections, indent=2))
 
 
+def plugin_connection_identity(config: dict) -> str:
+    identity = str_field(config.get("username", ""))
+    if identity:
+        return identity
+    for key in ("token", "team_token"):
+        value = str_field(config.get(key, ""))
+        if value:
+            return value[:8] + "..."
+    return ""
+
+
+def plugin_connection_id(plugin_name: str, source_url: str, config: dict) -> str:
+    return f"{plugin_name}:{source_url}:{plugin_connection_identity(config)}"
+
+
+def source_urls_match(left: str, right: str) -> bool:
+    return str_field(left).rstrip("/") == str_field(right).rstrip("/")
+
+
+def save_plugin_connection(
+    plugin_name: str,
+    plugin,
+    config: dict,
+    source_url: str,
+) -> str:
+    """Persist plugin credentials and return the stable connection id."""
+    connections = load_connections()
+    identity = plugin_connection_identity(config)
+    conn_id = plugin_connection_id(plugin_name, source_url, config)
+    label_suffix = f" ({identity})" if identity and "..." not in identity else ""
+    existing = next(
+        (c for c in connections if c.get("id") == conn_id),
+        None,
+    )
+    if existing:
+        existing["config"] = config
+        existing["last_sync"] = utc_now_iso()
+    else:
+        connections.append({
+            "id": conn_id,
+            "plugin": plugin_name,
+            "label": f"{plugin.label} — {source_url}{label_suffix}",
+            "config": config,
+            "last_sync": utc_now_iso(),
+        })
+    save_connections(connections)
+    return conn_id
+
+
 def utc_now_iso() -> str:
     """Return an explicit UTC timestamp for browser-safe JSON metadata."""
     return datetime.now(timezone.utc).isoformat()
@@ -206,8 +255,11 @@ def _resolve_plugin_config(challenge: dict) -> tuple:
         if conn_id and conn.get("id") == conn_id:
             return plugin, conn["config"]
         if conn.get("plugin") == plugin_name and source_url:
-            conn_src = plugin.source_url(conn.get("config", {}))
-            if conn_src == source_url:
+            try:
+                conn_src = plugin.source_url(conn.get("config", {}))
+            except Exception:
+                continue
+            if source_urls_match(conn_src, source_url):
                 return plugin, conn["config"]
 
     return None, {}
@@ -7558,16 +7610,15 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             status_code=404,
         )
 
-    # Pre-compute connection ID for challenge linkage
+    # Save the connection before creating/running challenges. Instance-only
+    # challenges can start immediately and need credentials during preflight.
     _source_url = plugin.source_url(config)
-    _ident = config.get("username") or ""
-    if not _ident:
-        for _k in ("token", "team_token"):
-            _v = config.get(_k, "")
-            if _v:
-                _ident = _v[:8] + "..."
-                break
-    _conn_id = f"{plugin_name}:{_source_url}:{_ident}"
+    _conn_id = save_plugin_connection(
+        plugin_name,
+        plugin,
+        config,
+        _source_url,
+    )
     max_import_bytes = platform_import_limit_bytes()
 
     created = []
@@ -7894,36 +7945,6 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             ),
             message=f"Created {ch_name}",
         )
-
-    # Save connection for future syncs
-    if created:
-        connections = load_connections()
-        # Build identity from URL + account info to distinguish
-        # multiple accounts on the same platform
-        identity = config.get("username") or ""
-        if not identity:
-            for key in ("token", "team_token"):
-                val = config.get(key, "")
-                if val:
-                    identity = val[:8] + "..."
-                    break
-        conn_id = f"{plugin_name}:{_source_url}:{identity}"
-        label_suffix = f" ({identity})" if identity and "..." not in identity else ""
-        existing = next(
-            (c for c in connections if c.get("id") == conn_id), None
-        )
-        if existing:
-            existing["config"] = config
-            existing["last_sync"] = utc_now_iso()
-        else:
-            connections.append({
-                "id": conn_id,
-                "plugin": plugin_name,
-                "label": f"{get_plugin(plugin_name).label} — {_source_url}{label_suffix}",
-                "config": config,
-                "last_sync": utc_now_iso(),
-            })
-        save_connections(connections)
 
     _set_import_progress(
         progress_id,
