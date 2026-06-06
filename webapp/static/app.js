@@ -24,6 +24,8 @@ let agentAuthOutputText = "";
 let skillCatalog = [];
 let skillByName = new Map();
 let defaultEnabledSkills = [];
+let addRunPromptDirty = false;
+let addRunPromptTemplateToken = 0;
 
 const pendingTools = new Map();
 
@@ -334,6 +336,9 @@ document.addEventListener("click", (e) => {
   if (action === "defaults") setSkillChecklist(container, defaultEnabledSkills);
   if (action === "challenge-defaults") {
     setSkillChecklist(container, currentChallengeDefaultSkills);
+  }
+  if (container.id === "add-run-skill-list" && !addRunPromptDirty) {
+    refreshAddRunPromptTemplate({ preserveDirty: true });
   }
 });
 
@@ -1779,14 +1784,44 @@ $("#btn-stop").addEventListener("click", async () => {
   await stopRun();
 });
 
+async function refreshAddRunPromptTemplate(options = {}) {
+  if (!currentChallengeId) return;
+  if (options.preserveDirty && addRunPromptDirty) return;
+  const promptEl = $("#add-run-prompt");
+  const token = ++addRunPromptTemplateToken;
+  if (!options.silent) {
+    promptEl.value = "Loading prompt template...";
+  }
+  const res = await api(
+    `/api/challenges/${currentChallengeId}/prompt-template`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        enabled_skills: getSelectedSkills($("#add-run-skill-list")),
+      }),
+    }
+  );
+  if (token !== addRunPromptTemplateToken) return;
+  if (!res) return;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) {
+    showToast(data.error || "Failed to load prompt template", "error");
+    return;
+  }
+  promptEl.value = data.prompt || "";
+  addRunPromptDirty = false;
+}
+
 function openAddRunModal() {
   const list = $("#add-run-agent-list");
   list.innerHTML = "";
   const name = defaultAgent || primaryAgentName();
   addAgentRow(list, name, agentModels[name] || "", agentEfforts[name] || "");
   renderSkillChecklist($("#add-run-skill-list"), currentChallengeDefaultSkills);
-  $("#add-run-prompt").value = "";
+  addRunPromptDirty = false;
+  $("#add-run-prompt").value = "Loading prompt template...";
   $("#add-run-overlay").classList.remove("hidden");
+  refreshAddRunPromptTemplate();
 }
 
 function closeAddRunModal() {
@@ -1809,6 +1844,7 @@ async function submitAddRun() {
     body: JSON.stringify({
       agents,
       prompt: $("#add-run-prompt").value.trim(),
+      prompt_mode: "full",
       enabled_skills: getSelectedSkills($("#add-run-skill-list")),
     }),
   });
@@ -5260,6 +5296,18 @@ $("#btn-add-run").addEventListener("click", openAddRunModal);
 $("#add-run-close").addEventListener("click", closeAddRunModal);
 $("#add-run-overlay").addEventListener("click", (e) => {
   if (e.target.id === "add-run-overlay") closeAddRunModal();
+});
+$("#add-run-prompt").addEventListener("input", () => {
+  addRunPromptDirty = true;
+});
+$("#btn-add-run-reset-prompt").addEventListener("click", () => {
+  addRunPromptDirty = false;
+  refreshAddRunPromptTemplate();
+});
+$("#add-run-skill-list").addEventListener("change", (e) => {
+  if (e.target.classList.contains("skill-cb") && !addRunPromptDirty) {
+    refreshAddRunPromptTemplate({ preserveDirty: true, silent: true });
+  }
 });
 $("#btn-add-run-agent-row").addEventListener("click", () => {
   addAgentRow($("#add-run-agent-list"));
