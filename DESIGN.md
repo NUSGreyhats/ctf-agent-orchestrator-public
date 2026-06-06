@@ -206,10 +206,11 @@ Platform plugins are discovered from `webapp/plugins/`:
 | HTB CTF | JWT Bearer token | Fetch challenges, download files, submit flags, on-demand instance management |
 | CDDC | Platform credentials | Fetch challenges, download files, submit flags |
 | Cywaria/Cympire | Username/password | Fetch challenges, scrape/download files, start instances, submit flags |
+| SAS CTF | Session cookie, username/password best effort | Fetch challenges, download files, start instances, submit flags |
 
-CTFd and rCTF verify TLS by default. They expose an explicit `insecure_tls` checkbox for self-signed/local deployments. HTB uses normal certificate verification.
+CTFd and rCTF verify TLS by default. They expose an explicit `insecure_tls` checkbox for self-signed/local deployments. HTB uses normal certificate verification. SAS CTF exposes the same TLS checkbox and defaults it on because the current event endpoint may not validate against the host trust store.
 
-HTB challenges with Docker/machine instances are started at solve time, not import time, to respect concurrent instance limits. Connection info (`url`, `host`, `port`, `connection`) is injected into the agent prompt.
+HTB, Cywaria, and SAS CTF challenges with Docker/machine instances are started at solve time, not import time, to respect concurrent instance limits. Connection info (`url`, `host`, `port`, `connection`) is injected into the agent prompt.
 
 HTB multi-answer challenge metadata (`flagsInfo`) is preserved as `_flag_questions`. The prompt lists each question and run workspaces include `submit_answer.py`, which calls a local token-protected endpoint to submit arbitrary answers by question number or platform `flag_id`.
 
