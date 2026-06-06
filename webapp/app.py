@@ -1117,15 +1117,6 @@ def provider_state_for_metadata(run: dict) -> dict:
     return state
 
 
-def reset_codex_session_state(run: dict) -> None:
-    """Clear the Codex thread binding so the next start gets fresh repo skills."""
-    run.pop("_codex_thread_id", None)
-    session_state = run.get("_session_state")
-    if isinstance(session_state, dict):
-        session_state.pop("codex_thread_id", None)
-    run["goal"] = None
-
-
 # ---------------------------------------------------------------------------
 # State directories and persistence
 # ---------------------------------------------------------------------------
@@ -3835,12 +3826,18 @@ async def _start_run_after_skill_change(
     run_id: str,
     run: dict,
     continue_msg: str | None,
+    codex_skill_mentions: list[str] | None = None,
 ) -> None:
     run["status"] = "solving"
     run["error"] = None
     run.pop("_stop_reason", None)
     run["task"] = asyncio.create_task(
-        run_agent_task(challenge_id, run_id, continue_msg=continue_msg)
+        run_agent_task(
+            challenge_id,
+            run_id,
+            continue_msg=continue_msg,
+            codex_skill_mentions=codex_skill_mentions,
+        )
     )
 
 
@@ -5950,6 +5947,7 @@ async def _run_agent_sdk_path(
     provider,
     prompt: str,
     is_continue: bool,
+    codex_skill_mentions: list[str] | None = None,
 ) -> None:
     """Run an agent using the provider's SDK (no subprocess)."""
     run_cwd = get_run_cwd(challenge_id, run)
@@ -5988,6 +5986,7 @@ async def _run_agent_sdk_path(
             session_state=session_state,
             challenge_id=challenge_id if is_parallel else "",
             run_id=run_id if is_parallel else "",
+            _codex_skill_mentions=codex_skill_mentions or [],
             _run=run,
         ):
             # Check if we've been stopped externally
@@ -6378,6 +6377,7 @@ async def run_agent_task(
     challenge_id: str,
     run_id: str,
     continue_msg: str | None = None,
+    codex_skill_mentions: list[str] | None = None,
 ):
     """Run an agent for a specific run of a challenge."""
     challenge = challenges[challenge_id]
@@ -6460,6 +6460,7 @@ async def run_agent_task(
             await _run_agent_sdk_path(
                 challenge_id, run_id, challenge, run, provider,
                 prompt, bool(continue_msg),
+                codex_skill_mentions=codex_skill_mentions,
             )
         except Exception as exc:
             log.error("[%s/%s] SDK path CRASHED: %s", challenge_id[:8], run_id[:8], exc, exc_info=True)
@@ -8424,12 +8425,8 @@ async def update_run_skills(request: Request) -> JSONResponse:
 
     updated_runs = []
     for target_id, target_run in targets:
-        restart_codex_for_skills = resume and target_run.get("agent") == "codex"
-        continue_msg = (
-            None
-            if restart_codex_for_skills
-            else (_skill_resume_message(target_run) if resume else None)
-        )
+        old_effective_skills = run_enabled_skills(challenge, target_run)
+        continue_msg = _skill_resume_message(target_run) if resume else None
         if resume:
             await stop_run(target_run, "skills_changed")
             finish_run_timer(target_run)
@@ -8440,10 +8437,13 @@ async def update_run_skills(request: Request) -> JSONResponse:
             target_run["enabled_skills"] = enabled_skills
         sync_run_skill_links(challenge, target_run)
 
-        if restart_codex_for_skills:
-            reset_codex_session_state(target_run)
-
         effective_skills = run_enabled_skills(challenge, target_run)
+        codex_skill_mentions: list[str] = []
+        if resume and target_run.get("agent") == "codex":
+            previous = set(old_effective_skills)
+            codex_skill_mentions = [
+                name for name in effective_skills if name not in previous
+            ]
         skills_event = {
             "type": "run_skills",
             "run_id": target_id,
@@ -8460,7 +8460,11 @@ async def update_run_skills(request: Request) -> JSONResponse:
 
         if resume:
             await _start_run_after_skill_change(
-                challenge_id, target_id, target_run, continue_msg
+                challenge_id,
+                target_id,
+                target_run,
+                continue_msg,
+                codex_skill_mentions=codex_skill_mentions,
             )
             status_event = {
                 "type": "run_status",

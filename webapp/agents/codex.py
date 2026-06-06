@@ -112,6 +112,38 @@ def _skill_inputs_from_list_result(result: object) -> list[dict]:
     return inputs
 
 
+def _normalize_skill_mentions(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    mentions: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        name = str(item).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        mentions.append(name)
+    return mentions
+
+
+def _skill_mention_prefix(
+    skill_inputs: list[dict],
+    requested_mentions: list[str],
+) -> str:
+    if not requested_mentions:
+        return ""
+    available = {
+        item.get("name")
+        for item in skill_inputs
+        if isinstance(item.get("name"), str)
+    }
+    mentions: list[str] = []
+    for name in requested_mentions:
+        if name in available:
+            mentions.append(f"${name}")
+    return " ".join(mentions)
+
+
 def _model_reasoning_map() -> dict[str, set[str]]:
     if not CODEX_MODELS_CACHE_FILE.exists():
         return {}
@@ -1907,6 +1939,9 @@ async def _run_agent_sdk(
     run_ref = kwargs.get("_run")
     if not isinstance(run_ref, dict):
         run_ref = None
+    requested_skill_mentions = _normalize_skill_mentions(
+        kwargs.get("_codex_skill_mentions")
+    )
     goal_command_queue: asyncio.Queue | None = None
     if run_ref is not None:
         existing_queue = run_ref.get("_codex_goal_commands")
@@ -2253,13 +2288,37 @@ async def _run_agent_sdk(
                 len(skill_inputs),
                 ", ".join(item["name"] for item in skill_inputs),
             )
+        skill_mention_prefix = _skill_mention_prefix(
+            skill_inputs,
+            requested_skill_mentions,
+        )
+        turn_prompt = prompt
+        text_elements = []
+        if skill_mention_prefix:
+            turn_prompt = f"{skill_mention_prefix}\n{prompt}"
+            offset = 0
+            for mention in skill_mention_prefix.split():
+                end = offset + len(mention)
+                text_elements.append({
+                    "byteRange": {"start": offset, "end": end},
+                    "placeholder": mention,
+                })
+                offset = end + 1
+            log.info(
+                "Explicitly invoking Codex skill mention(s): %s",
+                skill_mention_prefix,
+            )
         turn_params: dict = {
             "threadId": thread_id,
             "cwd": cwd_str,
             "runtimeWorkspaceRoots": [cwd_str],
             "input": [
                 *skill_inputs,
-                {"type": "text", "text": prompt, "text_elements": []},
+                {
+                    "type": "text",
+                    "text": turn_prompt,
+                    "text_elements": text_elements,
+                },
             ],
         }
         if model:
