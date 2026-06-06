@@ -1011,8 +1011,21 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   flex-shrink: 0; color: var(--text-dim); font-family: var(--mono);
   white-space: nowrap;
 }
-.goal-event-msg {
-  color: var(--text-muted); background: var(--bg-input);
+.goal-actions {
+  flex-shrink: 0; display: flex; align-items: center; gap: 0.25rem;
+}
+.goal-edit-btn {
+  padding: 0.12rem 0.35rem; font-size: 0.6rem;
+}
+.run-goal-modal textarea {
+  width: 100%; resize: vertical; min-height: 9rem;
+  background: var(--bg-input); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.5rem; font-family: var(--sans); font-size: 0.8rem;
+  line-height: 1.45;
+}
+.run-goal-modal textarea:focus {
+  outline: none; border-color: var(--accent);
 }
 
 /* === Steer Bar === */

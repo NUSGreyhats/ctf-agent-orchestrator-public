@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -14,6 +14,8 @@ GetModels = Callable[[], tuple[tuple[str, str], ...]]
 
 # Type for SDK-based run_agent: yields normalized events
 RunAgent = Callable[..., AsyncIterator[dict]]
+SetThreadGoal = Callable[[str, str, str | Path], Awaitable[dict | None]]
+ClearThreadGoal = Callable[[str, str | Path], Awaitable[bool]]
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,8 @@ class AgentProvider:
     # of build_command + subprocess. Signature:
     #   async def run_agent(prompt, model, effort, cwd, continue_session, session_state, **kw) -> AsyncIterator[dict]
     run_agent: RunAgent | None = None
+    set_thread_goal: SetThreadGoal | None = None
+    clear_thread_goal: ClearThreadGoal | None = None
 
     @property
     def supports_sdk(self) -> bool:
