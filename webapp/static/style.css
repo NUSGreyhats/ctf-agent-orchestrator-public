@@ -1789,7 +1789,15 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   font-family: var(--mono); font-size: 0.66rem;
 }
 .skill-pill-muted { color: var(--text-muted); font-family: var(--sans); }
-.add-run-modal { max-width: 660px; }
+.add-run-modal { max-width: 760px; }
+.prompt-label-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.5rem; margin-bottom: 0.25rem;
+}
+.add-run-modal #add-run-prompt {
+  min-height: 18rem; font-family: var(--mono); font-size: 0.72rem;
+  line-height: 1.45; white-space: pre;
+}
 .run-skills-modal { max-width: 620px; }
 .run-skill-inheritance {
   margin: 0 0 0.6rem; color: var(--text-muted);

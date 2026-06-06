@@ -1138,6 +1138,7 @@ def public_run_summary(challenge: dict, run: dict) -> dict:
     }
     if run.get("custom_prompt"):
         summary["custom_prompt"] = run["custom_prompt"]
+        summary["custom_prompt_mode"] = run.get("custom_prompt_mode", "append")
     return summary
 
 
@@ -2579,6 +2580,9 @@ def _serialize_runs(challenge: dict) -> dict:
             run_meta["enabled_skills"] = run_enabled_skills(challenge, run)
         if run.get("custom_prompt"):
             run_meta["custom_prompt"] = run["custom_prompt"]
+            run_meta["custom_prompt_mode"] = run.get(
+                "custom_prompt_mode", "append"
+            )
         serialized[run_id] = run_meta
     return serialized
 
@@ -2749,6 +2753,9 @@ def load_challenges_from_disk() -> None:
                 ).strip()
                 if custom_prompt:
                     run["custom_prompt"] = custom_prompt
+                    run["custom_prompt_mode"] = str(
+                        run_meta.get("custom_prompt_mode") or "append"
+                    )
                 run["_codex_thread_id"] = provider_state.get(
                     "codex_thread_id"
                 )
@@ -3906,6 +3913,35 @@ async def stop_challenge(request: Request) -> JSONResponse:
     })
 
 
+async def get_challenge_prompt_template(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+
+    challenge_id = request.path_params["id"]
+    challenge = challenges.get(challenge_id)
+    if not challenge:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    enabled_skills = normalize_enabled_skills(
+        body.get("enabled_skills"),
+        default=challenge_enabled_skills(challenge),
+    )
+    prompt = build_add_run_prompt_template(challenge, enabled_skills)
+    return JSONResponse({
+        "prompt": prompt,
+        "placeholders": [
+            "{{WORKING_NOTES_PATH}}",
+            "{{TEAMMATE_CONTEXT}}",
+            "{{REMOTE_INSTANCE_CONNECTION_INFO}}",
+        ],
+    })
+
+
 async def add_challenge_runs(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
@@ -3964,6 +4000,9 @@ async def add_challenge_runs(request: Request) -> JSONResponse:
         return JSONResponse({"error": "agent required"}, status_code=400)
 
     custom_prompt = str_field(body.get("prompt", "")).strip()
+    custom_prompt_mode = str_field(body.get("prompt_mode", "")).strip()
+    if custom_prompt_mode not in {"full", "append"}:
+        custom_prompt_mode = "append"
     has_skill_override = "enabled_skills" in body
     enabled_skills = normalize_enabled_skills(
         body.get("enabled_skills"),
@@ -3999,6 +4038,7 @@ async def add_challenge_runs(request: Request) -> JSONResponse:
         )
         if custom_prompt:
             run["custom_prompt"] = custom_prompt
+            run["custom_prompt_mode"] = custom_prompt_mode
         if has_skill_override:
             run["enabled_skills"] = enabled_skills
         challenge["runs"][run_id] = run
@@ -5319,6 +5359,7 @@ def _export_challenge_to_zip(
             "enabled_skills": run_enabled_skills(challenge, run),
             "skill_override": run_has_skill_override(run),
             "custom_prompt": run.get("custom_prompt", ""),
+            "custom_prompt_mode": run.get("custom_prompt_mode", "append"),
         }
 
     zf.writestr(f"{prefix}/challenge.json", json.dumps(meta, indent=2))
@@ -5716,14 +5757,104 @@ def _instance_prompt_lines(instance_info: dict) -> list[str]:
     return _instance_field_parts(instance_info)
 
 
-def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) -> str:
-    """Build the CTF solving prompt."""
+def _teammate_context(challenge: dict, run: dict) -> str:
+    teammates = []
+    for rid, r in challenge["runs"].items():
+        if rid != run["id"]:
+            teammates.append(r.get("notes_label", r["agent"]))
+    if not teammates:
+        return ""
+    parts = [
+        f"You are working in a team with: {', '.join(teammates)}.",
+        "Work independently first — try your own approaches before "
+        "looking at what others are doing.",
+        "",
+        "Teammates' notes are available at:",
+    ]
+    for teammate in teammates:
+        parts.append(f"  - WORKING_NOTES_{teammate}.md")
+    parts.extend([
+        "",
+        "Only read teammates' notes if you have exhausted your "
+        "own ideas or are completely stuck.",
+        "",
+        "Call `notify_teammates` when you confirm any of these:",
+        "- The vulnerability class or challenge category "
+        '(e.g., "this is a heap UAF", "RSA with small e")',
+        "- A key, secret, password, or credential you extracted",
+        "- A decoded or decrypted intermediate value",
+        "- The correct tool or technique to use "
+        '(e.g., "Fermat factorization works here")',
+        "- A dead end that would waste a teammate's time "
+        '(e.g., "the SSTI filter blocks all builtins")',
+        "- The flag",
+        "",
+        "Do NOT notify for unverified hypotheses or guesses — "
+        "only confirmed findings. "
+        "Notify early and often. Do not wait until you have "
+        "the flag.",
+        "",
+        "You may receive '[Teammate breakthrough]' messages "
+        "between turns. Read them and incorporate useful "
+        "findings into your approach.",
+    ])
+    return "\n".join(parts)
+
+
+def _remote_instance_context(instance_info: dict | None) -> str:
+    if not instance_info:
+        return ""
+    lines = ["Remote instance connection info:"]
+    for line in _instance_prompt_lines(instance_info):
+        lines.append(f"  {line}")
+    return "\n".join(lines)
+
+
+def _render_run_prompt_template(
+    template: str,
+    challenge: dict,
+    run: dict,
+    instance_info: dict | None,
+) -> str:
+    notes_path = get_run_cwd(challenge["id"], run) / run_notes_filename(challenge, run)
+    replacements = {
+        "{{WORKING_NOTES_PATH}}": str(notes_path),
+        "{{TEAMMATE_CONTEXT}}": _teammate_context(challenge, run),
+        "{{REMOTE_INSTANCE_CONNECTION_INFO}}": _remote_instance_context(instance_info),
+    }
+    rendered = template
+    for placeholder, value in replacements.items():
+        rendered = rendered.replace(placeholder, value)
+    return "\n".join(line.rstrip() for line in rendered.splitlines()).strip()
+
+
+def _build_standard_prompt(
+    challenge: dict,
+    run: dict,
+    instance_info: dict | None = None,
+    *,
+    enabled_skills: list[str] | None = None,
+    notes_path: str | None = None,
+    team_placeholder: bool = False,
+    remote_placeholder: bool = False,
+    has_challenge_files: bool | None = None,
+) -> str:
+    """Build the default CTF solving prompt without run-specific overrides."""
     is_parallel = challenge["mode"] == "parallel"
 
     notes_file = run_notes_filename(challenge, run)
-    run_cwd = get_run_cwd(challenge["id"], run)
-    notes_path = run_cwd / notes_file
-    enabled_skill_set = set(run_enabled_skills(challenge, run))
+    run_cwd = None
+    if notes_path is None or has_challenge_files is None:
+        try:
+            run_cwd = get_run_cwd(challenge["id"], run)
+        except Exception:
+            run_cwd = None
+    notes_path = notes_path or (
+        str(run_cwd / notes_file) if run_cwd else notes_file
+    )
+    enabled_skill_set = set(
+        enabled_skills if enabled_skills is not None else run_enabled_skills(challenge, run)
+    )
 
     parts = [
         "You are solving a CTF challenge.",
@@ -5738,47 +5869,13 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
     ])
 
     # Parallel mode: team awareness
-    if is_parallel:
-        teammates = []
-        for rid, r in challenge["runs"].items():
-            if rid != run["id"]:
-                teammates.append(r.get("notes_label", r["agent"]))
-        if teammates:
-            parts.extend([
-                "",
-                f"You are working in a team with: {', '.join(teammates)}.",
-                "Work independently first — try your own approaches before "
-                "looking at what others are doing.",
-                "",
-                "Teammates' notes are available at:",
-            ])
-            for t in teammates:
-                parts.append(f"  - WORKING_NOTES_{t}.md")
-            parts.extend([
-                "",
-                "Only read teammates' notes if you have exhausted your "
-                "own ideas or are completely stuck.",
-                "",
-                "Call `notify_teammates` when you confirm any of these:",
-                "- The vulnerability class or challenge category "
-                '(e.g., "this is a heap UAF", "RSA with small e")',
-                "- A key, secret, password, or credential you extracted",
-                "- A decoded or decrypted intermediate value",
-                "- The correct tool or technique to use "
-                '(e.g., "Fermat factorization works here")',
-                "- A dead end that would waste a teammate's time "
-                '(e.g., "the SSTI filter blocks all builtins")',
-                "- The flag",
-                "",
-                "Do NOT notify for unverified hypotheses or guesses — "
-                "only confirmed findings. "
-                "Notify early and often. Do not wait until you have "
-                "the flag.",
-                "",
-                "You may receive '[Teammate breakthrough]' messages "
-                "between turns. Read them and incorporate useful "
-                "findings into your approach.",
-            ])
+    teammate_context = (
+        "{{TEAMMATE_CONTEXT}}" if team_placeholder else (
+            _teammate_context(challenge, run) if is_parallel else ""
+        )
+    )
+    if teammate_context:
+        parts.extend(["", teammate_context])
 
     parts.extend([
         "",
@@ -5815,26 +5912,21 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
                 "formats like flag{{...}}, FLAG{{...}}, "
                 "CTF{{...}}, or ask."
             )
-    if instance_info:
-        parts.append("")
-        parts.append("Remote instance connection info:")
-        for line in _instance_prompt_lines(instance_info):
-            parts.append(f"  {line}")
-
-    custom_prompt = str(run.get("custom_prompt") or "").strip()
-    if custom_prompt:
-        parts.extend([
-            "",
-            "Run-specific instructions:",
-            custom_prompt,
-        ])
+    remote_context = (
+        "{{REMOTE_INSTANCE_CONNECTION_INFO}}"
+        if remote_placeholder
+        else _remote_instance_context(instance_info)
+    )
+    if remote_context:
+        parts.extend(["", remote_context])
 
     has_declared_files = bool(challenge.get("files"))
-    try:
-        run_cwd = get_run_cwd(challenge["id"], run)
-        has_challenge_files = has_declared_files and (run_cwd / "challenge_files").exists()
-    except Exception:
-        has_challenge_files = False
+    if has_challenge_files is None:
+        has_challenge_files = bool(
+            has_declared_files
+            and run_cwd
+            and (run_cwd / "challenge_files").exists()
+        )
 
     if has_challenge_files:
         parts.extend([
@@ -5866,6 +5958,46 @@ def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) 
             "targeted commands with limits (for example, head/tail).",
         ])
     return "\n".join(parts)
+
+
+def build_add_run_prompt_template(
+    challenge: dict,
+    enabled_skills: list[str],
+) -> str:
+    template_run = make_run(
+        run_id="{{RUN_ID}}",
+        agent="{{AGENT}}",
+        model="{{MODEL}}",
+        effort="{{EFFORT}}",
+        status="pending",
+    )
+    template_challenge = {**challenge, "mode": "parallel"}
+    return _build_standard_prompt(
+        template_challenge,
+        template_run,
+        enabled_skills=enabled_skills,
+        notes_path="{{WORKING_NOTES_PATH}}",
+        team_placeholder=True,
+        remote_placeholder=True,
+        has_challenge_files=bool(challenge.get("files")),
+    )
+
+
+def build_prompt(challenge: dict, run: dict, instance_info: dict | None = None) -> str:
+    """Build the CTF solving prompt."""
+    custom_prompt = str(run.get("custom_prompt") or "").strip()
+    if custom_prompt and run.get("custom_prompt_mode") == "full":
+        return _render_run_prompt_template(
+            custom_prompt,
+            challenge,
+            run,
+            instance_info,
+        )
+
+    prompt = _build_standard_prompt(challenge, run, instance_info)
+    if custom_prompt:
+        prompt += "\n\nRun-specific instructions:\n" + custom_prompt
+    return prompt
 
 
 # ---------------------------------------------------------------------------
@@ -11302,6 +11434,7 @@ routes = [
     Route("/api/challenges/bulk", bulk_upload, methods=["POST"]),
     Route("/api/challenges/export", export_challenges_bulk, methods=["POST"]),
     Route("/api/challenges/{id}/solve", solve_challenge, methods=["POST"]),
+    Route("/api/challenges/{id}/prompt-template", get_challenge_prompt_template, methods=["POST"]),
     Route("/api/challenges/{id}/runs", add_challenge_runs, methods=["POST"]),
     Route("/api/challenges/{id}/stop", stop_challenge, methods=["POST"]),
     Route("/api/challenges/{id}/broadcast", broadcast_to_agents, methods=["POST"]),

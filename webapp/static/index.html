@@ -519,9 +519,12 @@
         <button type="button" id="btn-add-run-agent-row" class="btn-ghost btn-sm">+ Add Agent</button>
       </div>
       <div class="form-group">
-        <label for="add-run-prompt">Run Prompt</label>
-        <textarea id="add-run-prompt" rows="4" placeholder="Optional instructions for the new agent(s)..."></textarea>
-        <span class="checkbox-hint">These instructions are appended to the standard challenge prompt.</span>
+        <div class="prompt-label-row">
+          <label for="add-run-prompt">Run Prompt</label>
+          <button type="button" id="btn-add-run-reset-prompt" class="btn-ghost btn-sm">Reset Prompt</button>
+        </div>
+        <textarea id="add-run-prompt" rows="16" placeholder="Loading prompt template..."></textarea>
+        <span class="checkbox-hint">This full prompt is sent to the new agent(s). Template placeholders are resolved when each run starts.</span>
       </div>
       <div class="form-group">
         <label>Skills</label>
