@@ -106,6 +106,21 @@ CHALLENGES_DIR.mkdir(parents=True, exist_ok=True)
 STATE_ROOT_DIR = APP_ROOT_DIR / "state"
 STATE_ROOT_DIR.mkdir(parents=True, exist_ok=True)
 
+RESOURCE_SAMPLE_INTERVAL_SECONDS = float(os.environ.get(
+    "RESOURCE_SAMPLE_INTERVAL_SECONDS", "2"
+))
+RESOURCE_HISTORY_LIMIT = int(os.environ.get("RESOURCE_HISTORY_LIMIT", "150"))
+RESOURCE_CPU_WARN_PERCENT = float(os.environ.get(
+    "RESOURCE_CPU_WARN_PERCENT", "300"
+))
+RESOURCE_RSS_WARN_BYTES = int(float(os.environ.get(
+    "RESOURCE_RSS_WARN_GB", "4"
+)) * 1024 * 1024 * 1024)
+RESOURCE_PROC_WARN_COUNT = int(os.environ.get("RESOURCE_PROC_WARN_COUNT", "50"))
+RESOURCE_PROCESS_LIST_LIMIT = int(os.environ.get(
+    "RESOURCE_PROCESS_LIST_LIMIT", "30"
+))
+
 # Rate limiting for login
 MAX_LOGIN_ATTEMPTS = 5
 LOGIN_WINDOW_SECONDS = 300
@@ -575,6 +590,278 @@ def derive_challenge_status(challenge: dict) -> str:
 # Run helpers
 # ---------------------------------------------------------------------------
 
+_CLK_TCK = os.sysconf(os.sysconf_names.get("SC_CLK_TCK", "SC_CLK_TCK"))
+_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+_process_cpu_prev: dict[int, tuple[int, float]] = {}
+_resource_monitor_task: asyncio.Task | None = None
+
+
+def bind_run_process_group(run: dict, pid: int | None) -> None:
+    if not pid:
+        return
+    run["_agent_root_pid"] = int(pid)
+    try:
+        run["_agent_pgid"] = os.getpgid(int(pid))
+    except ProcessLookupError:
+        run["_agent_pgid"] = None
+    except OSError as exc:
+        log.debug("Could not read process group for pid %s: %s", pid, exc)
+        run["_agent_pgid"] = None
+
+
+def _valid_run_pgid(run: dict) -> int | None:
+    pgid = run.get("_agent_pgid")
+    if not isinstance(pgid, int) or pgid <= 1:
+        return None
+    try:
+        if pgid == os.getpgrp():
+            return None
+    except OSError:
+        return None
+    return pgid
+
+
+def _process_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+async def _terminate_run_process_group(run: dict, timeout: float = 5.0) -> bool:
+    pgid = _valid_run_pgid(run)
+    if not pgid:
+        return False
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except OSError as exc:
+        log.warning("Failed to terminate process group %s: %s", pgid, exc)
+        return False
+
+    deadline = _time.monotonic() + timeout
+    proc = run.get("process")
+    while _time.monotonic() < deadline:
+        if proc and getattr(proc, "returncode", None) is None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=0.2)
+                return True
+            except asyncio.TimeoutError:
+                pass
+        elif not _process_group_alive(pgid):
+            return True
+        await asyncio.sleep(0.1)
+
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError as exc:
+        log.warning("Failed to kill process group %s: %s", pgid, exc)
+        return False
+    return True
+
+
+def _parse_proc_stat(pid: int) -> dict | None:
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    right = raw.rfind(")")
+    left = raw.find("(")
+    if left < 0 or right < left:
+        return None
+    try:
+        parts = raw[right + 2:].split()
+        return {
+            "pid": pid,
+            "comm": raw[left + 1:right],
+            "state": parts[0],
+            "ppid": int(parts[1]),
+            "pgid": int(parts[2]),
+            "utime": int(parts[11]),
+            "stime": int(parts[12]),
+            "rss": max(0, int(parts[21])) * _PAGE_SIZE,
+        }
+    except (IndexError, ValueError):
+        return None
+
+
+def _read_proc_cmdline(pid: int, fallback: str) -> str:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return fallback
+    text = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+    return text or fallback
+
+
+def _sample_process_group(pgid: int) -> dict:
+    now = _time.monotonic()
+    processes: list[dict] = []
+    total_cpu = 0.0
+    total_rss = 0
+    seen_pids: set[int] = set()
+
+    proc_root = Path("/proc")
+    for child in proc_root.iterdir():
+        if not child.name.isdigit():
+            continue
+        pid = int(child.name)
+        stat = _parse_proc_stat(pid)
+        if not stat or stat["pgid"] != pgid:
+            continue
+
+        ticks = stat["utime"] + stat["stime"]
+        prev = _process_cpu_prev.get(pid)
+        cpu = 0.0
+        if prev:
+            prev_ticks, prev_ts = prev
+            elapsed = max(0.001, now - prev_ts)
+            cpu = max(0.0, ((ticks - prev_ticks) / _CLK_TCK) / elapsed * 100.0)
+        _process_cpu_prev[pid] = (ticks, now)
+        seen_pids.add(pid)
+        total_cpu += cpu
+        total_rss += stat["rss"]
+        processes.append({
+            "pid": pid,
+            "ppid": stat["ppid"],
+            "pgid": pgid,
+            "cpu_percent": round(cpu, 1),
+            "rss_bytes": stat["rss"],
+            "command": _read_proc_cmdline(pid, stat["comm"])[:300],
+        })
+
+    processes.sort(
+        key=lambda item: (
+            float(item.get("cpu_percent") or 0),
+            int(item.get("rss_bytes") or 0),
+        ),
+        reverse=True,
+    )
+    warning = (
+        total_cpu >= RESOURCE_CPU_WARN_PERCENT
+        or total_rss >= RESOURCE_RSS_WARN_BYTES
+        or len(processes) >= RESOURCE_PROC_WARN_COUNT
+    )
+    return {
+        "ts": int(_time.time()),
+        "pgid": pgid,
+        "cpu_percent": round(total_cpu, 1),
+        "rss_bytes": total_rss,
+        "process_count": len(processes),
+        "warning": warning,
+        "_pids": sorted(seen_pids),
+        "processes": processes[:RESOURCE_PROCESS_LIST_LIMIT],
+    }
+
+
+def _empty_resource_sample() -> dict:
+    return {
+        "ts": int(_time.time()),
+        "cpu_percent": 0.0,
+        "rss_bytes": 0,
+        "process_count": 0,
+        "warning": False,
+        "processes": [],
+    }
+
+
+def _public_resource_sample(sample: object, *, processes: bool = True) -> dict | None:
+    if not isinstance(sample, dict):
+        return None
+    public = {
+        "ts": sample.get("ts"),
+        "pgid": sample.get("pgid"),
+        "cpu_percent": float(sample.get("cpu_percent") or 0),
+        "rss_bytes": int(sample.get("rss_bytes") or 0),
+        "process_count": int(sample.get("process_count") or 0),
+        "warning": bool(sample.get("warning")),
+    }
+    if processes:
+        public["processes"] = sample.get("processes") or []
+    return public
+
+
+def _resource_history_points(run: dict) -> list[dict]:
+    points = []
+    for sample in run.get("_resource_history", [])[-RESOURCE_HISTORY_LIMIT:]:
+        public = _public_resource_sample(sample, processes=False)
+        if public:
+            points.append(public)
+    return points
+
+
+def _sample_run_resources(run: dict) -> dict:
+    pgid = _valid_run_pgid(run)
+    if not pgid or not _process_group_alive(pgid):
+        return _empty_resource_sample()
+    return _sample_process_group(pgid)
+
+
+def _aggregate_resource_samples(samples: list[dict]) -> dict:
+    active = [
+        sample for sample in samples
+        if isinstance(sample, dict) and sample.get("process_count")
+    ]
+    total = {
+        "ts": int(_time.time()),
+        "cpu_percent": round(sum(float(s.get("cpu_percent") or 0) for s in active), 1),
+        "rss_bytes": sum(int(s.get("rss_bytes") or 0) for s in active),
+        "process_count": sum(int(s.get("process_count") or 0) for s in active),
+        "warning": any(bool(s.get("warning")) for s in active),
+    }
+    return total
+
+
+async def _resource_monitor_loop() -> None:
+    while True:
+        await asyncio.sleep(max(0.5, RESOURCE_SAMPLE_INTERVAL_SECONDS))
+        seen_pids: set[int] = set()
+        for challenge_id, challenge in list(challenges.items()):
+            samples = []
+            for run_id, run in list(challenge.get("runs", {}).items()):
+                pgid = _valid_run_pgid(run)
+                if run.get("status") != "solving" and (
+                    not pgid or not _process_group_alive(pgid)
+                ):
+                    continue
+                sample = _sample_run_resources(run)
+                run["_resource_usage"] = sample
+                history = run.setdefault("_resource_history", [])
+                history.append(sample)
+                del history[:-RESOURCE_HISTORY_LIMIT]
+                seen_pids.update(sample.get("_pids", []))
+                samples.append(sample)
+                await broadcast(challenge_id, run_id, {
+                    "type": "run_resource_usage",
+                    "run_id": run_id,
+                    "usage": _public_resource_sample(sample),
+                    "history": _resource_history_points(run),
+                })
+
+            if samples:
+                aggregate = _aggregate_resource_samples(samples)
+                challenge["_resource_usage"] = aggregate
+                history = challenge.setdefault("_resource_history", [])
+                history.append(aggregate)
+                del history[:-RESOURCE_HISTORY_LIMIT]
+                await broadcast_global({
+                    "type": "challenge_resource_usage",
+                    "challenge_id": challenge_id,
+                    "usage": aggregate,
+                    "history": history[-RESOURCE_HISTORY_LIMIT:],
+                })
+
+        stale = set(_process_cpu_prev) - seen_pids
+        for pid in stale:
+            _process_cpu_prev.pop(pid, None)
+
+
 async def stop_run(run: dict, reason: str = "user_stop") -> None:
     """Stop a run — handles both CLI (process) and SDK (task) execution."""
     proc = run.get("process")
@@ -587,7 +874,8 @@ async def stop_run(run: dict, reason: str = "user_stop") -> None:
     # Set BEFORE terminating so the finalizer sees it during unwind
     run["_stop_reason"] = reason
 
-    if proc and proc.returncode is None:
+    group_stopped = await _terminate_run_process_group(run)
+    if not group_stopped and proc and proc.returncode is None:
         proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
@@ -708,6 +996,10 @@ def make_run(
         "_last_stream_error": None,
         "_last_stderr_lines": [],
         "_last_unknown_events": [],
+        "_agent_root_pid": None,
+        "_agent_pgid": None,
+        "_resource_usage": None,
+        "_resource_history": [],
         "_submit_token": secrets.token_urlsafe(24),
         "goal": None,
     }
@@ -841,6 +1133,8 @@ def public_run_summary(challenge: dict, run: dict) -> dict:
         "skill_override": run_has_skill_override(run),
         "goal": normalize_run_goal(run.get("goal"), str(run.get("agent") or "")),
         "goal_editable": run_goal_editable(run),
+        "resource_usage": _public_resource_sample(run.get("_resource_usage")),
+        "resource_history": _resource_history_points(run),
     }
     if run.get("custom_prompt"):
         summary["custom_prompt"] = run["custom_prompt"]
@@ -2844,6 +3138,14 @@ async def list_challenges(request: Request) -> JSONResponse:
             "solves": c.get("_solves", 0),
             "flag_questions": c.get("_flag_questions", []),
             "runs": runs_summary,
+            "resource_usage": _public_resource_sample(
+                c.get("_resource_usage"),
+                processes=False,
+            ),
+            "resource_history": [
+                item for item in c.get("_resource_history", [])[-RESOURCE_HISTORY_LIMIT:]
+                if isinstance(item, dict)
+            ],
             "detected_flags": c.get("detected_flags", {}),
             "detected_flag_meta": c.get("detected_flag_meta", {}),
         })
@@ -6531,9 +6833,11 @@ async def run_agent_task(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,
         limit=2 ** 24,  # 16 MB — default 64 KB is too small for large JSON events
     )
     run["process"] = proc
+    bind_run_process_group(run, proc.pid)
     run["_saw_provider_message"] = False
     run["_last_stream_error"] = None
     run["_last_stderr_lines"] = []
@@ -10931,8 +11235,17 @@ async def _reconcile_discord_gateway() -> None:
 
 @asynccontextmanager
 async def lifespan(app):
+    global _resource_monitor_task
     asyncio.create_task(_reconcile_discord_gateway())
+    _resource_monitor_task = asyncio.create_task(_resource_monitor_loop())
     yield
+    if _resource_monitor_task:
+        _resource_monitor_task.cancel()
+        try:
+            await _resource_monitor_task
+        except asyncio.CancelledError:
+            pass
+        _resource_monitor_task = None
     await _stop_discord_gateway()
     for challenge in challenges.values():
         for run in challenge["runs"].values():

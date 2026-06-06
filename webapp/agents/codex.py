@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import tomllib
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -1986,8 +1987,15 @@ async def _run_agent_sdk(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd_str,
+        start_new_session=True,
         limit=2 ** 24,  # 16 MB — default 64 KB is too small for large JSON-RPC messages
     )
+    if run_ref is not None:
+        run_ref["_agent_root_pid"] = proc.pid
+        try:
+            run_ref["_agent_pgid"] = os.getpgid(proc.pid)
+        except OSError:
+            run_ref["_agent_pgid"] = None
 
     async def _drain_stderr() -> None:
         if proc.stderr is None:
