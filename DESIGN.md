@@ -32,6 +32,8 @@ Multiple agents work on the same challenge simultaneously. Each agent works in i
 
 When any run is marked solved or submits a correct flag, the solved run is stopped if still active, sibling runs are stopped, status is persisted, and all connected clients receive run/challenge status updates.
 
+Unsolved challenges can be expanded after creation by adding one or more new runs from the web UI. Adding a run can promote a single challenge to parallel mode, creates a fresh run workspace, assigns parallel notes labels, syncs selected skills, and starts only the new run(s). Each active run can also be stopped independently without stopping the whole challenge.
+
 ## Agent Collaboration Model
 
 Parallel mode collaboration has two channels:
@@ -143,6 +145,32 @@ Each run stores provider session state in challenge metadata, for example:
 
 Resume uses this state when possible. Retry clears run output and session state.
 
+Fresh runs receive the full challenge prompt. Resume, steer, Discord resume, and skill-change resumes send short continuation prompts into the existing provider session when possible. The wrapper records these prompts in the chat feed for auditability.
+
+Before a fresh agent starts, the webapp performs a silent `ctfgrep` preflight over `_files/` or `challenge_files/` when challenge files exist. It searches derived flag prefixes or the defaults `flag{`, `ctf{`, `picoCTF{`, and `HTB{` with:
+
+```bash
+ctfgrep -i -m 4 -t 4 <target_dir> <term>
+```
+
+Each term has a 60 second timeout. Bounded matches are added as detected flag candidates, optionally auto-submitted if global auto-submit is enabled, and are not included in the agent prompt.
+
+## Skill Catalog and Loading
+
+Repo-owned skills live in `skills/`. Environment setup copies repo-owned and external skills into `all-skills/`, which is the runtime catalog used by the webapp. Settings can also upload a `.zip` skill bundle or a single `SKILL.md`; uploaded skills are installed into `all-skills/` and immediately appear in skill selectors.
+
+Global settings store default enabled skills for new challenges. Challenge-level skills are chosen at creation/import time and are then locked. Each run may inherit the challenge defaults or store a run-specific skill override.
+
+Selected skills are materialized by symlinking catalog entries into each run's project-level provider directories:
+
+```text
+_runs/{run_id}/
+  .claude/skills/{skill_name} -> all-skills/{skill_name}
+  .codex/skills/{skill_name} -> all-skills/{skill_name}
+```
+
+When run skills are changed mid-run, the wrapper stops the selected run or all selected runs, refreshes the symlinks, records a `run_skills` event, and resumes by default. The prompt does not enumerate available skills; it only adds `Follow ctf-methodology and solve the CTF challenge` when that skill is enabled.
+
 ## Status and Solve Lifecycle
 
 Challenge status is derived from run statuses:
@@ -167,13 +195,15 @@ Stop paths similarly set affected runs to `failed`, append a stop event, persist
 
 ## CTF Platform Plugins
 
-Three platform plugins are supported:
+Platform plugins are discovered from `webapp/plugins/`:
 
 | Plugin | Auth | Features |
 |--------|------|----------|
 | CTFd | API token or username/password | Fetch challenges, download files, submit flags |
 | rCTF | Auth token or team token | Fetch challenges, download files, submit flags |
 | HTB CTF | JWT Bearer token | Fetch challenges, download files, submit flags, on-demand instance management |
+| CDDC | Platform credentials | Fetch challenges, download files, submit flags |
+| Cywaria/Cympire | Username/password | Fetch challenges, scrape/download files, start instances, submit flags |
 
 CTFd and rCTF verify TLS by default. They expose an explicit `insecure_tls` checkbox for self-signed/local deployments. HTB uses normal certificate verification.
 
@@ -182,6 +212,18 @@ HTB challenges with Docker/machine instances are started at solve time, not impo
 HTB multi-answer challenge metadata (`flagsInfo`) is preserved as `_flag_questions`. The prompt lists each question and run workspaces include `submit_answer.py`, which calls a local token-protected endpoint to submit arbitrary answers by question number or platform `flag_id`.
 
 Connections are persisted to `state/connections.json` and can be synced to fetch new challenges from already-imported platforms.
+
+## WireGuard VPN
+
+The webapp can configure a single `wg0` server interface from Settings. Environment setup installs WireGuard and generates the server keypair; the web UI writes `/etc/wireguard/wg0.conf` after the user provides a client public key and optional client-side internal CIDRs.
+
+The reverse routing model is:
+
+- server peer `AllowedIPs` includes `10.13.37.2/32` and any internal CIDRs reachable from the client;
+- generated client `AllowedIPs` includes only `10.13.37.0/24`, so the client keeps its local routes for those internal CIDRs;
+- if internal CIDRs are configured, the UI emits a Linux-only `wg-quick` snippet using `sysctl` and `iptables` to forward/NAT traffic from the VPN subnet to those client-side networks.
+
+VPN status exposes peer endpoint, transfer counters, and latest handshake age. DNS forwarding, when enabled, runs `dnsmasq` on the server's WireGuard address and forwards to public resolvers.
 
 ## Discord Integration
 
@@ -283,6 +325,7 @@ Settings persist to `challenges/settings.json`.
 | `enabled_agents` | empty | Which agents appear in the agent selector; empty means default behavior |
 | `agent_models` | `{}` | Per-agent default model overrides |
 | `agent_efforts` | `{}` | Per-agent default effort overrides |
+| `enabled_skills` | catalog defaults | Global default skill list for new challenges |
 | `max_platform_import_size_gb` | `2.0` | Per-challenge cap for platform-imported files; challenges exceeding it are skipped |
 | `discord_enabled` | `false` | Enable Discord bot integration |
 | `discord_bot_token` | empty | Discord bot token |
