@@ -75,6 +75,43 @@ def _workspace_skill_inputs(cwd: str | Path) -> list[dict]:
     return inputs
 
 
+def _skill_inputs_from_list_result(result: object) -> list[dict]:
+    if not isinstance(result, dict):
+        return []
+    inputs: list[dict] = []
+    seen: set[str] = set()
+    for entry in result.get("data", []):
+        if not isinstance(entry, dict):
+            continue
+        errors = entry.get("errors", [])
+        if isinstance(errors, list):
+            for error in errors:
+                if isinstance(error, dict):
+                    log.warning(
+                        "Codex skill load error for %s: %s",
+                        error.get("path", "unknown"),
+                        error.get("message", error),
+                    )
+        for skill in entry.get("skills", []):
+            if not isinstance(skill, dict):
+                continue
+            if skill.get("scope") != "repo" or not skill.get("enabled", False):
+                continue
+            name = skill.get("name")
+            path = skill.get("path")
+            if not isinstance(name, str) or not isinstance(path, str):
+                continue
+            if not name or not path or name in seen:
+                continue
+            seen.add(name)
+            inputs.append({
+                "type": "skill",
+                "name": name,
+                "path": path,
+            })
+    return inputs
+
+
 def _model_reasoning_map() -> dict[str, set[str]]:
     if not CODEX_MODELS_CACHE_FILE.exists():
         return {}
@@ -1236,6 +1273,8 @@ async def _codex_app_server_request(
                     "threadId": resume_thread_id,
                     "approvalPolicy": "never",
                     "sandbox": "danger-full-access",
+                    "cwd": cwd_str,
+                    "runtimeWorkspaceRoots": [cwd_str],
                 },
             )
             await _read_response(rid)
@@ -2073,6 +2112,8 @@ async def _run_agent_sdk(
                 "threadId": thread_id,
                 "approvalPolicy": "never",
                 "sandbox": "danger-full-access",
+                "cwd": cwd_str,
+                "runtimeWorkspaceRoots": [cwd_str],
             }
             if model:
                 resume_params["model"] = model
@@ -2109,6 +2150,7 @@ async def _run_agent_sdk(
             # Start a new thread (persisted to disk for future resume)
             thread_params: dict = {
                 "cwd": cwd_str,
+                "runtimeWorkspaceRoots": [cwd_str],
                 "ephemeral": False,
                 "approvalPolicy": "never",
                 "sandbox": "danger-full-access",
@@ -2189,16 +2231,23 @@ async def _run_agent_sdk(
                     )
 
         # --- Send turn ---
+        skills_dir = Path(cwd_str) / ".codex" / "skills"
         skill_inputs = _workspace_skill_inputs(cwd_str)
-        if skill_inputs:
+        if skills_dir.is_dir():
             try:
                 rid = await _send_request(
                     "skills/list",
                     {"cwds": [cwd_str], "forceReload": True},
                 )
-                await _read_response(rid)
+                skills_result = await _read_response(rid)
+                canonical_inputs = _skill_inputs_from_list_result(
+                    skills_result
+                )
+                if canonical_inputs:
+                    skill_inputs = canonical_inputs
             except Exception as exc:
                 log.warning("Codex skills/list forceReload failed: %s", exc)
+        if skill_inputs:
             log.info(
                 "Attaching %d Codex workspace skill input(s): %s",
                 len(skill_inputs),
@@ -2206,9 +2255,11 @@ async def _run_agent_sdk(
             )
         turn_params: dict = {
             "threadId": thread_id,
+            "cwd": cwd_str,
+            "runtimeWorkspaceRoots": [cwd_str],
             "input": [
                 *skill_inputs,
-                {"type": "text", "text": prompt},
+                {"type": "text", "text": prompt, "text_elements": []},
             ],
         }
         if model:
