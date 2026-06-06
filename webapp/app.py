@@ -5852,8 +5852,6 @@ def _teammate_context(challenge: dict, run: dict) -> str:
         "- A decoded or decrypted intermediate value",
         "- The correct tool or technique to use "
         '(e.g., "Fermat factorization works here")',
-        "- A dead end that would waste a teammate's time "
-        '(e.g., "the SSTI filter blocks all builtins")',
         "- The flag",
         "",
         "Do NOT notify for unverified hypotheses or guesses — "
@@ -5999,6 +5997,8 @@ def _build_standard_prompt(
         parts.extend([
             "",
             "The challenge files are in ./challenge_files/ (some may be symlinks).",
+            "Do not inspect parent directories, repository root files, .git metadata, "
+            "or unrelated system paths.",
         ])
     elif not has_declared_files:
         parts.extend([
