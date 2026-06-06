@@ -1094,6 +1094,55 @@ def _format_goal(goal: object) -> str:
     return " - ".join(parts)
 
 
+def _normalize_goal(goal: object) -> dict | None:
+    if not isinstance(goal, dict):
+        return None
+
+    def text_field(name: str, camel_name: str | None = None) -> str:
+        value = goal.get(name)
+        if value is None and camel_name:
+            value = goal.get(camel_name)
+        return value.strip() if isinstance(value, str) else ""
+
+    def int_field(name: str, camel_name: str | None = None) -> int | None:
+        value = goal.get(name)
+        if value is None and camel_name:
+            value = goal.get(camel_name)
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        return None
+
+    normalized = {
+        "provider": "codex",
+        "thread_id": text_field("thread_id", "threadId"),
+        "objective": text_field("objective"),
+        "status": text_field("status"),
+        "token_budget": int_field("token_budget", "tokenBudget"),
+        "tokens_used": int_field("tokens_used", "tokensUsed"),
+        "time_used_seconds": int_field("time_used_seconds", "timeUsedSeconds"),
+        "created_at": int_field("created_at", "createdAt"),
+        "updated_at": int_field("updated_at", "updatedAt"),
+    }
+    return {
+        key: value for key, value in normalized.items()
+        if value not in ("", None)
+    }
+
+
+def _goal_event_key(goal: object) -> tuple:
+    normalized = _normalize_goal(goal) or {}
+    return (
+        normalized.get("thread_id"),
+        normalized.get("objective"),
+        normalized.get("status"),
+        normalized.get("token_budget"),
+        normalized.get("tokens_used"),
+        normalized.get("time_used_seconds"),
+    )
+
+
 def _copy_permission_profile(value: object) -> dict:
     if not isinstance(value, dict):
         return {}
@@ -1790,6 +1839,7 @@ async def _run_agent_sdk(
     file_patch_buffers: dict[str, str] = {}
     last_turn_diff = ""
     emitted_file_change = False
+    emitted_goal_event_keys: set[tuple] = set()
     # Accumulator for reasoning deltas — flush as one block
     reasoning_buffer: list[str] = []
     _inject_task: asyncio.Task | None = None
@@ -1945,6 +1995,39 @@ async def _run_agent_sdk(
 
             session_state["codex_thread_id"] = thread_id
             log.info("Started new Codex thread: %s", thread_id)
+
+            goal_objective = prompt.strip() if not continue_session else ""
+            if goal_objective:
+                try:
+                    rid = await _send_request(
+                        "thread/goal/set",
+                        {
+                            "threadId": thread_id,
+                            "objective": goal_objective,
+                            "status": "active",
+                        },
+                    )
+                    goal_result = await _read_response(rid)
+                    raw_goal = goal_result.get("goal")
+                    goal = _normalize_goal(raw_goal)
+                    if goal:
+                        emitted_goal_event_keys.add(_goal_event_key(raw_goal))
+                        text = _format_goal(raw_goal)
+                        yield {
+                            "type": "run_goal",
+                            "provider": "codex",
+                            "goal": goal,
+                            "message": (
+                                f"Goal updated: {text}"
+                                if text else "Goal updated"
+                            ),
+                        }
+                except Exception as exc:
+                    log.warning(
+                        "Failed to set Codex thread goal for %s: %s",
+                        thread_id,
+                        exc,
+                    )
 
         # --- Send turn ---
         skill_inputs = _workspace_skill_inputs(cwd_str)
@@ -2533,19 +2616,26 @@ async def _run_agent_sdk(
                 continue
 
             if method == "thread/goal/updated":
-                text = _format_goal(params.get("goal"))
-                if text:
-                    yield {
-                        "type": "system",
-                        "subtype": "codex_goal",
-                        "message": f"Goal updated: {text}",
-                    }
+                raw_goal = params.get("goal")
+                goal = _normalize_goal(raw_goal)
+                key = _goal_event_key(raw_goal)
+                if key in emitted_goal_event_keys:
+                    emitted_goal_event_keys.discard(key)
+                    continue
+                text = _format_goal(raw_goal)
+                yield {
+                    "type": "run_goal",
+                    "provider": "codex",
+                    "goal": goal,
+                    "message": f"Goal updated: {text}" if text else "Goal updated",
+                }
                 continue
 
             if method == "thread/goal/cleared":
                 yield {
-                    "type": "system",
-                    "subtype": "codex_goal",
+                    "type": "run_goal",
+                    "provider": "codex",
+                    "goal": None,
                     "message": "Goal cleared",
                 }
                 continue

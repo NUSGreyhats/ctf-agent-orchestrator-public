@@ -709,7 +709,56 @@ def make_run(
         "_last_stderr_lines": [],
         "_last_unknown_events": [],
         "_submit_token": secrets.token_urlsafe(24),
+        "goal": None,
     }
+
+
+def normalize_run_goal(goal: object, provider: str = "") -> dict | None:
+    if not isinstance(goal, dict):
+        return None
+
+    def text_field(name: str, camel_name: str | None = None) -> str:
+        value = goal.get(name)
+        if value is None and camel_name:
+            value = goal.get(camel_name)
+        return value.strip() if isinstance(value, str) else ""
+
+    def int_field(name: str, camel_name: str | None = None) -> int | None:
+        value = goal.get(name)
+        if value is None and camel_name:
+            value = goal.get(camel_name)
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        return None
+
+    normalized = {
+        "provider": text_field("provider") or provider,
+        "thread_id": text_field("thread_id", "threadId"),
+        "objective": text_field("objective"),
+        "status": text_field("status"),
+        "token_budget": int_field("token_budget", "tokenBudget"),
+        "tokens_used": int_field("tokens_used", "tokensUsed"),
+        "time_used_seconds": int_field("time_used_seconds", "timeUsedSeconds"),
+        "created_at": int_field("created_at", "createdAt"),
+        "updated_at": int_field("updated_at", "updatedAt"),
+    }
+    normalized = {
+        key: value for key, value in normalized.items()
+        if value not in ("", None)
+    }
+    if not normalized.get("objective") and not normalized.get("status"):
+        return None
+    return normalized
+
+
+def apply_run_goal_event(run: dict, event: dict) -> bool:
+    if event.get("type") != "run_goal":
+        return False
+    provider = str(event.get("provider") or run.get("agent") or "")
+    run["goal"] = normalize_run_goal(event.get("goal"), provider)
+    return True
 
 
 def effective_run_duration_ms(run: dict) -> int:
@@ -777,6 +826,7 @@ def public_run_summary(challenge: dict, run: dict) -> dict:
         "duration_ms": effective_run_duration_ms(run),
         "enabled_skills": run_enabled_skills(challenge, run),
         "skill_override": run_has_skill_override(run),
+        "goal": normalize_run_goal(run.get("goal"), str(run.get("agent") or "")),
     }
     if run.get("custom_prompt"):
         summary["custom_prompt"] = run["custom_prompt"]
@@ -2215,6 +2265,7 @@ def _serialize_runs(challenge: dict) -> dict:
             "provider_state": provider_state_for_metadata(run),
             "_session_state": run.get("_session_state", {}),
             "_submit_token": run.get("_submit_token", ""),
+            "goal": normalize_run_goal(run.get("goal"), str(run.get("agent") or "")),
         }
         if run_has_skill_override(run):
             run_meta["enabled_skills"] = run_enabled_skills(challenge, run)
@@ -2374,6 +2425,10 @@ def load_challenges_from_disk() -> None:
                 )
                 run["error"] = run_meta.get("error")
                 run["duration_ms"] = run_meta.get("duration_ms")
+                run["goal"] = normalize_run_goal(
+                    run_meta.get("goal"),
+                    str(run.get("agent") or ""),
+                )
                 if run_meta.get("notes_label"):
                     run["notes_label"] = run_meta["notes_label"]
                 if "enabled_skills" in run_meta:
@@ -5935,6 +5990,15 @@ async def _run_agent_sdk_path(
 
             if "ts" not in event and run.get("solve_start"):
                 event["ts"] = run_elapsed_seconds(run)
+
+            if etype == "run_goal":
+                event["provider"] = str(event.get("provider") or provider.name or "")
+                event["goal"] = normalize_run_goal(
+                    event.get("goal"),
+                    event["provider"],
+                )
+                apply_run_goal_event(run, event)
+                save_metadata(challenge)
 
             event_index = len(run["output_lines"])
             run["output_lines"].append(event)
