@@ -3230,7 +3230,7 @@ async def bulk_upload(request: Request) -> JSONResponse:
         model = str_field(body.get("model", "")).strip()
         effort = str_field(body.get("effort", "")).strip()
         paused = bool(body.get("paused", False))
-        enabled_skills = normalize_enabled_skills(
+        default_enabled_skills = normalize_enabled_skills(
             body.get("enabled_skills"),
             default=normalize_enabled_skills(load_settings().get("enabled_skills")),
         )
@@ -3258,6 +3258,14 @@ async def bulk_upload(request: Request) -> JSONResponse:
             ch_flag_format = (
                 str_field(cfg.get("flag_format", "")).strip()
                 or global_flag_format
+            )
+            ch_enabled_skills = (
+                normalize_enabled_skills(
+                    cfg.get("enabled_skills"),
+                    default=default_enabled_skills,
+                )
+                if "enabled_skills" in cfg
+                else default_enabled_skills
             )
 
             challenge_id = uuid.uuid4().hex[:12]
@@ -3322,7 +3330,7 @@ async def bulk_upload(request: Request) -> JSONResponse:
                 "status": challenge_status,
                 "created_at": datetime.now().isoformat(),
                 "files": file_names,
-                "enabled_skills": enabled_skills,
+                "enabled_skills": ch_enabled_skills,
                 "error": None,
                 "runs": runs,
             }
@@ -7511,7 +7519,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
     effort = str_field(body.get("effort", ""))
     flag_format = str_field(body.get("flag_format", "")).strip()
     paused = bool(body.get("paused", False))
-    enabled_skills = normalize_enabled_skills(
+    default_enabled_skills = normalize_enabled_skills(
         body.get("enabled_skills"),
         default=normalize_enabled_skills(load_settings().get("enabled_skills")),
     )
@@ -7578,6 +7586,14 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
         if ch_category:
             ch_description = f"Challenge Category: {ch_category}\n\n{ch_description}" if ch_description else f"Challenge Category: {ch_category}"
         ch_flag_format = str_field(ch_cfg.get("flag_format", "")) or flag_format
+        ch_enabled_skills = (
+            normalize_enabled_skills(
+                ch_cfg.get("enabled_skills"),
+                default=default_enabled_skills,
+            )
+            if "enabled_skills" in ch_cfg
+            else default_enabled_skills
+        )
         remote_files = ch_cfg.get("files", [])
         if not isinstance(remote_files, list):
             remote_files = []
@@ -7831,7 +7847,7 @@ async def plugin_import_challenges(request: Request) -> JSONResponse:
             "status": challenge_status,
             "created_at": datetime.now().isoformat(),
             "files": sorted(file_data.keys()),
-            "enabled_skills": enabled_skills,
+            "enabled_skills": ch_enabled_skills,
             "error": None,
             "runs": runs,
             "_plugin": plugin_name,

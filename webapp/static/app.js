@@ -921,6 +921,7 @@ async function triggerSync(connId) {
   // Open import modal in preview phase with the fetched challenges
   importPluginConfig = savedConnections.find((c) => c.id === connId)?.config || {};
   importFetchedChallenges = data.challenges;
+  importChallengeSkillOverrides = new Map();
   const pluginName = data.connection.plugin;
 
   // Set up import modal
@@ -1164,6 +1165,97 @@ const bulkFileInput = $("#bulk-file");
 const bulkDropZone = $("#bulk-drop-zone");
 let bulkPreviewToken = null;
 let bulkPreviewChallenges = [];
+let bulkChallengeSkillOverrides = new Map();
+let importChallengeSkillOverrides = new Map();
+let challengeSkillEditTarget = null;
+
+function challengeSkillOverrideMap(kind) {
+  return kind === "import"
+    ? importChallengeSkillOverrides
+    : bulkChallengeSkillOverrides;
+}
+
+function challengeSkillDefaultList(kind) {
+  return getSelectedSkills(kind === "import" ? $("#import-skill-list") : $("#bulk-skill-list"));
+}
+
+function challengeSkillSummaryText(skills) {
+  const count = normalizeSkillNames(skills).length;
+  if (!count) return "No skills";
+  return `${count} skill${count !== 1 ? "s" : ""}`;
+}
+
+function updateChallengeSkillSummary(kind, index) {
+  const summary = document.querySelector(
+    `.challenge-skill-summary[data-kind="${kind}"][data-index="${index}"]`
+  );
+  if (!summary) return;
+  const overrideMap = challengeSkillOverrideMap(kind);
+  const hasOverride = overrideMap.has(index);
+  summary.textContent = hasOverride
+    ? challengeSkillSummaryText(overrideMap.get(index))
+    : "Default skills";
+  summary.classList.toggle("challenge-skill-summary-override", hasOverride);
+}
+
+function updateChallengeSkillSummaries(kind) {
+  document
+    .querySelectorAll(`.challenge-skill-summary[data-kind="${kind}"]`)
+    .forEach((summary) => updateChallengeSkillSummary(kind, Number(summary.dataset.index)));
+}
+
+function openChallengeCreateSkillModal(kind, index, name) {
+  const overrideMap = challengeSkillOverrideMap(kind);
+  const selected = overrideMap.has(index)
+    ? overrideMap.get(index)
+    : challengeSkillDefaultList(kind);
+  challengeSkillEditTarget = { kind, index };
+  $("#challenge-create-skill-subtitle").textContent = name || "Challenge";
+  renderSkillChecklist($("#challenge-create-skill-list"), selected);
+  $("#challenge-create-skill-overlay").classList.remove("hidden");
+}
+
+function closeChallengeCreateSkillModal() {
+  challengeSkillEditTarget = null;
+  $("#challenge-create-skill-overlay").classList.add("hidden");
+}
+
+function applyChallengeCreateSkillOverride() {
+  if (!challengeSkillEditTarget) return;
+  const { kind, index } = challengeSkillEditTarget;
+  challengeSkillOverrideMap(kind).set(
+    index,
+    getSelectedSkills($("#challenge-create-skill-list")),
+  );
+  updateChallengeSkillSummary(kind, index);
+  closeChallengeCreateSkillModal();
+}
+
+function resetChallengeCreateSkillOverride() {
+  if (!challengeSkillEditTarget) return;
+  const { kind, index } = challengeSkillEditTarget;
+  challengeSkillOverrideMap(kind).delete(index);
+  updateChallengeSkillSummary(kind, index);
+  closeChallengeCreateSkillModal();
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-challenge-skill-edit]");
+  if (!btn) return;
+  const kind = btn.dataset.kind === "import" ? "import" : "bulk";
+  const index = Number(btn.dataset.index);
+  const container = btn.closest(kind === "import" ? ".import-card" : ".bulk-ch-row");
+  const nameInput = container?.querySelector(".bulk-ch-name");
+  openChallengeCreateSkillModal(kind, index, nameInput?.value?.trim() || "");
+});
+
+$("#challenge-create-skill-close").addEventListener("click", closeChallengeCreateSkillModal);
+$("#btn-challenge-create-skills-cancel").addEventListener("click", closeChallengeCreateSkillModal);
+$("#btn-challenge-create-skills-apply").addEventListener("click", applyChallengeCreateSkillOverride);
+$("#btn-challenge-create-skills-default").addEventListener("click", resetChallengeCreateSkillOverride);
+$("#challenge-create-skill-overlay").addEventListener("click", (e) => {
+  if (e.target === $("#challenge-create-skill-overlay")) closeChallengeCreateSkillModal();
+});
 
 function showBulkPhase(phase) {
   ["upload", "loading", "preview"].forEach((p) =>
@@ -1174,6 +1266,7 @@ function showBulkPhase(phase) {
 function resetBulkModal() {
   bulkPreviewToken = null;
   bulkPreviewChallenges = [];
+  bulkChallengeSkillOverrides = new Map();
   bulkFileInput.value = "";
   $("#bulk-file-name").innerHTML = "";
   $("#bulk-challenge-list").innerHTML = "";
@@ -1233,6 +1326,7 @@ async function triggerBulkPreview(file) {
   const data = await res.json();
   bulkPreviewToken = data.preview_token;
   bulkPreviewChallenges = data.challenges || [];
+  bulkChallengeSkillOverrides = new Map();
   renderBulkPreview(bulkPreviewChallenges);
   showBulkPhase("preview");
 }
@@ -1248,6 +1342,10 @@ function renderBulkPreview(challengesPreview) {
       <div class="bulk-ch-row-header">
         <input type="checkbox" class="bulk-ch-enabled" checked title="Include this challenge">
         <input type="text" class="bulk-ch-name" value="${esc(c.name)}" placeholder="Challenge name">
+        <div class="challenge-skill-inline">
+          <button type="button" class="btn-ghost btn-sm" data-challenge-skill-edit data-kind="bulk" data-index="${i}">Skills</button>
+          <span class="challenge-skill-summary" data-kind="bulk" data-index="${i}">Default skills</span>
+        </div>
         <span class="bulk-ch-files-label">${esc(fileLabel)}</span>
       </div>
       <div class="bulk-ch-row-body">
@@ -1278,6 +1376,7 @@ function renderBulkPreview(challengesPreview) {
     pausedCb.removeEventListener("change", updateBulkSubmitLabel);
     pausedCb.addEventListener("change", updateBulkSubmitLabel);
   }
+  updateChallengeSkillSummaries("bulk");
   updateBulkSubmitLabel();
 }
 
@@ -1296,13 +1395,19 @@ $("#btn-bulk-submit").addEventListener("click", async () => {
   const agentRows = getAgentRows($("#bulk-agent-list"));
   const mode = agentRows.length > 1 ? "parallel" : "single";
   const rows = document.querySelectorAll(".bulk-ch-row");
-  const challengeConfigs = Array.from(rows).map((row, i) => ({
-    folder_name: bulkPreviewChallenges[i].folder_name,
-    name: row.querySelector(".bulk-ch-name").value.trim(),
-    description: row.querySelector(".bulk-ch-desc").value.trim(),
-    flag_format: row.querySelector(".bulk-ch-flag").value.trim(),
-    enabled: row.querySelector(".bulk-ch-enabled").checked,
-  }));
+  const challengeConfigs = Array.from(rows).map((row, i) => {
+    const cfg = {
+      folder_name: bulkPreviewChallenges[i].folder_name,
+      name: row.querySelector(".bulk-ch-name").value.trim(),
+      description: row.querySelector(".bulk-ch-desc").value.trim(),
+      flag_format: row.querySelector(".bulk-ch-flag").value.trim(),
+      enabled: row.querySelector(".bulk-ch-enabled").checked,
+    };
+    if (bulkChallengeSkillOverrides.has(i)) {
+      cfg.enabled_skills = bulkChallengeSkillOverrides.get(i);
+    }
+    return cfg;
+  });
 
   const btn = $("#btn-bulk-submit");
   btn.disabled = true;
@@ -5121,6 +5226,7 @@ $("#btn-import").addEventListener("click", async () => {
   }
   // Reset state
   importFetchedChallenges = [];
+  importChallengeSkillOverrides = new Map();
   stopImportProgressPolling();
   importPhase("config");
   $("#import-status").classList.add("hidden");
@@ -5191,6 +5297,7 @@ $("#btn-import-fetch").addEventListener("click", async () => {
   }
 
   importFetchedChallenges = await res.json();
+  importChallengeSkillOverrides = new Map();
   renderImportPreview();
   importPhase("preview");
 });
@@ -5235,6 +5342,10 @@ function renderImportPreview() {
           ${questionCount ? `<span class="import-card-badge">${questionCount} question${questionCount !== 1 ? "s" : ""}</span>` : ""}
           ${c.solved ? '<span class="badge badge-solved">solved</span>' : ""}
         </div>
+        <div class="import-card-skill-row">
+          <button type="button" class="btn-ghost btn-sm" data-challenge-skill-edit data-kind="import" data-index="${c._idx}">Skills</button>
+          <span class="challenge-skill-summary" data-kind="import" data-index="${c._idx}">Default skills</span>
+        </div>
         <textarea class="bulk-ch-desc" rows="2" placeholder="Description">${esc(c.description || "")}</textarea>
       </div>`;
     }
@@ -5242,6 +5353,7 @@ function renderImportPreview() {
   }
 
   list.innerHTML = html;
+  updateChallengeSkillSummaries("import");
   updateImportSkipSolved();
 }
 
@@ -5289,7 +5401,7 @@ $("#btn-import-submit").addEventListener("click", async () => {
   const selected = Array.from(cards).map((card) => {
     const idx = parseInt(card.dataset.index, 10);
     const ch = importFetchedChallenges[idx];
-    return {
+    const cfg = {
       enabled: card.querySelector(".import-ch-enabled").checked,
       remote_id: ch.remote_id,
       name: card.querySelector(".bulk-ch-name").value.trim(),
@@ -5301,6 +5413,10 @@ $("#btn-import-submit").addEventListener("click", async () => {
       flag_questions: ch.flag_questions || [],
       files: ch.files,
     };
+    if (importChallengeSkillOverrides.has(idx)) {
+      cfg.enabled_skills = importChallengeSkillOverrides.get(idx);
+    }
+    return cfg;
   });
 
   const btn = $("#btn-import-submit");

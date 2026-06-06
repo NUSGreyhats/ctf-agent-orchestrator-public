@@ -412,7 +412,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 .bulk-ch-row.bulk-ch-disabled { opacity: 0.45; }
 .bulk-ch-row-header {
-  display: flex; align-items: center; gap: 0.5rem;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem;
   margin-bottom: 0.45rem;
 }
 .bulk-ch-enabled {
@@ -431,6 +431,14 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   overflow: hidden; text-overflow: ellipsis; max-width: 220px;
   flex-shrink: 0;
 }
+.challenge-skill-inline {
+  display: flex; align-items: center; gap: 0.35rem;
+  flex: 0 0 auto; min-width: 120px;
+}
+.challenge-skill-summary {
+  color: var(--text-dim); font-size: 0.68rem; white-space: nowrap;
+}
+.challenge-skill-summary-override { color: var(--accent); }
 .bulk-ch-row-body { display: flex; gap: 0.75rem; }
 .bulk-ch-col { display: flex; flex-direction: column; gap: 0.2rem; flex: 1; }
 .bulk-ch-col-flag { max-width: 220px; }
@@ -1704,6 +1712,9 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 .import-card-meta {
   display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center;
+}
+.import-card-skill-row {
+  display: flex; align-items: center; gap: 0.35rem; min-width: 0;
 }
 .import-card-badge {
   font-size: 0.65rem; padding: 0.1rem 0.4rem;
