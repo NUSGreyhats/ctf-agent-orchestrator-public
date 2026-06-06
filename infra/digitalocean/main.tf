@@ -21,7 +21,6 @@ locals {
   ssh_key_name   = "${var.instance_name}-ssh-${substr(md5(trimspace(local.ssh_public_key)), 0, 8)}"
 
   install_script_files = sort(fileset(local.repo_root, "install_scripts/**"))
-  hook_files           = sort(fileset(local.repo_root, "hooks/**"))
   mcp_files = sort([
     for f in fileset(local.repo_root, "mcps/**") : f
     if !can(regex("(^|/)__pycache__/", f)) && !can(regex("\\.py[co]$", f))
@@ -35,7 +34,6 @@ locals {
 
   sync_files = distinct(concat(
     local.install_script_files,
-    local.hook_files,
     local.mcp_files,
     local.webapp_files,
     local.skill_files,
@@ -151,7 +149,7 @@ resource "null_resource" "provision" {
       tar -C "$SRC_PATH" --exclude-vcs \
         --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
         --exclude='.DS_Store' -cf - \
-        install_scripts webapp skills mcps hooks README.md DESIGN.md \
+        install_scripts webapp skills mcps README.md DESIGN.md \
         | ssh $SSH_OPTS root@"$IP" "TMP_DIR=\$(mktemp -d /root/ctf-agent-wrapper.sync.XXXXXX) && trap 'rm -rf \"\$TMP_DIR\"' EXIT && mkdir -p /root/ctf-agent-wrapper /root/ctf-agent-wrapper/challenges /root/ctf-agent-wrapper/state /root/ctf-agent-wrapper/all-skills && tar -C \"\$TMP_DIR\" -xf - && find /root/ctf-agent-wrapper -mindepth 1 -maxdepth 1 -not -name challenges -not -name state -not -name all-skills -exec rm -rf {} + && cp -a \"\$TMP_DIR\"/. /root/ctf-agent-wrapper/"
 
       step "Running install script setup"

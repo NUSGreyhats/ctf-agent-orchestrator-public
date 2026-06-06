@@ -42,10 +42,10 @@ Both agents run through their provider integration paths. Multiple agents can ra
 - **Single challenges** — Create with name, description, flag format, agent/model/effort choices, and file uploads.
 - **Bulk upload** — Upload `.zip` or `.7z` archives with one folder per challenge. Preview and edit metadata before importing.
 - **Skills per challenge/run** — Select default skills globally, lock challenge-level skills at creation/import time, and adjust skills for individual active runs. Skill changes stop the target agent, refresh `.claude/skills` and `.codex/skills` symlinks, then resume by default.
-- **Platform import** — Fetch challenges directly from CTFd, rCTF, Hack The Box CTF, CDDC, or Cywaria/Cympire instances. Saves connections for future syncs with automatic points/solves updates where supported. HTB and Cywaria challenges with on-demand instances are started automatically at solve time.
+- **Platform import** — Fetch challenges directly from CTFd, rCTF, Hack The Box CTF, CDDC, Cywaria/Cympire, or SAS CTF instances. Saves connections for future syncs with automatic points/solves updates where supported. HTB, Cywaria, and SAS CTF challenges with on-demand instances are started automatically at solve time.
 - **Multi-answer HTB support** — HTB `flagsInfo` questions are injected into the agent prompt, and agents get a `submit_answer.py` helper for answer-checking when there is no fixed flag format.
 - **Auto-submit** — Detected flags can be automatically submitted to the connected CTF platform. Correct submissions mark the challenge solved and stop other active runs.
-- **TLS verification by default** — CTFd and rCTF verify TLS certificates by default and expose an explicit “Disable TLS certificate verification” checkbox for self-signed/local events. HTB uses normal TLS verification.
+- **TLS verification by default** — CTFd and rCTF verify TLS certificates by default and expose an explicit “Disable TLS certificate verification” checkbox for self-signed/local events. HTB uses normal TLS verification. SAS CTF also exposes the checkbox and defaults it on for the current event endpoint.
 
 ### Challenge File and Workspace Layout
 
@@ -97,7 +97,7 @@ Optional Discord bot for team coordination:
 ### Infrastructure and Deployment
 
 - **Cloud providers** — Terraform configs for Hetzner Cloud, DigitalOcean, and GCP.
-- **Runtime allowlist deploy** — Deploys copy only runtime project files (`install_scripts`, `webapp`, `skills`, `mcps`, `hooks`, `README.md`, `DESIGN.md`) instead of the whole repo. Local `.git/`, `infra/`, Terraform state/vars, and local caches are not copied to the VM. Runtime `challenges`, `state`, and generated `all-skills` are preserved.
+- **Runtime allowlist deploy** — Deploys copy only runtime project files (`install_scripts`, `webapp`, `skills`, `mcps`, `README.md`, `DESIGN.md`) instead of the whole repo. Local `.git/`, `infra/`, Terraform state/vars, and local caches are not copied to the VM. Runtime `challenges`, `state`, and generated `all-skills` are preserved.
 - **Runtime data preservation** — Deploy sync preserves `/root/ctf-agent-wrapper/challenges` and `/root/ctf-agent-wrapper/state` on the VM.
 - **GDB MCP server** — Persistent GDB session for kernel/binary debugging, registered for Claude and Codex.
 - **IDA Pro skill** — Headless static analysis through the `analyze-with-ida-domain-api` skill, backed by IDA Pro's Python Domain API.
@@ -196,11 +196,10 @@ install_scripts/ Setup scripts (tools, CLIs, dependencies)
   lib/          Shared shell helpers used by setup scripts
 webapp/         Starlette/ASGI app for challenge management and agent streaming
   agents/       Agent provider implementations (Claude, Codex)
-  plugins/      CTF platform integrations (CTFd, rCTF, HTB CTF, CDDC, Cywaria)
+  plugins/      CTF platform integrations (CTFd, rCTF, HTB CTF, CDDC, Cywaria, SAS CTF)
   static/       Frontend (vanilla JS, CSS)
 skills/         Agent skills (methodology, forensics, tool-specific, community)
 all-skills/     Runtime skill catalog populated by setup and Settings uploads
-hooks/          Agent hook/tool files
 mcps/           MCP servers (GDB debugger)
 state/          Runtime state on the VM: metadata, output logs, connections
 ```
