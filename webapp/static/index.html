@@ -90,6 +90,20 @@
     </header>
     <div class="usage-page">
       <div id="usage-grid" class="usage-grid"></div>
+      <div id="agent-auth-terminal" class="auth-terminal hidden">
+        <div class="auth-terminal-header">
+          <div>
+            <div id="agent-auth-title" class="auth-terminal-title">Agent Login</div>
+            <div id="agent-auth-subtitle" class="auth-terminal-subtitle"></div>
+          </div>
+          <button id="btn-agent-auth-cancel" class="btn-ghost btn-sm" type="button">Cancel</button>
+        </div>
+        <pre id="agent-auth-output" class="auth-terminal-output"></pre>
+        <form id="agent-auth-input-form" class="auth-terminal-input-row">
+          <input id="agent-auth-input" type="text" autocomplete="off" spellcheck="false" placeholder="Send input to login process">
+          <button class="btn-secondary btn-sm" type="submit">Send</button>
+        </form>
+      </div>
 
       <!-- Daily Activity Chart (Claude) -->
       <div id="usage-daily" class="usage-section hidden">
@@ -655,7 +669,7 @@
         <h2>Agent Setup Required</h2>
         <button id="auth-warning-close" class="btn-icon">&times;</button>
       </div>
-      <p class="auth-warning-intro">The following agents are not authenticated. SSH into the machine and run the commands below to set them up.</p>
+      <p class="auth-warning-intro">The following agents are not authenticated. Open Usage and use Login, or run the commands below on the server.</p>
       <div id="auth-warning-items"></div>
       <button id="auth-warning-dismiss" class="btn-primary btn-full">Got it</button>
     </div>

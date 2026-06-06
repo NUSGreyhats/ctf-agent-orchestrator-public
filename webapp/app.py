@@ -29,7 +29,9 @@ logging.basicConfig(
 log = logging.getLogger("ctf-solver")
 import mimetypes
 import os
+import pty
 import secrets
+import signal
 import subprocess
 import shutil
 import tempfile
@@ -134,6 +136,21 @@ DISCORD_FLAG_REVIEW_ACTIONS = {
     "flag_correct",
     "flag_broadcast",
 }
+AUTH_SESSION_TTL_SECONDS = 10 * 60
+AUTH_STATUS_TIMEOUT_SECONDS = 8
+AUTH_COMMANDS = {
+    "claude": {
+        "default": ("claude", "auth", "login"),
+    },
+    "codex": {
+        "default": ("codex", "login", "--device-auth"),
+    },
+}
+AUTH_STATUS_COMMANDS = {
+    "claude": ("claude", "auth", "status", "--json"),
+    "codex": ("codex", "login", "status"),
+}
+_agent_auth_sessions: dict[str, dict] = {}
 
 
 def load_connections() -> list[dict]:
@@ -6654,6 +6671,363 @@ async def global_events_ws(websocket: WebSocket):
 
 
 # ---------------------------------------------------------------------------
+# Agent Auth Sessions
+# ---------------------------------------------------------------------------
+
+def _prune_agent_auth_sessions() -> None:
+    now = _time.monotonic()
+    expired = [
+        session_id
+        for session_id, session in _agent_auth_sessions.items()
+        if now - float(session.get("created_at", 0)) > AUTH_SESSION_TTL_SECONDS
+    ]
+    for session_id in expired:
+        session = _agent_auth_sessions.pop(session_id, None)
+        proc = session.get("process") if isinstance(session, dict) else None
+        if isinstance(proc, subprocess.Popen) and proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except Exception:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+
+def _agent_auth_command(agent: str, method: str = "default") -> tuple[str, ...] | None:
+    commands = AUTH_COMMANDS.get(agent)
+    if not commands:
+        return None
+    return commands.get(method) or commands.get("default")
+
+
+def _agent_auth_status_command(agent: str) -> tuple[str, ...] | None:
+    return AUTH_STATUS_COMMANDS.get(agent)
+
+
+def _run_auth_status_command(agent: str) -> dict:
+    command = _agent_auth_status_command(agent)
+    login_command = _agent_auth_command(agent)
+    result: dict = {
+        "agent": agent,
+        "available": False,
+        "connected": False,
+        "command": " ".join(login_command or ()),
+        "rows": [],
+    }
+    if not command:
+        result["error"] = "Unsupported agent"
+        return result
+    if not shutil.which(command[0]):
+        result["error"] = f"{command[0]} is not installed"
+        return result
+
+    result["available"] = True
+    try:
+        completed = subprocess.run(
+            list(command),
+            cwd=str(APP_ROOT_DIR),
+            text=True,
+            capture_output=True,
+            timeout=AUTH_STATUS_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        result["error"] = "Auth status timed out"
+        return result
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    text = stdout or stderr
+    if agent == "claude":
+        try:
+            payload = json.loads(stdout or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        connected = bool(payload.get("loggedIn"))
+        result["connected"] = connected
+        rows = []
+        if payload.get("email"):
+            rows.append({"label": "Account", "value": str(payload["email"])})
+        if payload.get("authMethod"):
+            rows.append({"label": "Method", "value": str(payload["authMethod"])})
+        if payload.get("subscriptionType"):
+            rows.append({"label": "Plan", "value": str(payload["subscriptionType"])})
+        if payload.get("orgName"):
+            rows.append({"label": "Org", "value": str(payload["orgName"])})
+        result["rows"] = rows
+        if not connected and text:
+            result["error"] = text[:300]
+        return result
+
+    if agent == "codex":
+        text_l = text.casefold()
+        connected = (
+            completed.returncode == 0
+            and "not logged in" not in text_l
+            and ("logged in" in text_l or "authenticated" in text_l)
+        )
+        result["connected"] = connected
+        rows = []
+        if text:
+            method = re.sub(r"^logged in using\s+", "", text, flags=re.IGNORECASE)
+            rows.append({
+                "label": "Method" if connected else "Status",
+                "value": method[:160],
+            })
+        result["rows"] = rows
+        if not connected and text:
+            result["error"] = text[:300]
+        return result
+
+    result["error"] = text[:300] if text else "Unknown auth status"
+    return result
+
+
+async def agent_auth_status(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+
+    async def _one(agent: str) -> tuple[str, dict]:
+        return agent, await asyncio.to_thread(_run_auth_status_command, agent)
+
+    pairs = await asyncio.gather(*(_one(agent) for agent in PROVIDERS))
+    return JSONResponse({"agents": dict(pairs)})
+
+
+async def start_agent_auth(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+
+    agent = str_field(body.get("agent", "")).strip()
+    method = str_field(body.get("method", "default")).strip() or "default"
+    if agent not in PROVIDERS:
+        return JSONResponse({"error": f"Unknown agent: {agent}"}, status_code=400)
+
+    command = _agent_auth_command(agent, method)
+    if not command:
+        return JSONResponse(
+            {"error": f"No auth command configured for {agent}"},
+            status_code=400,
+        )
+    if not shutil.which(command[0]):
+        return JSONResponse(
+            {"error": f"{command[0]} is not installed"},
+            status_code=400,
+        )
+
+    _prune_agent_auth_sessions()
+    session_id = secrets.token_urlsafe(24)
+    _agent_auth_sessions[session_id] = {
+        "id": session_id,
+        "agent": agent,
+        "method": method,
+        "command": list(command),
+        "created_at": _time.monotonic(),
+        "started": False,
+    }
+    return JSONResponse({
+        "session_id": session_id,
+        "agent": agent,
+        "command": " ".join(command),
+    })
+
+
+async def _pty_read_once(fd: int) -> bytes:
+    loop = asyncio.get_running_loop()
+    ready = loop.create_future()
+
+    def _mark_ready() -> None:
+        if not ready.done():
+            ready.set_result(None)
+
+    loop.add_reader(fd, _mark_ready)
+    try:
+        await ready
+        return os.read(fd, 4096)
+    finally:
+        try:
+            loop.remove_reader(fd)
+        except Exception:
+            pass
+
+
+async def _agent_auth_output_loop(websocket: WebSocket, master_fd: int) -> None:
+    while True:
+        try:
+            chunk = await _pty_read_once(master_fd)
+        except OSError:
+            break
+        if not chunk:
+            break
+        await websocket.send_json({
+            "type": "output",
+            "data": chunk.decode("utf-8", errors="replace"),
+        })
+
+
+async def _agent_auth_input_loop(
+    websocket: WebSocket,
+    master_fd: int,
+    proc: subprocess.Popen,
+) -> str:
+    while proc.poll() is None:
+        try:
+            raw = await websocket.receive_text()
+        except WebSocketDisconnect:
+            return "disconnect"
+        try:
+            message = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(message, dict):
+            continue
+        msg_type = str(message.get("type", ""))
+        if msg_type == "cancel":
+            return "cancel"
+        if msg_type == "input":
+            data = str(message.get("data", ""))
+            if data:
+                try:
+                    os.write(master_fd, data.encode("utf-8", errors="replace"))
+                except OSError:
+                    return "closed"
+    return "exited"
+
+
+async def _terminate_auth_process(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    try:
+        await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=5)
+    except asyncio.TimeoutError:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        await asyncio.to_thread(proc.wait)
+
+
+async def agent_auth_ws(websocket: WebSocket):
+    if not websocket_origin_allowed(websocket):
+        await websocket.close(code=4003)
+        return
+    if not websocket.session.get("authenticated"):
+        auth = websocket.headers.get("authorization", "")
+        if not _check_basic_auth(auth):
+            await websocket.close(code=4001)
+            return
+
+    _prune_agent_auth_sessions()
+    session_id = websocket.path_params["session_id"]
+    session = _agent_auth_sessions.get(session_id)
+    if not session:
+        await websocket.close(code=4004)
+        return
+    if session.get("started"):
+        await websocket.close(code=4009)
+        return
+    session["started"] = True
+
+    await websocket.accept()
+    command = [str(part) for part in session.get("command", [])]
+    master_fd = -1
+    proc: subprocess.Popen | None = None
+    output_task: asyncio.Task | None = None
+    input_task: asyncio.Task | None = None
+    wait_task: asyncio.Task | None = None
+    try:
+        await websocket.send_json({
+            "type": "start",
+            "agent": session.get("agent", ""),
+            "command": " ".join(command),
+        })
+        master_fd, slave_fd = pty.openpty()
+        env = os.environ.copy()
+        env.setdefault("TERM", "xterm-256color")
+        try:
+            proc = subprocess.Popen(
+                command,
+                cwd=str(APP_ROOT_DIR),
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+                start_new_session=True,
+                env=env,
+            )
+        finally:
+            os.close(slave_fd)
+        session["process"] = proc
+
+        output_task = asyncio.create_task(
+            _agent_auth_output_loop(websocket, master_fd)
+        )
+        input_task = asyncio.create_task(
+            _agent_auth_input_loop(websocket, master_fd, proc)
+        )
+        wait_task = asyncio.create_task(asyncio.to_thread(proc.wait))
+        done, _pending = await asyncio.wait(
+            {input_task, wait_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        reason = ""
+        if input_task in done:
+            reason = input_task.result()
+            if reason in {"cancel", "disconnect", "closed"}:
+                await _terminate_auth_process(proc)
+        returncode = await wait_task
+        if output_task and not output_task.done():
+            try:
+                await asyncio.wait_for(output_task, timeout=0.5)
+            except asyncio.TimeoutError:
+                output_task.cancel()
+        if reason != "disconnect":
+            await websocket.send_json({
+                "type": "exit",
+                "returncode": returncode,
+                "cancelled": reason == "cancel",
+            })
+    except WebSocketDisconnect:
+        if proc:
+            await _terminate_auth_process(proc)
+    except Exception as exc:
+        log.error("Agent auth session failed: %s", exc, exc_info=True)
+        try:
+            await websocket.send_json({"type": "error", "message": str(exc)})
+        except Exception:
+            pass
+    finally:
+        for task in (input_task, output_task):
+            if task and not task.done():
+                task.cancel()
+        if master_fd >= 0:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+        _agent_auth_sessions.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
 # Settings / Agents / Usage
 # ---------------------------------------------------------------------------
 
@@ -10264,6 +10638,8 @@ routes = [
     Route("/api/logout", logout, methods=["POST"]),
     Route("/api/csrf-token", csrf_token, methods=["GET"]),
     Route("/api/agents", list_agents, methods=["GET"]),
+    Route("/api/agents/auth/status", agent_auth_status, methods=["GET"]),
+    Route("/api/agents/auth/start", start_agent_auth, methods=["POST"]),
     Route("/api/usage", get_usage, methods=["GET"]),
     Route("/api/vpn", vpn_status, methods=["GET"]),
     Route("/api/vpn/configure", vpn_configure, methods=["POST"]),
@@ -10317,6 +10693,7 @@ routes = [
     Route("/api/challenges/{id}/files/{path:path}", get_file, methods=["GET"]),
     Route("/api/challenges/{id}/download/{path:path}", download_file, methods=["GET"]),
     Route("/api/challenges/{id}/export", export_challenge, methods=["GET"]),
+    WebSocketRoute("/ws/agents/auth/{session_id}", agent_auth_ws),
     WebSocketRoute("/ws/events", global_events_ws),
     WebSocketRoute("/ws/{id}/{run_id}", challenge_ws),
     Mount(
