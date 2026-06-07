@@ -55,6 +55,8 @@ Load multiple skills if the challenge spans categories.
 - **Maintain your working notes file** (exact filename is in your
   prompt). Record what you tried and found. Your context may be
   compacted; the notes file survives. Re-read it if you lose context.
+- **Keep notes decision-oriented.** For each path, record the evidence,
+  hypothesis, test result, and the next targeted check.
 - **Never suppress stderr** (`2>/dev/null`). Use `2>&1` instead.
 - **Correlate across artifacts.** Cross-reference usernames, IPs,
   timestamps between different sources.

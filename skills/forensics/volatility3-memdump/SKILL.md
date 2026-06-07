@@ -25,6 +25,17 @@ DUMP="<path-to-memdump>"
 VOL=$(command -v vol &>/dev/null && echo "vol" || echo "python3 -m volatility3.cli")
 ```
 
+For large sparse dumps, keep offsets while searching:
+
+```bash
+LC_ALL=C grep -aobE 'flag\{|CTF\{|key|token|password' "$DUMP" | head -300 \
+  | tee output/interesting_offsets.txt
+strings -a -td "$DUMP" | grep -iE 'flag|key|token|password' | head -300 \
+  | tee output/interesting_strings_offsets.txt
+```
+
+Inspect nearby bytes before treating a string hit as recoverable file content.
+
 ## Identify the OS
 
 The trip-up: Vol3 plugin namespace is `windows.*` vs `linux.*` and you must pick the right one — running `windows.pslist.PsList` on a Linux dump silently returns nothing.
@@ -134,3 +145,6 @@ For credential extraction, `windows.hashdump` produces SAM hashes and `windows.l
 - **Hidden processes** → diff `windows.pslist` against `windows.psscan`; entries in psscan-only are likely DKOM-hidden.
 - **Injected code** → `windows.malfind` flags RWX private allocations; dump with `--dump` and run `strings`/disassembly on the result.
 - **Recently-edited file content** → `windows.filescan` to find the `_FILE_OBJECT` virtual address, then `windows.dumpfiles --virtaddr <ADDR>` extracts the cached pages.
+- **MFT hits are metadata first** → `windows.mftscan.MFTScan` can show a
+  filename even when `$DATA` is zero-length or nonresident bytes are absent.
+  Verify `$DATA` length/runlists before claiming file recovery.
