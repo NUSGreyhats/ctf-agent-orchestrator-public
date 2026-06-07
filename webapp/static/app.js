@@ -624,6 +624,9 @@ async function loadChallenges() {
       const runs = c.runs || [];
       const runCount = runs.length;
       const isPending = c.status === "pending";
+      const fileCount = Number.isInteger(c.file_count)
+        ? c.file_count
+        : ((c.files || []).length);
 
       const modeLabel = mode.replace(/_/g, " ");
       const totalDuration = runs.reduce((sum, r) => sum + (r.duration_ms || 0), 0);
@@ -646,7 +649,7 @@ async function loadChallenges() {
       const runInfo = [
         modeLabel,
         agentLabel,
-        `${c.files.length} file${c.files.length !== 1 ? "s" : ""}`,
+        `${fileCount} file${fileCount !== 1 ? "s" : ""}`,
       ].filter(Boolean).join(" \u00b7 ");
 
       const dur = formatDuration(totalDuration);
