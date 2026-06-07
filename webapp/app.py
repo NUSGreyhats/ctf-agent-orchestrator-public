@@ -41,7 +41,8 @@ import shutil
 import tempfile
 import uuid
 import time as _time
-from collections import defaultdict
+from collections import defaultdict, deque
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlparse
@@ -118,6 +119,10 @@ _login_attempts: dict[str, list[float]] = defaultdict(list)
 HISTORY_TOOL_OUTPUT_PREVIEW_CHARS = int(os.environ.get(
     "HISTORY_TOOL_OUTPUT_PREVIEW_CHARS", "12000"
 ))
+RUN_EVENT_MEMORY_TAIL = max(0, int(os.environ.get(
+    "RUN_EVENT_MEMORY_TAIL", "200"
+)))
+WS_SEND_TIMEOUT_SECONDS = float(os.environ.get("WS_SEND_TIMEOUT_SECONDS", "2"))
 
 challenges: dict[str, dict] = {}
 _instance_locks: dict[str, asyncio.Lock] = {}
@@ -802,9 +807,7 @@ async def apply_solved_status(
                     "the challenge."
                 ),
             }
-            other_run["output_lines"].append(stop_event)
-            append_output_event(challenge_id, other_id, stop_event)
-            await broadcast(challenge_id, other_id, stop_event)
+            await _append_run_event(challenge_id, other_id, other_run, stop_event)
             await stop_run(other_run, "sibling_solved")
             finish_run_timer(other_run)
             changed_run_ids.add(other_id)
@@ -845,6 +848,7 @@ def make_run(
         "process": None,
         "task": None,
         "output_lines": [],
+        "_event_count": 0,
         "ws_clients": set(),
         "error": None,
         "solve_start": None,
@@ -998,6 +1002,18 @@ def public_run_summary(
         summary["custom_prompt"] = run["custom_prompt"]
         summary["custom_prompt_mode"] = run.get("custom_prompt_mode", "append")
     return summary
+
+
+def public_run_list_summary(run: dict) -> dict:
+    """Small run shape for dashboard cards."""
+    return {
+        "id": run["id"],
+        "agent": run["agent"],
+        "model": run["model"],
+        "effort": run.get("effort", ""),
+        "status": run["status"],
+        "duration_ms": effective_run_duration_ms(run),
+    }
 
 
 def working_notes_template(label: str) -> str:
@@ -1352,7 +1368,8 @@ def append_output_event(challenge_id: str, run_id: str, event: dict) -> None:
         return
     out_path = _run_output_path(challenge_id, run_id)
     with out_path.open("a") as f:
-        f.write(json.dumps(event) + "\n")
+        json.dump(event, f)
+        f.write("\n")
 
 
 def clear_output_log(challenge_id: str, run_id: str) -> None:
@@ -1362,21 +1379,216 @@ def clear_output_log(challenge_id: str, run_id: str) -> None:
         out_path.unlink()
 
 
-def load_output_log(challenge_id: str, run_id: str) -> list[dict]:
-    """Load saved output events from disk for a specific run."""
+def iter_output_log_indexed(challenge_id: str, run_id: str):
+    """Yield (event_index, event) pairs from a run JSONL log.
+
+    The event index is the non-empty JSONL line index. Invalid lines are skipped
+    as events but still advance the index, keeping full-output refs stable.
+    """
     out_path = _run_output_path(challenge_id, run_id)
     if not out_path.exists():
+        return
+    with out_path.open() as f:
+        event_index = 0
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                event_index += 1
+                continue
+            yield event_index, event
+            event_index += 1
+
+
+def iter_output_log_events(challenge_id: str, run_id: str):
+    """Yield saved output events from disk for a specific run."""
+    for _idx, event in iter_output_log_indexed(challenge_id, run_id):
+        yield event
+
+
+def count_output_log_events(challenge_id: str, run_id: str) -> int:
+    """Count non-empty JSONL records without materializing the transcript."""
+    out_path = _run_output_path(challenge_id, run_id)
+    if not out_path.exists():
+        return 0
+    count = 0
+    with out_path.open() as f:
+        for line in f:
+            if line.strip():
+                count += 1
+    return count
+
+
+def load_output_log_slice(
+    challenge_id: str,
+    run_id: str,
+    start: int,
+    end: int,
+) -> list[tuple[int, dict]]:
+    """Load saved events in [start, end) without reading the whole log."""
+    if end <= start:
         return []
-    events = []
-    for line in out_path.read_text().splitlines():
-        line = line.strip()
-        if not line:
+    selected = []
+    for event_index, event in iter_output_log_indexed(challenge_id, run_id):
+        if event_index < start:
             continue
+        if event_index >= end:
+            break
+        selected.append((event_index, event))
+    return selected
+
+
+def _tail_nonempty_jsonl_lines(path: Path, limit: int) -> list[str]:
+    """Read the last non-empty JSONL lines without scanning from the start."""
+    if limit <= 0 or not path.exists():
+        return []
+    lines: deque[bytes] = deque(maxlen=limit)
+    chunk_size = 64 * 1024
+    remainder = b""
+    with path.open("rb") as f:
+        f.seek(0, os.SEEK_END)
+        pos = f.tell()
+        while pos > 0 and len(lines) < limit:
+            read_size = min(chunk_size, pos)
+            pos -= read_size
+            f.seek(pos)
+            chunk = f.read(read_size) + remainder
+            parts = chunk.splitlines()
+            if pos > 0:
+                remainder = parts[0] if parts else b""
+                parts = parts[1:]
+            else:
+                remainder = b""
+            for raw in reversed(parts):
+                if raw.strip():
+                    lines.appendleft(raw)
+                    if len(lines) >= limit:
+                        break
+        if pos == 0 and remainder.strip() and len(lines) < limit:
+            lines.appendleft(remainder)
+    return [line.decode("utf-8", errors="replace") for line in lines]
+
+
+def load_output_log_tail_slice(
+    challenge_id: str,
+    run_id: str,
+    total: int,
+    limit: int,
+) -> list[tuple[int, dict]]:
+    """Load the latest saved events without reading the whole log."""
+    out_path = _run_output_path(challenge_id, run_id)
+    raw_lines = _tail_nonempty_jsonl_lines(out_path, limit)
+    start = max(0, total - len(raw_lines))
+    selected = []
+    for offset, line in enumerate(raw_lines):
         try:
-            events.append(json.loads(line))
+            event = json.loads(line)
         except json.JSONDecodeError:
             continue
+        selected.append((start + offset, event))
+    return selected
+
+
+def load_output_log_event(
+    challenge_id: str,
+    run_id: str,
+    event_index: int,
+) -> dict | None:
+    """Load one saved event by event index."""
+    if event_index < 0:
+        return None
+    for idx, event in iter_output_log_indexed(challenge_id, run_id):
+        if idx == event_index:
+            return event
+        if idx > event_index:
+            break
+    return None
+
+
+def tail_output_log_events(
+    challenge_id: str,
+    run_id: str,
+    limit: int,
+    *,
+    skip_types: set[str] | None = None,
+) -> list[tuple[int, dict]]:
+    """Return the last `limit` events, optionally skipping event types."""
+    if limit <= 0:
+        return []
+    tail = deque(maxlen=limit)
+    for event_index, event in iter_output_log_indexed(challenge_id, run_id):
+        if skip_types and event.get("type") in skip_types:
+            continue
+        tail.append((event_index, event))
+    return list(tail)
+
+
+def load_output_log(challenge_id: str, run_id: str) -> list[dict]:
+    """Load saved output events from disk for a specific run."""
+    events = [
+        event for _idx, event in iter_output_log_indexed(challenge_id, run_id)
+    ]
     return events
+
+
+def run_event_count(challenge_id: str, run_id: str, run: dict) -> int:
+    """Return the total persisted event count for a run."""
+    count = run.get("_event_count")
+    if isinstance(count, int) and count >= 0:
+        return count
+    count = count_output_log_events(challenge_id, run_id)
+    run["_event_count"] = count
+    return count
+
+
+def _remember_run_event_tail(
+    challenge_id: str,
+    run_id: str,
+    run: dict,
+    event: dict,
+    event_index: int,
+) -> None:
+    """Keep a compact bounded event tail for live UI state only."""
+    if RUN_EVENT_MEMORY_TAIL <= 0:
+        run["output_lines"] = []
+        return
+    tail = run.setdefault("output_lines", [])
+    tail.append(compact_history_event(challenge_id, run_id, event, event_index))
+    overflow = len(tail) - RUN_EVENT_MEMORY_TAIL
+    if overflow > 0:
+        del tail[:overflow]
+
+
+def record_run_event(
+    challenge_id: str,
+    run_id: str,
+    run: dict,
+    event: dict,
+) -> int:
+    """Persist a full event and retain only a compact bounded in-memory tail."""
+    event_index = run_event_count(challenge_id, run_id, run)
+    append_output_event(challenge_id, run_id, event)
+    run["_event_count"] = event_index + 1
+    _remember_run_event_tail(challenge_id, run_id, run, event, event_index)
+    return event_index
+
+
+def run_event_lock(run: dict) -> asyncio.Lock:
+    lock = run.get("_event_lock")
+    if not isinstance(lock, asyncio.Lock):
+        lock = asyncio.Lock()
+        run["_event_lock"] = lock
+    return lock
+
+
+def reset_run_events(challenge_id: str, run_id: str, run: dict) -> None:
+    """Clear persisted and in-memory transcript state for a fresh run."""
+    run["output_lines"] = []
+    run["_event_count"] = 0
+    clear_output_log(challenge_id, run_id)
 
 
 def _parse_positive_int(value, default: int, minimum: int = 0, maximum: int = 1000) -> int:
@@ -1434,14 +1646,15 @@ def _load_legacy_output_log(challenge_id: str) -> list[dict]:
     if not out_path.exists():
         return []
     events = []
-    for line in out_path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    with out_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
     return events
 
 
@@ -1629,7 +1842,7 @@ def _codex_thread_usage_for_run(run: dict) -> dict | None:
     return get_thread_token_usage(thread_id)
 
 
-def _aggregate_run_stats(run: dict, events: list[dict]) -> dict:
+def _aggregate_run_stats(run: dict, events: Iterable[dict]) -> dict:
     stats = _empty_stats()
     assistant_usage = _empty_stats()
     result_seen = False
@@ -2462,6 +2675,7 @@ def _serialize_runs(challenge: dict) -> dict:
             "provider_state": provider_state_for_metadata(run),
             "_session_state": run.get("_session_state", {}),
             "_submit_token": run.get("_submit_token", ""),
+            "event_count": run_event_count(challenge["id"], run_id, run),
             "goal": normalize_run_goal(run.get("goal"), str(run.get("agent") or "")),
         }
         if run_has_skill_override(run):
@@ -2606,7 +2820,8 @@ def load_challenges_from_disk() -> None:
                 run_agent = run_meta.get("agent", DEFAULT_AGENT)
                 if run_agent not in VALID_AGENTS:
                     run_agent = DEFAULT_AGENT
-                run_status = run_meta.get("status", "unknown")
+                saved_run_status = run_meta.get("status", "unknown")
+                run_status = saved_run_status
                 if run_status == "solving":
                     run_status = "failed"
                 provider_state = run_meta.get("provider_state", {})
@@ -2654,10 +2869,18 @@ def load_challenges_from_disk() -> None:
                         session_state["codex_thread_id"] = run["_codex_thread_id"]
                 run["_session_state"] = session_state
                 run["_submit_token"] = run_meta.get("_submit_token", "")
-                run["output_lines"] = _normalize_output_lines(
-                    load_output_log(challenge_id, run_id),
-                    run_agent,
-                )
+                saved_event_count = run_meta.get("event_count")
+                if (
+                    saved_run_status != "solving"
+                    and isinstance(saved_event_count, int)
+                    and saved_event_count >= 0
+                ):
+                    run["_event_count"] = saved_event_count
+                else:
+                    run["_event_count"] = count_output_log_events(
+                        challenge_id, run_id
+                    )
+                run["output_lines"] = []
                 runs[run_id] = run
         else:
             # Legacy format: migrate to single run
@@ -2694,16 +2917,16 @@ def load_challenges_from_disk() -> None:
             run["_session_state"] = session_state_legacy
             # Try legacy output log
             legacy_events = _load_legacy_output_log(challenge_id)
-            run["output_lines"] = _normalize_output_lines(
-                legacy_events, old_agent
-            )
             # Migrate legacy output to run-specific file
             if legacy_events:
                 out_path = _run_output_path(challenge_id, run_id)
                 if not out_path.exists():
                     with out_path.open("w") as f:
                         for evt in legacy_events:
-                            f.write(json.dumps(evt) + "\n")
+                            json.dump(evt, f)
+                            f.write("\n")
+            run["_event_count"] = count_output_log_events(challenge_id, run_id)
+            run["output_lines"] = []
             runs[run_id] = run
 
         # No tasks survive a restart — reset stale "solving" runs
@@ -2952,6 +3175,33 @@ async def csrf_token(request: Request) -> JSONResponse:
 # Broadcast helpers
 # ---------------------------------------------------------------------------
 
+async def _send_ws_json(websocket: WebSocket, data: dict) -> bool:
+    try:
+        if WS_SEND_TIMEOUT_SECONDS > 0:
+            await asyncio.wait_for(
+                websocket.send_json(data),
+                timeout=WS_SEND_TIMEOUT_SECONDS,
+            )
+        else:
+            await websocket.send_json(data)
+        return True
+    except Exception:
+        return False
+
+
+async def _broadcast_to_ws_set(clients: set, data: dict) -> None:
+    targets = list(clients)
+    if not targets:
+        return
+    results = await asyncio.gather(
+        *(_send_ws_json(ws, data) for ws in targets),
+        return_exceptions=True,
+    )
+    for ws, ok in zip(targets, results):
+        if ok is not True:
+            clients.discard(ws)
+
+
 async def broadcast(challenge_id: str, run_id: str, data: dict):
     """Send data to a specific run's WebSocket clients."""
     challenge = challenges.get(challenge_id)
@@ -2960,14 +3210,7 @@ async def broadcast(challenge_id: str, run_id: str, data: dict):
     run = challenge["runs"].get(run_id)
     if not run:
         return
-    dead = []
-    for ws in list(run["ws_clients"]):
-        try:
-            await ws.send_json(data)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        run["ws_clients"].discard(ws)
+    await _broadcast_to_ws_set(run["ws_clients"], data)
 
 
 async def broadcast_challenge(challenge_id: str, data: dict):
@@ -2976,14 +3219,7 @@ async def broadcast_challenge(challenge_id: str, data: dict):
     if not challenge:
         return
     for run in challenge["runs"].values():
-        dead = []
-        for ws in list(run["ws_clients"]):
-            try:
-                await ws.send_json(data)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            run["ws_clients"].discard(ws)
+        await _broadcast_to_ws_set(run["ws_clients"], data)
     enriched = {**data, "challenge_id": challenge_id}
     await broadcast_global(enriched)
 
@@ -2993,14 +3229,7 @@ _global_ws_clients: set = set()
 
 async def broadcast_global(data: dict):
     """Send data to all globally-connected WebSocket clients."""
-    dead = []
-    for ws in list(_global_ws_clients):
-        try:
-            await ws.send_json(data)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        _global_ws_clients.discard(ws)
+    await _broadcast_to_ws_set(_global_ws_clients, data)
 
 
 # ---------------------------------------------------------------------------
@@ -3039,11 +3268,38 @@ def public_challenge_summary(
     }
 
 
+def public_challenge_list_summary(challenge: dict) -> dict:
+    """Small challenge shape for dashboard cards."""
+    files = challenge.get("files", [])
+    return {
+        "id": challenge["id"],
+        "name": challenge["name"],
+        "category": challenge.get("category", ""),
+        "mode": challenge["mode"],
+        "status": challenge["status"],
+        "error": challenge.get("error"),
+        "created_at": challenge["created_at"],
+        "file_count": len(files) if isinstance(files, list) else 0,
+        "points": challenge.get("_points", 0),
+        "solves": challenge.get("_solves", 0),
+        "runs": [
+            public_run_list_summary(run)
+            for run in challenge.get("runs", {}).values()
+        ],
+    }
+
+
 async def list_challenges(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
-    settings = load_settings()
-    result = [public_challenge_summary(c, settings) for c in challenges.values()]
+    detail = str(request.query_params.get("detail", "")).lower()
+    if detail in {"1", "true", "yes", "full"}:
+        settings = load_settings()
+        result = [
+            public_challenge_summary(c, settings) for c in challenges.values()
+        ]
+    else:
+        result = [public_challenge_list_summary(c) for c in challenges.values()]
     result.sort(key=lambda x: x["created_at"], reverse=True)
     return JSONResponse(result)
 
@@ -3206,8 +3462,7 @@ async def list_run_events(request: Request) -> JSONResponse:
         minimum=1,
         maximum=500,
     )
-    events = run.get("output_lines") or load_output_log(challenge_id, run_id)
-    total = len(events)
+    total = run_event_count(challenge_id, run_id, run)
     before = _parse_positive_int(
         request.query_params.get("before"),
         default=total,
@@ -3215,9 +3470,19 @@ async def list_run_events(request: Request) -> JSONResponse:
         maximum=total,
     )
     start = max(0, before - limit)
+    if before == total:
+        selected_pairs = load_output_log_tail_slice(
+            challenge_id, run_id, total, limit
+        )
+        if selected_pairs:
+            start = selected_pairs[0][0]
+    else:
+        selected_pairs = load_output_log_slice(
+            challenge_id, run_id, start, before
+        )
     selected = [
-        compact_history_event(challenge_id, run_id, event, start + index)
-        for index, event in enumerate(events[start:before])
+        compact_history_event(challenge_id, run_id, event, event_index)
+        for event_index, event in selected_pairs
     ]
     return JSONResponse({
         "events": selected,
@@ -3247,11 +3512,13 @@ async def get_run_event_tool_output(request: Request) -> Response:
     except (TypeError, ValueError):
         return JSONResponse({"error": "invalid event index"}, status_code=400)
 
-    events = run.get("output_lines") or load_output_log(challenge_id, run_id)
-    if event_index < 0 or event_index >= len(events):
+    total = run_event_count(challenge_id, run_id, run)
+    if event_index < 0 or event_index >= total:
         return JSONResponse({"error": "event not found"}, status_code=404)
 
-    event = events[event_index]
+    event = load_output_log_event(challenge_id, run_id, event_index)
+    if event is None:
+        return JSONResponse({"error": "event not found"}, status_code=404)
     if not isinstance(event, dict):
         return JSONResponse({"error": "event has no tool output"}, status_code=404)
     tool_use_id = str(request.query_params.get("tool_use_id") or "")
@@ -3279,9 +3546,7 @@ async def get_challenge_stats(request: Request) -> JSONResponse:
     runs = {}
     totals = _empty_stats()
     for run_id, run in challenge.get("runs", {}).items():
-        events = run.get("output_lines") or load_output_log(
-            challenge_id, run_id
-        )
+        events = iter_output_log_events(challenge_id, run_id)
         stats = _aggregate_run_stats(run, events)
         runs[run_id] = stats
         totals["inputTokens"] += stats["inputTokens"]
@@ -3331,8 +3596,7 @@ async def search_challenge_transcript(request: Request) -> JSONResponse:
     for run_id, run in challenge.get("runs", {}).items():
         if run_filter and run_id != run_filter:
             continue
-        events = run.get("output_lines") or load_output_log(challenge_id, run_id)
-        for idx, event in enumerate(events):
+        for idx, event in iter_output_log_indexed(challenge_id, run_id):
             text = _event_search_text(event)
             if query_key not in text.casefold():
                 continue
@@ -3876,12 +4140,10 @@ async def solve_challenge(request: Request) -> JSONResponse:
                 "type": "system",
                 "message": "Resuming agent session...",
             }
-            run["output_lines"].append(resume_event)
-            append_output_event(challenge_id, run_id, resume_event)
+            record_run_event(challenge_id, run_id, run, resume_event)
         else:
             # Full retry — clear everything
-            run["output_lines"] = []
-            clear_output_log(challenge_id, run_id)
+            reset_run_events(challenge_id, run_id, run)
             run["_session_state"] = {}
             run["duration_ms"] = 0
             run["solve_start"] = None
@@ -3948,9 +4210,7 @@ async def stop_challenge(request: Request) -> JSONResponse:
             "type": "system",
             "message": "Agent stopped by user.",
         }
-        run["output_lines"].append(stop_event)
-        append_output_event(challenge_id, run_id, stop_event)
-        await broadcast(challenge_id, run_id, stop_event)
+        await _append_run_event(challenge_id, run_id, run, stop_event)
         await stop_run(run, "user_stop")
         finish_run_timer(run)
         changed_run_ids.append(run_id)
@@ -4206,9 +4466,7 @@ async def _steer_run_with_message(
         "type": "user_steer",
         "message": display_message or message,
     }
-    run["output_lines"].append(steer_event)
-    append_output_event(challenge_id, target_run_id, steer_event)
-    await broadcast(challenge_id, target_run_id, steer_event)
+    await _append_run_event(challenge_id, target_run_id, run, steer_event)
 
     run["status"] = "solving"
     run["error"] = None
@@ -4229,9 +4487,14 @@ def _format_skill_mentions(skill_names: list[str]) -> str:
 
 def _skill_resume_message(
     run: dict,
+    challenge_id: str = "",
+    run_id: str = "",
     codex_skill_mentions: list[str] | None = None,
 ) -> str | None:
-    if run.get("status") == "pending" and not run.get("output_lines"):
+    has_history = bool(run.get("output_lines"))
+    if not has_history and challenge_id and run_id:
+        has_history = run_event_count(challenge_id, run_id, run) > 0
+    if run.get("status") == "pending" and not has_history:
         return None
     message = "Continue solving the challenge."
     mention_text = _format_skill_mentions(codex_skill_mentions or [])
@@ -6205,9 +6468,7 @@ def _handle_detected_flag(
                     f"Result: {'Correct!' if result.correct else result.message}"
                 ),
             }
-            run["output_lines"].append(submit_event)
-            append_output_event(challenge_id, run_id, submit_event)
-            await broadcast(challenge_id, run_id, submit_event)
+            await _append_run_event(challenge_id, run_id, run, submit_event)
 
             if result.correct:
                 if auto_flag_id not in (None, ""):
@@ -6281,9 +6542,7 @@ def _handle_detected_flag(
                         "Keep trying."
                     ),
                 }
-                run["output_lines"].append(wrong_event)
-                append_output_event(challenge_id, run_id, wrong_event)
-                await broadcast(challenge_id, run_id, wrong_event)
+                await _append_run_event(challenge_id, run_id, run, wrong_event)
         except Exception:
             seen.discard(seen_key)
 
@@ -6534,10 +6793,9 @@ async def _run_agent_sdk_path(
                 apply_run_goal_event(run, event)
                 save_metadata(challenge)
 
-            event_index = len(run["output_lines"])
-            run["output_lines"].append(event)
-            append_output_event(challenge_id, run_id, event)
-            await broadcast(challenge_id, run_id, event)
+            event_index = await _append_run_event(
+                challenge_id, run_id, run, event
+            )
 
             # Auto-submit flag detection
             if (
@@ -6565,9 +6823,7 @@ async def _run_agent_sdk_path(
         )
         last_error = str(exc)
         err_event = {"type": "error", "message": str(exc)}
-        run["output_lines"].append(err_event)
-        append_output_event(challenge_id, run_id, err_event)
-        await broadcast(challenge_id, run_id, err_event)
+        await _append_run_event(challenge_id, run_id, run, err_event)
     finally:
         # Kill the Claude process if still alive (async with handles
         # normal disconnect, but cancellation may skip __aexit__)
@@ -6616,9 +6872,7 @@ async def _run_agent_sdk_path(
             run["error"] = last_error or "Agent produced no output"
             if last_error:
                 err_event = {"type": "error", "message": last_error}
-                run["output_lines"].append(err_event)
-                append_output_event(challenge_id, run_id, err_event)
-                await broadcast(challenge_id, run_id, err_event)
+                await _append_run_event(challenge_id, run_id, run, err_event)
 
         finish_run_timer(run)
 
@@ -6648,9 +6902,7 @@ async def _run_agent_sdk_path(
         challenge["status"] = derive_challenge_status(challenge)
         save_metadata(challenge)
         err_event = {"type": "error", "message": f"Finalization error: {exc}"}
-        run["output_lines"].append(err_event)
-        append_output_event(challenge_id, run_id, err_event)
-        await broadcast(challenge_id, run_id, err_event)
+        await _append_run_event(challenge_id, run_id, run, err_event)
     finally:
         if run["status"] == "solving":
             run["status"] = "failed"
@@ -6708,12 +6960,20 @@ def _instance_connection_parts(instance_info: dict) -> list[str]:
 
 async def _append_run_event(
     challenge_id: str, run_id: str, run: dict, event: dict
-) -> None:
+) -> int:
     if "ts" not in event and run.get("solve_start"):
         event["ts"] = run_elapsed_seconds(run)
-    run["output_lines"].append(event)
-    append_output_event(challenge_id, run_id, event)
-    await broadcast(challenge_id, run_id, event)
+    async with run_event_lock(run):
+        event_index = run_event_count(challenge_id, run_id, run)
+        await asyncio.to_thread(append_output_event, challenge_id, run_id, event)
+        run["_event_count"] = event_index + 1
+        _remember_run_event_tail(challenge_id, run_id, run, event, event_index)
+    await broadcast(
+        challenge_id,
+        run_id,
+        compact_history_event(challenge_id, run_id, event, event_index),
+    )
+    return event_index
 
 
 async def _mark_run_completed_from_result(
@@ -6945,9 +7205,7 @@ async def run_agent_task(
             "type": "system",
             "message": f"{provider.label} agent starting...",
         }
-    run["output_lines"].append(sys_event)
-    append_output_event(challenge_id, run_id, sys_event)
-    await broadcast(challenge_id, run_id, sys_event)
+    await _append_run_event(challenge_id, run_id, run, sys_event)
     model_info = run.get('model', '')
     if run.get('effort'):
         model_info += f", {run['effort']}"
@@ -6956,9 +7214,7 @@ async def run_agent_task(
     prompt_event = {"type": "user_prompt", "message": prompt}
     if run.get("solve_start"):
         prompt_event["ts"] = run_elapsed_seconds(run)
-    run["output_lines"].append(prompt_event)
-    append_output_event(challenge_id, run_id, prompt_event)
-    await broadcast(challenge_id, run_id, prompt_event)
+    await _append_run_event(challenge_id, run_id, run, prompt_event)
     if continue_msg:
         await discord_notify(
             challenge,
@@ -6983,9 +7239,7 @@ async def run_agent_task(
             challenge["status"] = derive_challenge_status(challenge)
             save_metadata(challenge)
             err_event = {"type": "error", "message": f"SDK error: {exc}"}
-            run["output_lines"].append(err_event)
-            append_output_event(challenge_id, run_id, err_event)
-            await broadcast(challenge_id, run_id, err_event)
+            await _append_run_event(challenge_id, run_id, run, err_event)
             await broadcast(challenge_id, run_id, {
                 "type": "run_status", "run_id": run_id,
                 "status": run["status"], "error": run.get("error"),
@@ -7117,10 +7371,9 @@ async def run_agent_task(
                     if len(unknown_events) > 5:
                         del unknown_events[:-5]
 
-                event_index = len(run["output_lines"])
-                run["output_lines"].append(event)
-                append_output_event(challenge_id, run_id, event)
-                await broadcast(challenge_id, run_id, event)
+                event_index = await _append_run_event(
+                    challenge_id, run_id, run, event
+                )
 
                 # Auto-submit flag detection
                 if (
@@ -7225,9 +7478,7 @@ async def run_agent_task(
                 "message": error_msg,
                 "exit_code": proc.returncode,
             }
-            run["output_lines"].append(err_event)
-            append_output_event(challenge_id, run_id, err_event)
-            await broadcast(challenge_id, run_id, err_event)
+            await _append_run_event(challenge_id, run_id, run, err_event)
 
     except Exception as exc:
         stop_reason = run.pop("_stop_reason", None)
@@ -7235,9 +7486,7 @@ async def run_agent_task(
             run["status"] = "failed"
             run["error"] = str(exc)
             err_event = {"type": "error", "message": str(exc)}
-            run["output_lines"].append(err_event)
-            append_output_event(challenge_id, run_id, err_event)
-            await broadcast(challenge_id, run_id, err_event)
+            await _append_run_event(challenge_id, run_id, run, err_event)
     finally:
         # Only clear process if it's still OUR process (not a replacement
         # started by a steer/handoff while we were unwinding)
@@ -7292,25 +7541,28 @@ async def challenge_ws(websocket: WebSocket):
     await websocket.accept()
     run["ws_clients"].add(websocket)
 
-    history_events = run.get("output_lines") or load_output_log(challenge_id, run_id)
+    history_total = run_event_count(challenge_id, run_id, run)
     history_param = str(websocket.query_params.get("history", "1")).lower()
     after_param = websocket.query_params.get("after")
-    events_to_send = []
     start_index = 0
+    end_index = 0
     if after_param not in (None, ""):
         after_idx = _parse_positive_int(
             after_param,
-            default=len(history_events),
+            default=history_total,
             minimum=0,
-            maximum=len(history_events),
+            maximum=history_total,
         )
         start_index = after_idx
-        events_to_send = history_events[after_idx:]
+        end_index = history_total
     elif history_param not in {"0", "false", "no", "off"}:
-        events_to_send = history_events
+        start_index = 0
+        end_index = history_total
 
     # Send requested history/catch-up events before the current status.
-    for offset, event in enumerate(events_to_send, start=start_index):
+    for offset, event in load_output_log_slice(
+        challenge_id, run_id, start_index, end_index
+    ):
         await websocket.send_json(
             compact_history_event(challenge_id, run_id, event, offset)
         )
@@ -8699,8 +8951,7 @@ async def rescan_challenge_for_flags(
     search_formats = formats or challenge_flag_formats(challenge)
     found: dict[str, dict] = {}
     for run_id, run in challenge.get("runs", {}).items():
-        events = run.get("output_lines") or load_output_log(challenge_id, run_id)
-        for idx, event in enumerate(events):
+        for idx, event in iter_output_log_indexed(challenge_id, run_id):
             if not isinstance(event, dict):
                 continue
             for text in _event_flag_texts(event):
@@ -8832,9 +9083,7 @@ async def _record_run_goal_event(
     if "ts" not in event and run.get("solve_start"):
         event["ts"] = run_elapsed_seconds(run)
     apply_run_goal_event(run, event)
-    run["output_lines"].append(event)
-    append_output_event(challenge_id, run_id, event)
-    await broadcast(challenge_id, run_id, event)
+    await _append_run_event(challenge_id, run_id, run, event)
     save_metadata(challenge)
 
 
@@ -9044,6 +9293,8 @@ async def update_run_skills(request: Request) -> JSONResponse:
         continue_msg = (
             _skill_resume_message(
                 target_run,
+                challenge_id,
+                target_id,
                 codex_skill_mentions=codex_skill_mentions,
             )
             if resume else None
@@ -9058,9 +9309,7 @@ async def update_run_skills(request: Request) -> JSONResponse:
                 if reset else "Run skills updated."
             ),
         }
-        target_run["output_lines"].append(skills_event)
-        append_output_event(challenge_id, target_id, skills_event)
-        await broadcast(challenge_id, target_id, skills_event)
+        await _append_run_event(challenge_id, target_id, target_run, skills_event)
 
         if resume:
             await _start_run_after_skill_change(
@@ -9334,9 +9583,7 @@ async def agent_submit_answer(request: Request) -> JSONResponse:
         "message": f"Submitted answer for {target}: {status_word}. {result.message}",
         "timestamp": datetime.now().isoformat(),
     }
-    run["output_lines"].append(submit_event)
-    append_output_event(challenge_id, run_id, submit_event)
-    await broadcast(challenge_id, run_id, submit_event)
+    await _append_run_event(challenge_id, run_id, run, submit_event)
 
     if result.correct and (not has_questions or all_questions_solved):
         _, solved_run = await apply_solved_status(
@@ -10248,7 +10495,7 @@ def _discord_stats_message(challenge_id: str, challenge: dict) -> str:
 
     total = _empty_stats()
     for run_id, run in challenge.get("runs", {}).items():
-        events = run.get("output_lines") or load_output_log(challenge_id, run_id)
+        events = iter_output_log_events(challenge_id, run_id)
         stats = _aggregate_run_stats(run, events)
         for key in ("inputTokens", "outputTokens", "cacheReadTokens",
                     "cacheCreationTokens", "toolCalls", "turns",
@@ -10353,11 +10600,15 @@ def _discord_tail_message(
     per_run = lines if len(selected) == 1 else max(1, min(5, lines))
     out = [f"**Tail: {challenge.get('name', '?')}**"]
     for run_id, run in selected:
-        events = run.get("output_lines") or load_output_log(challenge_id, run_id)
         tail = [
-            (idx, event) for idx, event in enumerate(events, 1)
-            if event.get("type") not in {"run_status", "challenge_status", "flag_found"}
-        ][-per_run:]
+            (idx + 1, event)
+            for idx, event in tail_output_log_events(
+                challenge_id,
+                run_id,
+                per_run,
+                skip_types={"run_status", "challenge_status", "flag_found"},
+            )
+        ]
         out.append(f"**{run.get('agent', '?')}** `{run_id}`")
         if not tail:
             out.append("- No transcript events")
@@ -10440,9 +10691,7 @@ async def _discord_stop_runs(challenge_id: str, challenge: dict) -> str:
             "type": "system",
             "message": "Agent stopped from Discord.",
         }
-        run["output_lines"].append(stop_event)
-        append_output_event(challenge_id, run_id, stop_event)
-        await broadcast(challenge_id, run_id, stop_event)
+        await _append_run_event(challenge_id, run_id, run, stop_event)
         await stop_run(run, "discord_stop")
         finish_run_timer(run)
         stopped_ids.append(run_id)
@@ -11311,9 +11560,7 @@ async def _handle_discord_interaction(interaction: dict) -> None:
                     "type": "system",
                     "message": "Agent stopped from Discord.",
                 }
-                run["output_lines"].append(stop_event)
-                append_output_event(ch_id, run_id, stop_event)
-                await broadcast(ch_id, run_id, stop_event)
+                await _append_run_event(ch_id, run_id, run, stop_event)
                 await stop_run(run, "discord_stop")
                 finish_run_timer(run)
                 stopped_ids.append(run_id)
