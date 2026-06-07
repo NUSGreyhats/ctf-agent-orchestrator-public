@@ -49,8 +49,8 @@ fi
 uv_pip_install keystone-engine ropper
 
 #
-# Python packages for skills: ida-domain, libdebug
+# Python packages for skills: ida-domain
 #
 
 uv_pip_install --reinstall typing-extensions
-uv_pip_install ida-domain libdebug
+uv_pip_install ida-domain
