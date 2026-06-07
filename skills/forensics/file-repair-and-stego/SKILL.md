@@ -84,26 +84,6 @@ for h in range(1, 0x7fffffff):
 
 **PDF** — must end `%%EOF` and contain a valid xref table. `pdf-parser.py` recovers from many xref errors; `cpdf -decrypt input.pdf -o out.pdf` strips empty-password encryption.
 
-## Metadata shortcuts
-
-For archives, inspect metadata before extracting everything. Entry order,
-CRC-32, sizes, comments, and timestamps can be the intended data:
-
-```bash
-unzip -Z -v "$FILE" | tee output/zip_verbose.txt
-zipinfo -l "$FILE" | tee output/zip_listing.txt
-```
-
-For pickle or model files, inspect opcodes before loading untrusted code:
-
-```bash
-python3 -m pickletools "$FILE" | tee output/pickle_opcodes.txt
-grep -E "GLOBAL|REDUCE|STACK_GLOBAL" output/pickle_opcodes.txt
-```
-
-For `.npy` arrays, check shape, dtype, and ranges before heavier side-channel
-or ML analysis.
-
 ## Steganography
 
 ### zsteg (PNG/BMP only — wrong tool for JPG)

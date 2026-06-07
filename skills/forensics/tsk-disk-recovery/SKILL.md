@@ -45,10 +45,6 @@ qemu-img convert -f qcow2 -O raw "$IMG" output/disk.raw   # -f matches source
 IMG="output/disk.raw"
 ```
 
-If `file` reports `ADSEGMENTEDFILE` or `ADLOGICALIMAGE`, treat it as an AD1
-logical image. Extract the logical files with an AD1-capable parser/tool first;
-raw-disk TSK workflows and partition offsets are usually the wrong path.
-
 After conversion, `IMG` should point at a raw file.
 
 ## Partitions and offset arithmetic
@@ -201,20 +197,5 @@ umount /tmp/ewf_mount /tmp/aff_mount 2>/dev/null
 ```
 
 ## Hand-off
-
-For Windows logical images, inventory application artifacts before deep
-carving:
-
-```bash
-find output/recovered output/extracted -type f \
-  \( -iname "*.sqlite" -o -iname "*.db" -o -iname "*.ldb" -o -iname "Local State" \
-     -o -iname "Cookies" -o -iname "History" -o -iname "NTUSER.DAT" \
-     -o -iname "SYSTEM" -o -iname "SOFTWARE" -o -iname "*.json" \) 2>/dev/null \
-  | tee output/high_value_artifacts.txt
-```
-
-For DPAPI-backed browser/app secrets, keep the chain explicit: user password or
-NT hash, masterkey, Chromium `Local State` key, then the application secret.
-Normalize timestamps with the acquired system timezone before building answers.
 
 If extracted files need further analysis (documents, images, executables), apply the **file-repair-and-stego** skill to each. If a memory dump is found within the image, apply **volatility3-memdump**.

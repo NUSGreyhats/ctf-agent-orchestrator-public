@@ -98,17 +98,6 @@ Hunt for keylog files inside the pcap itself — sometimes embedded in HTTP resp
 strings "$PCAP" | grep -E 'CLIENT_RANDOM|RSA Session-ID|CLIENT_HANDSHAKE_TRAFFIC_SECRET'
 ```
 
-Before generic crypto work, check whether a suspicious TLS stream used static
-RSA rather than ECDHE:
-
-```bash
-tshark -r "$PCAP" -Y "tls.handshake.ciphersuite" -T fields \
-  -e tcp.stream -e tls.handshake.ciphersuite | sort -u
-```
-
-If the stream negotiated `TLS_RSA_*`, inspect the server certificate modulus
-size; a recovered RSA private key can decrypt that stream with `tls.keys_list`.
-
 ## File carving from streams
 
 ```bash
@@ -209,10 +198,6 @@ packets = rdpcap("<path-to-pcap>")
 # Reassemble TCP stream by (src,dst,sport,dport) and concatenate Raw payloads in seq order.
 # Filter, decode, extract — full Python control over every byte.
 ```
-
-For custom framing, preserve frame number, stream, direction, timestamp, and
-raw bytes. The flag-bearing payload may include protocol headers or one side of
-a binary POST body, not the text shown by Wireshark's follow-stream view.
 
 ## After extraction
 
