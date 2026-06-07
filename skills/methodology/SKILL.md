@@ -14,8 +14,7 @@ Read the challenge description. Determine the expected answer format
 
 ## Step 2: Quick Flag Search
 
-Use `ctfgrep` for quick flag searches during triage. It searches
-plaintext, base64, hex, and XOR:
+Run `ctfgrep` first. It searches plaintext, base64, hex, and XOR:
 
 ```bash
 ctfgrep -i <directory> "flag{"
@@ -35,17 +34,17 @@ relevant skill **before** deeper analysis.
 | Mixed / unclear | `ctf-misc` |
 | OSINT | `ctf-osint` |
 | Malware analysis | `ctf-malware` |
-| Disk forensics | `disk-forensics` |
-| File forensics / stego | `file-forensics` |
-| Memory forensics | `memory-forensics` |
-| Network forensics | `network-forensics` |
+| AI/ML challenges | `ctf-ai-ml` |
+| Forensic-format disk image or Sleuth Kit recovery | `tsk-disk-recovery` |
+| Corrupted file, steganography, Office/PDF dissection | `file-repair-and-stego` |
+| Full-system memory dump | `volatility3-memdump` |
+| Packet capture extraction | `pcap-extraction` |
 
 Load tool skills when needed:
 
 | Tool | Skill |
 |---|---|
 | IDA Pro | `analyze-with-ida-domain-api` |
-| libdebug | `libdebug-debugging` |
 | GDB + GEF | `kernel-gef-debugging` |
 | APK analysis | `apk-analysis` |
 

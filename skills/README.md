@@ -24,10 +24,10 @@ from `all-skills/` into each challenge run's `.claude/skills` and
 
 | Skill | Domain | Key Tools |
 |---|---|---|
-| [disk-forensics](forensics/disk/SKILL.md) | Disk image analysis | TSK (mmls, fls, icat, fsstat), foremost, photorec, bulk_extractor |
-| [file-forensics](forensics/file/SKILL.md) | File analysis & steganography | exiftool, binwalk, zsteg, steghide, stegseek, olevba, oledump |
-| [memory-forensics](forensics/memory/SKILL.md) | Memory dump analysis | Volatility 3, mquire |
-| [network-forensics](forensics/network/SKILL.md) | Packet capture analysis | tshark, tcpflow, scapy, ngrep, chaosreader |
+| [tsk-disk-recovery](forensics/tsk-disk-recovery/SKILL.md) | Forensic disk recovery | TSK (mmls, fls, icat, fsstat), foremost, photorec, bulk_extractor |
+| [file-repair-and-stego](forensics/file-repair-and-stego/SKILL.md) | File repair, stego, document dissection | exiftool, binwalk, zsteg, steghide, stegseek, olevba, oledump |
+| [volatility3-memdump](forensics/volatility3-memdump/SKILL.md) | Full-system memory dump analysis | Volatility 3, mquire |
+| [pcap-extraction](forensics/pcap-extraction/SKILL.md) | Packet capture extraction | tshark, tcpflow, scapy |
 
 ### Tools
 
@@ -36,7 +36,6 @@ from `all-skills/` into each challenge run's `.claude/skills` and
 | [apk-analysis](tools/apk-analysis/SKILL.md) | Android reverse engineering | jadx, apktool, IDA Pro |
 | [analyze-with-ida-domain-api](tools/ida/SKILL.md) | Static binary analysis | IDA Pro Domain API (idalib, headless mode) |
 | [kernel-gef-debugging](tools/kernel-gef/SKILL.md) | Kernel debugging | GDB + GEF via MCP |
-| [libdebug-debugging](tools/libdebug/SKILL.md) | Dynamic binary analysis | libdebug (ptrace-based scriptable debugging) |
 
 ## External (ljagiello/ctf-skills)
 

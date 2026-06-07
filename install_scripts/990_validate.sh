@@ -93,7 +93,6 @@ check_py_import volatility3
 check_py_import scapy
 check_py_import pytsk3
 check_py_import oletools
-check_py_import libdebug
 
 if [ "$failures" -ne 0 ]; then
   warn "Environment validation failed with $failures missing requirement(s):"
