@@ -62,6 +62,7 @@ check_cmd uv uv --version
 check_cmd gdb gdb --version
 check_cmd rg rg --version
 check_cmd ctfgrep ctfgrep -h
+check_cmd rtk rtk --version
 check_cmd docker docker --version
 
 check_cmd claude claude --version

@@ -342,7 +342,9 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 }
 .modal textarea { resize: vertical; }
 
-.form-group-inline { display: flex; align-items: center; gap: 0.5rem; }
+.form-group-inline {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem;
+}
 .checkbox-label {
   display: flex; align-items: center; gap: 0.35rem;
   font-size: 0.8rem; font-weight: 600; color: var(--text);
@@ -351,7 +353,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .checkbox-label input[type="checkbox"] {
   width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer;
 }
-.checkbox-hint { font-size: 0.7rem; color: var(--text-dim); }
+.checkbox-hint { font-size: 0.7rem; color: var(--text-dim); line-height: 1.35; }
 .modal select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M3 5l3 3 3-3'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.6rem center; padding-right: 1.8rem; }
 
 /* Agent checkbox group for parallel mode */

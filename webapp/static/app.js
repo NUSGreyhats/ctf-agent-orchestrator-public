@@ -5986,6 +5986,7 @@ $("#btn-settings").addEventListener("click", async () => {
   renderSkillChecklist($("#settings-skill-list"), s.enabled_skills || defaultEnabledSkills);
   $("#settings-skill-upload").value = "";
   $("#settings-skill-upload-result").textContent = "";
+  $("#settings-hook-rtk").checked = new Set(s.enabled_hooks || []).has("rtk");
 
   // Discord
   $("#settings-discord-enabled").checked = !!s.discord_enabled;
@@ -6050,6 +6051,7 @@ $("#btn-settings-save").addEventListener("click", async () => {
     agent_models: models,
     agent_efforts: efforts,
     enabled_skills: getSelectedSkills($("#settings-skill-list")),
+    enabled_hooks: $("#settings-hook-rtk").checked ? ["rtk"] : [],
     default_agent: selectedAgents[0] || defaultAgent,
     discord_enabled: $("#settings-discord-enabled").checked,
     discord_bot_token: $("#settings-discord-token").value.trim(),

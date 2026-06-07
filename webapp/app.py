@@ -624,6 +624,7 @@ PROJECT_SKILL_DIRS = (
 SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MAX_SKILL_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_SKILL_UPLOAD_FILES = 300
+VALID_HOOKS = {"rtk"}
 _PREVIEW_TTL = 3600
 _bulk_previews: dict[str, dict] = {}
 _platform_import_progress: dict[str, dict] = {}
@@ -2086,6 +2087,22 @@ def normalize_enabled_skills(
     return normalized
 
 
+def normalize_enabled_hooks(value: object) -> list[str]:
+    requested = _coerce_skill_list(value) or []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for name in requested:
+        if name in VALID_HOOKS and name not in seen:
+            normalized.append(name)
+            seen.add(name)
+    return normalized
+
+
+def enabled_hooks(settings: dict | None = None) -> set[str]:
+    settings = settings or load_settings()
+    return set(normalize_enabled_hooks(settings.get("enabled_hooks")))
+
+
 def public_skill_catalog(settings: dict | None = None) -> dict:
     settings = settings or load_settings()
     skills = []
@@ -2304,6 +2321,7 @@ def load_settings() -> dict:
         "agent_models": {},
         "agent_efforts": {},
         "enabled_skills": None,
+        "enabled_hooks": [],
         "max_platform_import_size_gb": DEFAULT_MAX_PLATFORM_IMPORT_SIZE_GB,
         "discord_enabled": False,
         "discord_bot_token": "",
@@ -2329,6 +2347,9 @@ def load_settings() -> dict:
     defaults["enabled_skills"] = normalize_enabled_skills(
         defaults.get("enabled_skills"),
         default=default_enabled_skill_names(),
+    )
+    defaults["enabled_hooks"] = normalize_enabled_hooks(
+        defaults.get("enabled_hooks")
     )
     return defaults
 
@@ -6134,6 +6155,25 @@ def _remote_instance_context(instance_info: dict | None) -> str:
     return "\n".join(lines)
 
 
+def _enabled_hook_prompt_lines(settings: dict | None = None) -> list[str]:
+    hooks = enabled_hooks(settings)
+    lines: list[str] = []
+    if "rtk" in hooks:
+        lines.append(
+            "RTK is available: use `rtk <command>` only for noisy summaries; "
+            "use raw commands for exact bytes, offsets, payloads, hashes, and "
+            "exit status."
+        )
+    return lines
+
+
+def _append_enabled_hook_prompt_context(prompt: str) -> str:
+    lines = _enabled_hook_prompt_lines()
+    if not lines:
+        return prompt
+    return f"{prompt.rstrip()}\n\n" + "\n".join(lines)
+
+
 def _render_run_prompt_template(
     template: str,
     challenge: dict,
@@ -6185,6 +6225,7 @@ def _build_standard_prompt(
     ]
     if "ctf-methodology" in enabled_skill_set:
         parts.append("Follow ctf-methodology and solve the CTF challenge")
+    parts.extend(_enabled_hook_prompt_lines())
 
     parts.extend([
         "",
@@ -7176,7 +7217,7 @@ async def run_agent_task(
         return
 
     if continue_msg:
-        prompt = continue_msg
+        prompt = _append_enabled_hook_prompt_context(continue_msg)
         if instance_info:
             conn_parts = _instance_connection_parts(instance_info)
             if conn_parts:
@@ -8287,6 +8328,10 @@ async def update_settings(request: Request) -> JSONResponse:
         settings["enabled_skills"] = normalize_enabled_skills(
             body.get("enabled_skills"),
             default=[],
+        )
+    if "enabled_hooks" in body:
+        settings["enabled_hooks"] = normalize_enabled_hooks(
+            body.get("enabled_hooks")
         )
     if "max_platform_import_size_gb" in body:
         settings["max_platform_import_size_gb"] = normalize_platform_import_size_gb(

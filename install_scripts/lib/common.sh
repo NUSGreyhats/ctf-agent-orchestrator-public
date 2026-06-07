@@ -6,7 +6,7 @@ LOCK_ROOT="${CTF_AGENT_LOCK_ROOT:-/var/lock/ctf-agent-wrapper}"
 
 # Non-interactive provisioning shells do not read ~/.bashrc, so expose tools
 # installed outside the default system PATH to every setup/validation script.
-export PATH="$HOME/.local/bin:/opt/ida-pro-9.3:/opt/jadx-1.5.5/bin:$PATH"
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/opt/ida-pro-9.3:/opt/jadx-1.5.5/bin:$PATH"
 
 log() {
   printf '==> %s\n' "$*"

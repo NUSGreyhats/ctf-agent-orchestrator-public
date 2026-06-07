@@ -135,6 +135,7 @@ run_dependency_graph() {
   )
   local final=(
     014_install-hooks.sh
+    019_install-rtk.sh
     990_validate.sh
   )
 
