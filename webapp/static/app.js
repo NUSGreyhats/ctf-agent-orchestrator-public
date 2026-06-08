@@ -6121,19 +6121,12 @@ $("#btn-settings-vpn-toggle").addEventListener("click", async () => {
 });
 
 $("#btn-settings-vpn-configure").addEventListener("click", async () => {
-  const clientKey = $("#settings-vpn-key").value.trim();
   const clientNetworks = $("#settings-vpn-networks").value.trim();
   const dnsForward = $("#settings-vpn-dns").checked;
-
-  if (!clientKey) {
-    showToast("Public key required", "error");
-    return;
-  }
 
   const res = await api("/api/vpn/configure", {
     method: "POST",
     body: JSON.stringify({
-      client_public_key: clientKey,
       client_networks: clientNetworks,
       dns_forward: dnsForward,
     }),
@@ -6147,18 +6140,23 @@ $("#btn-settings-vpn-configure").addEventListener("click", async () => {
   const data = await res.json();
   $("#settings-vpn-config-text").textContent = data.client_config;
   $("#settings-vpn-client-config").classList.remove("hidden");
-  if (data.client_setup) {
-    $("#settings-vpn-setup-text").textContent = data.client_setup;
-    $("#settings-vpn-client-setup").classList.remove("hidden");
-  } else {
-    $("#settings-vpn-setup-text").textContent = "";
-    $("#settings-vpn-client-setup").classList.add("hidden");
-  }
 
   const vpnRes = await api("/api/vpn");
   if (vpnRes) updateSettingsVpnStatus(await vpnRes.json());
-  showToast("VPN configured and started", "success");
+  downloadTextFile("ctf-vpn.conf", data.client_config);
+  showToast("VPN configured and client config downloaded", "success");
 });
+
+function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
 
 $("#btn-settings-vpn-copy").addEventListener("click", () => {
   const text = $("#settings-vpn-config-text").textContent;
@@ -6169,13 +6167,9 @@ $("#btn-settings-vpn-copy").addEventListener("click", () => {
   });
 });
 
-$("#btn-settings-vpn-setup-copy").addEventListener("click", () => {
-  const text = $("#settings-vpn-setup-text").textContent;
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = $("#btn-settings-vpn-setup-copy");
-    btn.textContent = "Copied!";
-    setTimeout(() => { btn.textContent = "Copy"; }, 1200);
-  });
+$("#btn-settings-vpn-download").addEventListener("click", () => {
+  const text = $("#settings-vpn-config-text").textContent;
+  if (text) downloadTextFile("ctf-vpn.conf", text);
 });
 
 // (Manager sidebar tab removed — agents collaborate via WORKING_NOTES and BREAKTHROUGHS.md)

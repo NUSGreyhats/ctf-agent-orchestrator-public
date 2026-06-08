@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### WireGuard Client Config Generation
+
+The VPN settings flow now generates the client keypair on the server and
+downloads a ready-to-run Linux `wg-quick` config. Internal reverse-routing
+CIDRs are embedded directly as client `PostUp`/`PostDown` rules instead of
+being shown as a separate setup block.
+
 ### Install Scripts Rename
 
 Renamed the provisioning script directory from `environment/` to

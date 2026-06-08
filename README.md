@@ -101,7 +101,7 @@ Optional Discord bot for team coordination:
 - **Runtime data preservation** — Deploy sync preserves `/root/ctf-agent-wrapper/challenges` and `/root/ctf-agent-wrapper/state` on the VM.
 - **GDB MCP server** — Persistent GDB session for kernel/binary debugging, registered for Claude and Codex.
 - **IDA Pro skill** — Headless static analysis through the `analyze-with-ida-domain-api` skill, backed by IDA Pro's Python Domain API.
-- **WireGuard VPN** — Built-in VPN management for challenges that require network access to a CTF infrastructure. Configure, start/stop, generate client configs, and route Linux client-side internal CIDRs back to the server through a reverse WireGuard tunnel.
+- **WireGuard VPN** — Built-in VPN management for challenges that require network access to a CTF infrastructure. Generate ready-to-run Linux client configs, start/stop the server tunnel, and route Linux client-side internal CIDRs back to the server through a reverse WireGuard tunnel.
 - **uv-based Python installs** — Install scripts install most Python dependencies with `uv pip install --system` for faster provisioning while keeping `pip` available for vendor-local wheels.
 - **Parallel install setup** — `install_scripts/run.sh` runs independent tooling categories concurrently with package-manager locks; set `INSTALL_SCRIPTS_PARALLEL=0` for sequential setup.
 - **Provisioning validation** — `install_scripts/990_validate.sh` checks critical commands and Python imports at the end of setup.

@@ -218,13 +218,13 @@ Connections are persisted to `state/connections.json` and can be synced to fetch
 
 ## WireGuard VPN
 
-The webapp can configure a single `wg0` server interface from Settings. Environment setup installs WireGuard and generates the server keypair; the web UI writes `/etc/wireguard/wg0.conf` after the user provides a client public key and optional client-side internal CIDRs.
+The webapp can configure a single `wg0` server interface from Settings. Environment setup installs WireGuard and generates the server keypair; the web UI generates a client keypair, writes `/etc/wireguard/wg0.conf`, and downloads a ready-to-run Linux client config after the user provides optional client-side internal CIDRs.
 
 The reverse routing model is:
 
 - server peer `AllowedIPs` includes `10.13.37.2/32` and any internal CIDRs reachable from the client;
 - generated client `AllowedIPs` includes only `10.13.37.0/24`, so the client keeps its local routes for those internal CIDRs;
-- if internal CIDRs are configured, the UI emits a Linux-only `wg-quick` snippet using `sysctl` and `iptables` to forward/NAT traffic from the VPN subnet to those client-side networks.
+- if internal CIDRs are configured, the downloaded Linux client config includes `wg-quick` `PostUp`/`PostDown` rules using `sysctl` and `iptables` to forward/NAT traffic from the VPN subnet to those client-side networks.
 
 VPN status exposes peer endpoint, transfer counters, and latest handshake age. DNS forwarding, when enabled, runs `dnsmasq` on the server's WireGuard address and forwards to public resolvers.
 

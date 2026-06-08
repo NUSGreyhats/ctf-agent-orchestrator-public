@@ -9962,6 +9962,31 @@ def _validate_wg_public_key(public_key: str) -> bool:
         return False
 
 
+def _generate_wg_client_keypair() -> tuple[str, str]:
+    private_result = subprocess.run(
+        ["wg", "genkey"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if private_result.returncode != 0:
+        raise RuntimeError(private_result.stderr.strip() or "wg genkey failed")
+
+    private_key = private_result.stdout.strip()
+    public_result = subprocess.run(
+        ["wg", "pubkey"],
+        input=f"{private_key}\n",
+        capture_output=True, text=True, timeout=5,
+    )
+    if public_result.returncode != 0:
+        raise RuntimeError(public_result.stderr.strip() or "wg pubkey failed")
+
+    public_key = public_result.stdout.strip()
+    if not _validate_wg_public_key(private_key):
+        raise RuntimeError("generated invalid WireGuard private key")
+    if not _validate_wg_public_key(public_key):
+        raise RuntimeError("generated invalid WireGuard public key")
+    return private_key, public_key
+
+
 def _parse_vpn_networks(raw_networks: str) -> tuple[list[str], str | None]:
     """Parse client-side CIDRs the server should reverse-route through wg0."""
     raw_networks = raw_networks.strip()
@@ -10033,7 +10058,7 @@ AllowedIPs = {allowed_ips}
 
 
 def _build_wg_client_conf(
-    client_private_key_placeholder: str,
+    client_private_key: str,
     client_networks: list[str],
     dns_forward: bool,
 ) -> str:
@@ -10049,11 +10074,13 @@ def _build_wg_client_conf(
             "# Keep those CIDRs out of this peer's AllowedIPs; they must stay "
             "locally reachable from the client.\n"
         )
+    client_setup = _build_wg_client_setup(client_networks)
 
     conf = f"""[Interface]
 Address = {VPN_CLIENT_IP}/24
-PrivateKey = {client_private_key_placeholder}
+PrivateKey = {client_private_key}
 {dns_line}
+{client_setup}
 
 [Peer]
 PublicKey = {server_public_key}
@@ -10077,10 +10104,9 @@ def _build_wg_client_setup(client_networks: list[str]) -> str:
         for network in client_networks
     )
     return (
-        "# Linux clients only: this reverse-routing setup uses wg-quick, "
+        "# Linux clients only: reverse routing uses wg-quick, "
         "sysctl, and iptables.\n"
-        "# Add these lines to the Linux wg-quick client config if this client "
-        "routes the internal CIDR(s).\n"
+        "# These lines let this client route the internal CIDR(s).\n"
         "# They enable forwarding and NAT replies from the internal network "
         "back through the tunnel.\n"
         "PostUp = sysctl -w net.ipv4.ip_forward=1; "
@@ -10183,16 +10209,27 @@ async def vpn_configure(request: Request) -> JSONResponse:
     client_public_key = str_field(body.get("client_public_key", "")).strip()
     client_networks = str_field(body.get("client_networks", "")).strip()
     dns_forward = bool(body.get("dns_forward", True))
+    client_private_key = ""
+
+    if client_public_key:
+        if not _validate_wg_public_key(client_public_key):
+            return JSONResponse(
+                {"error": "Invalid WireGuard public key format"},
+                status_code=400,
+            )
+        client_private_key = "<YOUR_PRIVATE_KEY>"
+    else:
+        try:
+            client_private_key, client_public_key = _generate_wg_client_keypair()
+        except (FileNotFoundError, subprocess.TimeoutExpired, RuntimeError) as exc:
+            return JSONResponse(
+                {"error": f"Failed to generate client keypair: {exc}"},
+                status_code=500,
+            )
 
     if not client_public_key:
         return JSONResponse(
             {"error": "client_public_key required"}, status_code=400
-        )
-
-    if not _validate_wg_public_key(client_public_key):
-        return JSONResponse(
-            {"error": "Invalid WireGuard public key format"},
-            status_code=400,
         )
 
     client_networks, network_error = _parse_vpn_networks(client_networks)
@@ -10213,9 +10250,8 @@ async def vpn_configure(request: Request) -> JSONResponse:
 
     # Build client config
     client_conf = _build_wg_client_conf(
-        "<YOUR_PRIVATE_KEY>", client_networks, dns_forward
+        client_private_key, client_networks, dns_forward
     )
-    client_setup = _build_wg_client_setup(client_networks)
 
     # Bring up interface
     result = subprocess.run(
@@ -10236,7 +10272,7 @@ async def vpn_configure(request: Request) -> JSONResponse:
     return JSONResponse({
         "ok": True,
         "client_config": client_conf,
-        "client_setup": client_setup,
+        "client_setup": "",
         "client_networks": client_networks,
         "server_public_key": WG_SERVER_PUBLIC_KEY.read_text().strip(),
     })

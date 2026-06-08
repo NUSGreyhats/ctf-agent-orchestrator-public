@@ -248,10 +248,6 @@
             <div class="vpn-kv"><span class="vpn-k">Transfer</span> <span id="settings-vpn-peer-transfer"></span></div>
           </div>
           <div class="form-group">
-            <label for="settings-vpn-key">Your WireGuard Public Key</label>
-            <input type="text" id="settings-vpn-key" placeholder="Paste your public key (wg pubkey output)">
-          </div>
-          <div class="form-group">
             <label for="settings-vpn-networks">Internal Network CIDR(s)</label>
             <input type="text" id="settings-vpn-networks" placeholder="e.g. 10.0.0.0/24, 192.168.1.0/24">
             <span class="checkbox-hint">Networks reachable from this client that the server should route through the VPN tunnel</span>
@@ -262,16 +258,13 @@
               <span>DNS forwarding</span>
             </label>
           </div>
-          <button id="btn-settings-vpn-configure" class="btn-primary">Configure &amp; Start VPN</button>
+          <button id="btn-settings-vpn-configure" class="btn-primary">Generate Config &amp; Start VPN</button>
           <div id="settings-vpn-client-config" class="hidden">
-            <label>Client Config (copy to your WireGuard client)</label>
+            <label>Client Config</label>
+            <span class="checkbox-hint">Download this file and run it with <code>sudo wg-quick up ./ctf-vpn.conf</code> on a Linux client.</span>
             <pre id="settings-vpn-config-text" class="vpn-config-block"></pre>
             <button id="btn-settings-vpn-copy" class="btn-ghost btn-sm">Copy</button>
-          </div>
-          <div id="settings-vpn-client-setup" class="hidden">
-            <label>Linux-only reverse-routing setup</label>
-            <pre id="settings-vpn-setup-text" class="vpn-config-block"></pre>
-            <button id="btn-settings-vpn-setup-copy" class="btn-ghost btn-sm">Copy</button>
+            <button id="btn-settings-vpn-download" class="btn-ghost btn-sm">Download</button>
           </div>
         </div>
       </div>

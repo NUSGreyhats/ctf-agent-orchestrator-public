@@ -1,7 +1,7 @@
 #!/bin/bash
 # Installs WireGuard and generates server keypair.
 # Does NOT create a wg0 config — that's done via the web UI when the user
-# provides their client public key and internal network CIDR.
+# requests a generated client config and optional internal network CIDRs.
 
 set -euo pipefail
 set -x
