@@ -11873,6 +11873,15 @@ async def lifespan(app):
 
 ADVISOR_RUN_ID = "advisor"
 ADVISOR_MAX_MESSAGES = 400
+# The advisor defaults to Claude Sonnet 4.6 (fast/cheap for read+research),
+# independent of the solver default. Other providers use their own default.
+ADVISOR_DEFAULT_MODEL = "claude-sonnet-4-6"
+
+
+def _advisor_default_model(agent: str) -> str:
+    if agent == "claude":
+        return ADVISOR_DEFAULT_MODEL
+    return resolved_default_model(agent)
 
 # Ephemeral in-memory advisor sessions (NOT persisted): challenge_id -> session.
 advisor_sessions: dict[str, dict] = {}
@@ -12102,7 +12111,7 @@ async def advisor_get(request: Request) -> JSONResponse:
     if not s:
         return JSONResponse({
             "config": {"agent": DEFAULT_AGENT,
-                       "model": resolved_default_model(DEFAULT_AGENT),
+                       "model": _advisor_default_model(DEFAULT_AGENT),
                        "effort": ""},
             "messages": [], "status": "idle", "started": False,
             "agents": [_provider_choice(p) for p in PROVIDERS.values()],
@@ -12147,7 +12156,7 @@ async def advisor_send(request: Request) -> JSONResponse:
             return JSONResponse({"error": f"invalid agent: {agent}"},
                                 status_code=400)
         s["agent"] = agent
-        s["model"] = str_field(body.get("model", "")) or resolved_default_model(agent)
+        s["model"] = str_field(body.get("model", "")) or _advisor_default_model(agent)
         s["effort"] = str_field(body.get("effort", ""))
     asyncio.create_task(run_advisor_turn(cid, message))
     return JSONResponse({"ok": True})
