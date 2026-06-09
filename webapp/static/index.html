@@ -268,6 +268,94 @@
           </div>
         </div>
       </div>
+
+      <!-- Swarm (remote GCP execution) -->
+      <div class="settings-section">
+        <h2 class="settings-section-title">Swarm (GCP)</h2>
+        <p class="text-muted">Dispatch challenges to dedicated GCP worker VMs so heavy agent compute does not interfere with this host. See <code>SWARM.md</code>.</p>
+
+        <div class="form-group">
+          <label for="settings-swarm-sa">Service Account Key (JSON)</label>
+          <textarea id="settings-swarm-sa" rows="4" placeholder='Paste the service-account JSON (Compute Admin). Leave blank to keep the existing key.'></textarea>
+          <span class="checkbox-hint" id="settings-swarm-sa-status">No key configured.</span>
+        </div>
+        <div class="form-group form-row">
+          <div>
+            <label for="settings-swarm-project">Project ID</label>
+            <input type="text" id="settings-swarm-project" placeholder="from key if blank">
+          </div>
+          <div>
+            <label for="settings-swarm-zone">Zone</label>
+            <input type="text" id="settings-swarm-zone" placeholder="e.g. asia-southeast1-c">
+          </div>
+        </div>
+        <div class="form-group form-row">
+          <div>
+            <label for="settings-swarm-machine">Default machine type</label>
+            <input type="text" id="settings-swarm-machine" placeholder="e2-standard-4 or custom">
+          </div>
+          <div>
+            <label for="settings-swarm-disk">Disk (GB)</label>
+            <input type="number" id="settings-swarm-disk" min="10" placeholder="100">
+          </div>
+        </div>
+        <div class="form-group form-row">
+          <div>
+            <label for="settings-swarm-idle">Idle auto-stop (min, 0 = off)</label>
+            <input type="number" id="settings-swarm-idle" min="0" placeholder="30">
+          </div>
+          <div class="form-group-inline" style="align-self:end">
+            <label class="checkbox-label">
+              <input type="checkbox" id="settings-swarm-vpn">
+              <span>Route VPN to workers</span>
+            </label>
+          </div>
+        </div>
+        <div class="settings-actions">
+          <button id="btn-swarm-save" class="btn-primary">Save GCP Config</button>
+          <button id="btn-swarm-test" class="btn-ghost btn-sm">Test Connection</button>
+          <span id="swarm-test-result" class="text-muted" style="margin-left:0.5rem"></span>
+        </div>
+
+        <div class="swarm-image-row">
+          <h3 class="settings-subtitle">Golden Image</h3>
+          <span id="swarm-image-status" class="text-muted">No image built yet.</span>
+          <button id="btn-swarm-build-image" class="btn-ghost btn-sm">Build / Rebuild Image</button>
+          <span class="checkbox-hint">Provisions one base VM with the install scripts and snapshots it. Takes ~10–15 min.</span>
+        </div>
+
+        <div class="swarm-spinup-row">
+          <h3 class="settings-subtitle">Spin Up Workers</h3>
+          <div class="form-group form-row">
+            <div>
+              <label for="settings-swarm-count">Count</label>
+              <input type="number" id="settings-swarm-count" min="1" max="20" value="1">
+            </div>
+            <div>
+              <label for="settings-swarm-spinup-machine">Machine type (blank = default)</label>
+              <input type="text" id="settings-swarm-spinup-machine" placeholder="e2-standard-4">
+            </div>
+          </div>
+          <button id="btn-swarm-spinup" class="btn-primary">Spin Up</button>
+          <button id="btn-swarm-refresh" class="btn-ghost btn-sm">Refresh</button>
+        </div>
+
+        <div class="swarm-instances">
+          <h3 class="settings-subtitle">Instances</h3>
+          <table id="swarm-instance-table" class="swarm-table">
+            <thead>
+              <tr><th>Name</th><th>Status</th><th>IP</th><th>Type</th><th>Challenge</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="swarm-instance-rows"></tbody>
+          </table>
+          <p id="swarm-no-instances" class="text-muted">No instances.</p>
+        </div>
+
+        <div class="swarm-log-wrap">
+          <h3 class="settings-subtitle">Activity</h3>
+          <pre id="swarm-log" class="swarm-log"></pre>
+        </div>
+      </div>
     </div>
   </div>
 

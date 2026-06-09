@@ -2328,6 +2328,7 @@ def load_settings() -> dict:
         "discord_channel_id": "",
         "discord_guild_id": "",
         "discord_challenge_layout": DEFAULT_DISCORD_CHALLENGE_LAYOUT,
+        "swarm": {},
     }
     if SETTINGS_FILE.exists():
         try:
@@ -2673,6 +2674,20 @@ def _discord_resume_prompt_message(run: dict, prompt: str) -> str:
 def save_settings(settings: dict) -> None:
     """Persist global settings to disk."""
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+    try:
+        os.chmod(SETTINGS_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def settings_for_client(settings: dict) -> dict:
+    """Return settings safe to send to the browser (GCP key redacted)."""
+    out = dict(settings)
+    swarm = dict(out.get("swarm") or {})
+    sa = swarm.pop("service_account", None)
+    swarm["service_account_configured"] = bool(sa)
+    out["swarm"] = swarm
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -8092,7 +8107,7 @@ async def agent_auth_ws(websocket: WebSocket):
 async def get_settings(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
-    return JSONResponse(load_settings())
+    return JSONResponse(settings_for_client(load_settings()))
 
 
 async def get_skills(request: Request) -> JSONResponse:
@@ -8215,6 +8230,315 @@ async def discord_channels(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)})
     finally:
         await bot.close()
+
+
+# ---------------------------------------------------------------------------
+# Swarm (remote GCP execution) — management endpoints
+# ---------------------------------------------------------------------------
+
+# Names of swarm operations currently running, to prevent overlap.
+_swarm_busy: set[str] = set()
+
+
+def _swarm_module():
+    try:
+        from . import swarm as swarm_mod
+    except ImportError:
+        import swarm as swarm_mod
+    return swarm_mod
+
+
+def _swarm_gcp_error():
+    try:
+        from .gcp import GCPError
+    except ImportError:
+        from gcp import GCPError
+    return GCPError
+
+
+def _swarm_log(kind: str):
+    """Return an async log fn that broadcasts swarm progress over the global WS."""
+    async def _log(message: str) -> None:
+        await broadcast_global({
+            "type": "swarm_event", "kind": kind, "level": "info",
+            "message": message,
+        })
+    return _log
+
+
+async def _swarm_broadcast(kind: str, message: str, level: str = "info", **extra):
+    await broadcast_global({
+        "type": "swarm_event", "kind": kind, "level": level,
+        "message": message, **extra,
+    })
+
+
+def _swarm_config_view(settings: dict) -> dict:
+    swarm_mod = _swarm_module()
+    cfg = swarm_mod.swarm_config(settings)
+    return {
+        "service_account_configured": bool(cfg.get("service_account")),
+        "project": cfg.get("project", ""),
+        "zone": cfg.get("zone", ""),
+        "default_machine_type": cfg.get("default_machine_type", "e2-standard-4"),
+        "default_disk_size_gb": cfg.get("default_disk_size_gb", 100),
+        "default_disk_type": cfg.get("default_disk_type", "pd-ssd"),
+        "network": cfg.get("network", "default"),
+        "subnetwork": cfg.get("subnetwork", "default"),
+        "idle_stop_minutes": cfg.get("idle_stop_minutes", 30),
+        "vpn_route": bool(cfg.get("vpn_route", False)),
+    }
+
+
+async def swarm_status(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    reg = swarm_mod.load_registry()
+    return JSONResponse({
+        "configured": swarm_mod.is_configured(settings),
+        "config": _swarm_config_view(settings),
+        "image": reg.get("image", {}),
+        "instances": list(reg.get("instances", {}).values()),
+        "busy": sorted(_swarm_busy),
+    })
+
+
+async def swarm_save_config(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    settings = load_settings()
+    swarm = dict(settings.get("swarm") or {})
+
+    # Service account is only replaced when a non-empty value is sent.
+    sa_raw = body.get("service_account")
+    if isinstance(sa_raw, str) and sa_raw.strip():
+        try:
+            sa = json.loads(sa_raw)
+        except json.JSONDecodeError:
+            return JSONResponse(
+                {"error": "Service account key is not valid JSON"}, status_code=400)
+        if not isinstance(sa, dict) or "private_key" not in sa or (
+            "client_email" not in sa
+        ):
+            return JSONResponse(
+                {"error": "Service account JSON is missing required fields"},
+                status_code=400)
+        swarm["service_account"] = sa
+        if not swarm.get("project") and sa.get("project_id"):
+            swarm["project"] = sa["project_id"]
+    elif isinstance(sa_raw, dict) and sa_raw:
+        swarm["service_account"] = sa_raw
+
+    if "project" in body:
+        swarm["project"] = str_field(body["project"]).strip()
+    if "zone" in body:
+        swarm["zone"] = str_field(body["zone"]).strip()
+    if "default_machine_type" in body:
+        swarm["default_machine_type"] = str_field(body["default_machine_type"]).strip()
+    if "default_disk_size_gb" in body:
+        try:
+            swarm["default_disk_size_gb"] = max(10, int(body["default_disk_size_gb"]))
+        except (TypeError, ValueError):
+            pass
+    if "default_disk_type" in body:
+        swarm["default_disk_type"] = str_field(body["default_disk_type"]).strip()
+    if "network" in body:
+        swarm["network"] = str_field(body["network"]).strip() or "default"
+    if "subnetwork" in body:
+        swarm["subnetwork"] = str_field(body["subnetwork"]).strip() or "default"
+    if "idle_stop_minutes" in body:
+        try:
+            swarm["idle_stop_minutes"] = max(0, int(body["idle_stop_minutes"]))
+        except (TypeError, ValueError):
+            pass
+    if "vpn_route" in body:
+        swarm["vpn_route"] = bool(body["vpn_route"])
+
+    settings["swarm"] = swarm
+    save_settings(settings)
+    return JSONResponse({"ok": True, "config": _swarm_config_view(settings)})
+
+
+async def swarm_test(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    GCPError = _swarm_gcp_error()
+    if not swarm_mod.is_configured(settings):
+        return JSONResponse(
+            {"error": "Set the service account and zone first"}, status_code=400)
+    try:
+        client = swarm_mod.make_client(settings)
+        info = await client.test_connection()
+        return JSONResponse({"ok": True, "info": info})
+    except GCPError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": f"unexpected: {exc}"}, status_code=400)
+
+
+async def swarm_build_image(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    if not swarm_mod.is_configured(settings):
+        return JSONResponse({"error": "Configure GCP first"}, status_code=400)
+    if "image" in _swarm_busy:
+        return JSONResponse({"error": "Image build already running"}, status_code=409)
+    cfg = swarm_mod.swarm_config(settings)
+
+    async def _run() -> None:
+        _swarm_busy.add("image")
+        try:
+            await swarm_mod.build_golden_image(
+                settings, repo_root=APP_ROOT_DIR,
+                machine_type=cfg.get("default_machine_type", "e2-standard-4"),
+                disk_size_gb=int(cfg.get("default_disk_size_gb", 100)),
+                disk_type=cfg.get("default_disk_type", "pd-ssd"),
+                network=cfg.get("network", "default"),
+                subnetwork=cfg.get("subnetwork", "default"),
+                log=_swarm_log("image"),
+            )
+            await _swarm_broadcast("image", "Golden image build complete", "success")
+        except Exception as exc:  # noqa: BLE001
+            await _swarm_broadcast("image", f"Image build failed: {exc}", "error")
+        finally:
+            _swarm_busy.discard("image")
+
+    asyncio.create_task(_run())
+    return JSONResponse({"ok": True, "started": True})
+
+
+async def swarm_create_instances(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    if not swarm_mod.is_configured(settings):
+        return JSONResponse({"error": "Configure GCP first"}, status_code=400)
+    cfg = swarm_mod.swarm_config(settings)
+    try:
+        count = max(1, min(20, int(body.get("count", 1))))
+    except (TypeError, ValueError):
+        count = 1
+    machine_type = str_field(body.get("machine_type", "")) or cfg.get(
+        "default_machine_type", "e2-standard-4")
+    try:
+        cpus = int(body.get("cpus", 0) or 0)
+        mem_mb = int(body.get("mem_mb", 0) or 0)
+    except (TypeError, ValueError):
+        cpus, mem_mb = 0, 0
+    try:
+        disk_size_gb = int(body.get("disk_size_gb", 0) or cfg.get(
+            "default_disk_size_gb", 100))
+    except (TypeError, ValueError):
+        disk_size_gb = int(cfg.get("default_disk_size_gb", 100))
+
+    async def _run() -> None:
+        _swarm_busy.add("create")
+        try:
+            for _ in range(count):
+                name = f"ctf-swarm-{secrets.token_hex(3)}"
+                await _swarm_broadcast("create", f"Creating {name}…")
+                try:
+                    await swarm_mod.create_worker(
+                        settings, name, machine_type=machine_type, cpus=cpus,
+                        mem_mb=mem_mb, disk_size_gb=disk_size_gb,
+                        disk_type=cfg.get("default_disk_type", "pd-ssd"),
+                        network=cfg.get("network", "default"),
+                        subnetwork=cfg.get("subnetwork", "default"),
+                    )
+                    await _swarm_broadcast("create", f"{name} is up", "success")
+                except Exception as exc:  # noqa: BLE001
+                    await _swarm_broadcast(
+                        "create", f"{name} failed: {exc}", "error")
+        finally:
+            _swarm_busy.discard("create")
+            await _swarm_broadcast("create", "done", "info", refresh=True)
+
+    asyncio.create_task(_run())
+    return JSONResponse({"ok": True, "started": True, "count": count})
+
+
+async def swarm_instance_action(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    name = request.path_params["name"]
+    action = request.path_params["action"]
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    GCPError = _swarm_gcp_error()
+    try:
+        if action == "start":
+            rec = await swarm_mod.start_worker(settings, name)
+        elif action == "stop":
+            rec = await swarm_mod.stop_worker(settings, name)
+        elif action == "sync-credentials":
+            reg = swarm_mod.load_registry()
+            inst = reg.get("instances", {}).get(name, {})
+            ip = inst.get("external_ip", "")
+            if not ip:
+                return JSONResponse(
+                    {"error": "instance has no external IP (is it running?)"},
+                    status_code=400)
+            synced = await swarm_mod.sync_agent_credentials(ip)
+            return JSONResponse({"ok": True, "synced": synced})
+        else:
+            return JSONResponse({"error": "unknown action"}, status_code=400)
+        return JSONResponse({"ok": True, "instance": rec})
+    except GCPError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def swarm_delete_instance(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    name = request.path_params["name"]
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    GCPError = _swarm_gcp_error()
+    try:
+        await swarm_mod.delete_worker(settings, name)
+        return JSONResponse({"ok": True})
+    except GCPError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def swarm_refresh(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    GCPError = _swarm_gcp_error()
+    try:
+        instances = await swarm_mod.refresh_workers(settings)
+        return JSONResponse({"ok": True, "instances": instances})
+    except GCPError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 def _static_provider_metadata(provider) -> dict:
@@ -8352,7 +8676,7 @@ async def update_settings(request: Request) -> JSONResponse:
     save_settings(settings)
     if discord_changed:
         asyncio.create_task(_reconcile_discord_gateway())
-    return JSONResponse(settings)
+    return JSONResponse(settings_for_client(settings))
 
 
 def get_agent_challenge_stats() -> dict:
@@ -11901,6 +12225,15 @@ routes = [
     Route("/api/connections/poll", poll_connections, methods=["GET"]),
     Route("/api/settings", get_settings, methods=["GET"]),
     Route("/api/settings", update_settings, methods=["PUT"]),
+    Route("/api/swarm", swarm_status, methods=["GET"]),
+    Route("/api/swarm/config", swarm_save_config, methods=["POST"]),
+    Route("/api/swarm/test", swarm_test, methods=["POST"]),
+    Route("/api/swarm/refresh", swarm_refresh, methods=["POST"]),
+    Route("/api/swarm/image/build", swarm_build_image, methods=["POST"]),
+    Route("/api/swarm/instances", swarm_create_instances, methods=["POST"]),
+    Route("/api/swarm/instances/{name}/{action}", swarm_instance_action,
+          methods=["POST"]),
+    Route("/api/swarm/instances/{name}", swarm_delete_instance, methods=["DELETE"]),
     Route("/api/skills", get_skills, methods=["GET"]),
     Route("/api/skills/upload", upload_skill, methods=["POST"]),
     Route("/api/discord/test", discord_test, methods=["POST"]),

@@ -1933,6 +1933,9 @@ function connectGlobalWS() {
     if (event.type === "challenge_status" && event.challenge_id) {
       updateDashboardChallengeStatus(event.challenge_id, event.status);
     }
+    if (event.type === "swarm_event") {
+      handleSwarmEvent(event);
+    }
   };
   globalWs.onclose = () => {
     globalWs = null;
@@ -6035,12 +6038,168 @@ $("#btn-settings").addEventListener("click", async () => {
     }
   }
 
+  loadSwarm();
+
   showView("settings");
 });
 
 $("#btn-settings-back").addEventListener("click", () => {
   showView("dashboard");
   loadChallenges();
+});
+
+// === Swarm (GCP) ===
+let swarmConfigCache = {};
+
+function swarmLog(message, level) {
+  const el = $("#swarm-log");
+  if (!el) return;
+  const ts = new Date().toLocaleTimeString();
+  const prefix = level === "error" ? "✗" : level === "success" ? "✓" : "·";
+  el.textContent += `[${ts}] ${prefix} ${message}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function handleSwarmEvent(event) {
+  swarmLog(event.message || "", event.level);
+  if (event.refresh) loadSwarm();
+}
+
+function renderSwarmConfig(cfg) {
+  swarmConfigCache = cfg || {};
+  $("#settings-swarm-project").value = cfg.project || "";
+  $("#settings-swarm-zone").value = cfg.zone || "";
+  $("#settings-swarm-machine").value = cfg.default_machine_type || "e2-standard-4";
+  $("#settings-swarm-disk").value = cfg.default_disk_size_gb || 100;
+  $("#settings-swarm-idle").value = cfg.idle_stop_minutes ?? 30;
+  $("#settings-swarm-vpn").checked = !!cfg.vpn_route;
+  $("#settings-swarm-sa-status").textContent = cfg.service_account_configured
+    ? "Key configured. Leave blank to keep it."
+    : "No key configured.";
+}
+
+function renderSwarmInstances(instances, image) {
+  const imgEl = $("#swarm-image-status");
+  if (imgEl) {
+    imgEl.textContent = image && image.name
+      ? `Image: ${image.name} (built ${image.built_at ? new Date(image.built_at * 1000).toLocaleString() : "?"})`
+      : "No image built yet.";
+  }
+  const rows = $("#swarm-instance-rows");
+  const empty = $("#swarm-no-instances");
+  if (!rows) return;
+  if (!instances || !instances.length) {
+    rows.innerHTML = "";
+    if (empty) empty.classList.remove("hidden");
+    return;
+  }
+  if (empty) empty.classList.add("hidden");
+  rows.innerHTML = instances.map((inst) => {
+    const running = inst.status === "running";
+    const startStop = running
+      ? `<button class="btn-ghost btn-sm swarm-act" data-act="stop" data-name="${esc(inst.name)}">Stop</button>`
+      : `<button class="btn-ghost btn-sm swarm-act" data-act="start" data-name="${esc(inst.name)}">Start</button>`;
+    return `<tr>
+      <td>${esc(inst.name)}</td>
+      <td><span class="badge badge-${running ? "solving" : "pending"}">${esc(inst.status || "?")}</span></td>
+      <td>${esc(inst.external_ip || "—")}</td>
+      <td>${esc(inst.machine_type || "?")}</td>
+      <td>${esc(inst.challenge_id || "—")}</td>
+      <td class="swarm-actions">
+        ${startStop}
+        <button class="btn-ghost btn-sm swarm-act" data-act="sync-credentials" data-name="${esc(inst.name)}">Sync creds</button>
+        <button class="btn-ghost btn-sm swarm-act" data-act="delete" data-name="${esc(inst.name)}">Delete</button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+async function loadSwarm() {
+  const res = await api("/api/swarm");
+  if (!res || !res.ok) return;
+  const data = await res.json();
+  renderSwarmConfig(data.config || {});
+  renderSwarmInstances(data.instances || [], data.image || {});
+}
+
+$("#btn-swarm-save").addEventListener("click", async () => {
+  const body = {
+    service_account: $("#settings-swarm-sa").value.trim(),
+    project: $("#settings-swarm-project").value.trim(),
+    zone: $("#settings-swarm-zone").value.trim(),
+    default_machine_type: $("#settings-swarm-machine").value.trim(),
+    default_disk_size_gb: parseInt($("#settings-swarm-disk").value, 10) || 100,
+    idle_stop_minutes: parseInt($("#settings-swarm-idle").value, 10) || 0,
+    vpn_route: $("#settings-swarm-vpn").checked,
+  };
+  const res = await api("/api/swarm/config", { method: "POST", body: JSON.stringify(body) });
+  if (!res) return;
+  const data = await res.json();
+  if (!res.ok) { showToast(data.error || "Save failed", "error"); return; }
+  $("#settings-swarm-sa").value = "";
+  renderSwarmConfig(data.config || {});
+  showToast("Swarm config saved", "success");
+});
+
+$("#btn-swarm-test").addEventListener("click", async () => {
+  const out = $("#swarm-test-result");
+  out.textContent = "Testing…";
+  const res = await api("/api/swarm/test", { method: "POST" });
+  const data = res ? await res.json() : null;
+  if (res && res.ok && data.ok) {
+    out.textContent = `OK — project ${data.info?.project || "?"}, zone ${data.info?.zone || "?"}`;
+  } else {
+    out.textContent = (data && data.error) || "Connection failed";
+  }
+});
+
+$("#btn-swarm-build-image").addEventListener("click", async () => {
+  if (!confirm("Build/rebuild the golden image? This provisions a base VM and takes ~10–15 min.")) return;
+  const res = await api("/api/swarm/image/build", { method: "POST" });
+  const data = res ? await res.json() : null;
+  if (res && res.ok) swarmLog("Image build started…");
+  else showToast((data && data.error) || "Build failed to start", "error");
+});
+
+$("#btn-swarm-spinup").addEventListener("click", async () => {
+  const body = {
+    count: parseInt($("#settings-swarm-count").value, 10) || 1,
+    machine_type: $("#settings-swarm-spinup-machine").value.trim(),
+  };
+  const res = await api("/api/swarm/instances", { method: "POST", body: JSON.stringify(body) });
+  const data = res ? await res.json() : null;
+  if (res && res.ok) swarmLog(`Spinning up ${data.count} worker(s)…`);
+  else showToast((data && data.error) || "Spin up failed", "error");
+});
+
+$("#btn-swarm-refresh").addEventListener("click", async () => {
+  const res = await api("/api/swarm/refresh", { method: "POST" });
+  if (res && res.ok) loadSwarm();
+});
+
+$("#swarm-instance-rows").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".swarm-act");
+  if (!btn) return;
+  const name = btn.dataset.name;
+  const act = btn.dataset.act;
+  if (act === "delete") {
+    if (!confirm(`Delete instance ${name}? Its workspace is destroyed (logs stay here).`)) return;
+    const res = await api(`/api/swarm/instances/${encodeURIComponent(name)}`, { method: "DELETE" });
+    const data = res ? await res.json() : null;
+    if (res && res.ok) { swarmLog(`Deleted ${name}`, "success"); loadSwarm(); }
+    else showToast((data && data.error) || "Delete failed", "error");
+    return;
+  }
+  btn.disabled = true;
+  const res = await api(`/api/swarm/instances/${encodeURIComponent(name)}/${act}`, { method: "POST" });
+  const data = res ? await res.json() : null;
+  btn.disabled = false;
+  if (res && res.ok) {
+    swarmLog(`${act} ${name}${data.synced ? `: ${data.synced.join(", ") || "no creds"}` : ""}`, "success");
+    loadSwarm();
+  } else {
+    showToast((data && data.error) || `${act} failed`, "error");
+  }
 });
 
 $("#btn-settings-skill-upload").addEventListener("click", uploadSettingsSkill);

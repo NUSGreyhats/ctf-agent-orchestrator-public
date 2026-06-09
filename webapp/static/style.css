@@ -1833,3 +1833,15 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   font-family: var(--mono); white-space: pre-wrap; word-break: break-all;
   max-height: 200px; overflow-y: auto; margin: 0.5rem 0;
 }
+
+/* Swarm (GCP) settings */
+.settings-subtitle { font-size: 0.8rem; font-weight: 600; margin: 0.8rem 0 0.4rem; color: var(--text-muted); }
+.settings-actions { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
+.swarm-image-row, .swarm-spinup-row, .swarm-instances, .swarm-log-wrap { margin-top: 1rem; }
+.swarm-image-row .checkbox-hint { display: block; margin-top: 0.25rem; }
+.swarm-table { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+.swarm-table th, .swarm-table td { text-align: left; padding: 0.35rem 0.4rem; border-bottom: 1px solid var(--border); }
+.swarm-table th { color: var(--text-dim); font-weight: 600; }
+.swarm-actions { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.swarm-log { background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem; max-height: 200px; overflow-y: auto; font-family: var(--mono); font-size: 0.7rem; white-space: pre-wrap; color: var(--text-muted); }
+#settings-swarm-sa { width: 100%; font-family: var(--mono); font-size: 0.7rem; }
