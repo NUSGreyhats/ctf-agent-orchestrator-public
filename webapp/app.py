@@ -10761,7 +10761,18 @@ def _discord_select_run(
     return run_id, run, ""
 
 
-async def _discord_stop_runs(challenge_id: str, challenge: dict) -> str:
+def _discord_actor(interaction: dict) -> tuple[str, str]:
+    """Return (display_name, user_id) for the Discord user who issued an interaction."""
+    member_user = interaction.get("member", {}).get("user", {}) or {}
+    top_user = interaction.get("user", {}) or {}
+    author_user = member_user or top_user
+    name = author_user.get("username") or "Discord"
+    return name, str(author_user.get("id", ""))
+
+
+async def _discord_stop_runs(
+    challenge_id: str, challenge: dict, actor: str = ""
+) -> str:
     stopped_ids = []
     for run_id, run in challenge["runs"].items():
         if run["status"] != "solving":
@@ -10770,7 +10781,11 @@ async def _discord_stop_runs(challenge_id: str, challenge: dict) -> str:
         run["error"] = None
         stop_event = {
             "type": "system",
-            "message": "Agent stopped from Discord.",
+            "message": (
+                f"Agent stopped from Discord by {actor}."
+                if actor
+                else "Agent stopped from Discord."
+            ),
         }
         await _append_run_event(challenge_id, run_id, run, stop_event)
         await stop_run(run, "discord_stop")
@@ -10795,13 +10810,15 @@ async def _discord_stop_runs(challenge_id: str, challenge: dict) -> str:
         "type": "challenge_status",
         "status": challenge["status"],
     })
-    return f"Stopped {len(stopped_ids)} agent(s)"
+    n = len(stopped_ids)
+    return f"{actor} stopped {n} agent(s)" if actor else f"Stopped {n} agent(s)"
 
 
 async def _discord_resume_runs(
     challenge_id: str,
     challenge: dict,
     continue_msg: str = "Resume from Discord",
+    actor: str = "",
 ) -> str:
     resumed = []
     for run_id, run in challenge["runs"].items():
@@ -10832,7 +10849,8 @@ async def _discord_resume_runs(
         "type": "challenge_status",
         "status": challenge["status"],
     })
-    return f"Resumed {len(resumed)} agent(s)"
+    n = len(resumed)
+    return f"{actor} resumed {n} agent(s)" if actor else f"Resumed {n} agent(s)"
 
 
 def _discord_help_message() -> str:
@@ -10968,7 +10986,7 @@ async def _discord_submit_flag_from_interaction(
             )
             await bot.followup_interaction(
                 interaction_token,
-                f"Incorrect: {result.message}",
+                f"{author} submitted `{submit_flag}` — Incorrect: {result.message}",
             )
     except Exception as exc:
         await bot.followup_interaction(interaction_token, f"Submit error: {exc}")
@@ -11012,10 +11030,7 @@ async def _handle_discord_flag_review(
 
     interaction_id = interaction["id"]
     interaction_token = interaction["token"]
-    member_user = interaction.get("member", {}).get("user", {}) or {}
-    top_user = interaction.get("user", {}) or {}
-    author_user = member_user or top_user
-    author = author_user.get("username", "Discord")
+    author, _author_id = _discord_actor(interaction)
     flag = _discord_detected_flag_from_token(challenge, token)
     if not flag:
         await bot.respond_to_interaction(
@@ -11051,7 +11066,7 @@ async def _handle_discord_flag_review(
         await bot.respond_to_interaction(
             interaction_id,
             interaction_token,
-            f"Rejected flag candidate: `{stored_flag}`",
+            f"{author} rejected flag candidate: `{stored_flag}`",
         )
         return
 
@@ -11095,7 +11110,7 @@ async def _handle_discord_flag_review(
         await bot.respond_to_interaction(
             interaction_id,
             interaction_token,
-            f"Broadcast flag candidate to {len(q)} active agent(s): `{flag}`",
+            f"{author} broadcast flag candidate to {len(q)} active agent(s): `{flag}`",
         )
 
 
@@ -11105,6 +11120,7 @@ async def _handle_discord_component_interaction(interaction: dict) -> None:
         return
     interaction_id = interaction["id"]
     interaction_token = interaction["token"]
+    author, _author_id = _discord_actor(interaction)
     custom_id = (interaction.get("data") or {}).get("custom_id", "")
     challenge_id, action, token = _discord_parse_component_id(custom_id)
     challenge = challenges.get(challenge_id)
@@ -11194,13 +11210,13 @@ async def _handle_discord_component_interaction(interaction: dict) -> None:
         await bot.defer_interaction(interaction_id, interaction_token)
         await bot.followup_interaction(
             interaction_token,
-            await _discord_stop_runs(challenge_id, challenge),
+            await _discord_stop_runs(challenge_id, challenge, actor=author),
         )
     elif action == "resume":
         await bot.defer_interaction(interaction_id, interaction_token)
         await bot.followup_interaction(
             interaction_token,
-            await _discord_resume_runs(challenge_id, challenge),
+            await _discord_resume_runs(challenge_id, challenge, actor=author),
         )
 
 
@@ -11213,10 +11229,7 @@ async def _handle_discord_modal_submit(interaction: dict) -> None:
     challenge = challenges.get(challenge_id)
     interaction_id = interaction["id"]
     interaction_token = interaction["token"]
-    member_user = interaction.get("member", {}).get("user", {}) or {}
-    top_user = interaction.get("user", {}) or {}
-    author_user = member_user or top_user
-    author = author_user.get("username", "Discord")
+    author, _author_id = _discord_actor(interaction)
     if not challenge:
         await bot.respond_to_interaction(
             interaction_id,
@@ -11275,11 +11288,7 @@ async def _handle_discord_interaction(interaction: dict) -> None:
     subcommand, options = _discord_option_map(data.get("options", []))
     interaction_id = interaction["id"]
     interaction_token = interaction["token"]
-    member_user = interaction.get("member", {}).get("user", {}) or {}
-    top_user = interaction.get("user", {}) or {}
-    author_user = member_user or top_user
-    author = author_user.get("username", "Discord")
-    author_id = str(author_user.get("id", ""))
+    author, author_id = _discord_actor(interaction)
 
     bot = get_bot(load_settings())
     if not bot:
@@ -11468,7 +11477,7 @@ async def _handle_discord_interaction(interaction: dict) -> None:
             await queue.put(f"[{author} via Discord]: {message}")
         await bot.respond_to_interaction(
             interaction_id, interaction_token,
-            f"Broadcast sent to {len(q)} agent(s): {message}")
+            f"{author} broadcast to {len(q)} agent(s): {message}")
 
     elif cmd == "steer":
         selector = str(options.get("agent", "") or "").strip()
@@ -11503,7 +11512,7 @@ async def _handle_discord_interaction(interaction: dict) -> None:
         await bot.respond_to_interaction(
             interaction_id,
             interaction_token,
-            f"Steered `{target_run.get('agent', '?')}` (`{target_run_id}`): {message}",
+            f"{author} steered `{target_run.get('agent', '?')}` (`{target_run_id}`): {message}",
         )
 
     elif cmd == "submit":
@@ -11540,7 +11549,8 @@ async def _handle_discord_interaction(interaction: dict) -> None:
                 set_detected_flag_status(challenge, submit_flag, "wrong")
                 save_metadata(challenge)
                 await bot.followup_interaction(
-                    interaction_token, f"Incorrect: {result.message}")
+                    interaction_token,
+                    f"{author} submitted `{submit_flag}` — Incorrect: {result.message}")
         except Exception as exc:
             await bot.followup_interaction(
                 interaction_token, f"Submit error: {exc}")
@@ -11610,11 +11620,12 @@ async def _handle_discord_interaction(interaction: dict) -> None:
                 "challenge_name": challenge.get("name", ""),
             }
             await broadcast_global(flag_event)
-            status = "added" if added else "already existed"
             await bot.respond_to_interaction(
                 interaction_id,
                 interaction_token,
-                f"Flag {status}: `{stored_flag}`",
+                f"{author} added flag candidate: `{stored_flag}`"
+                if added
+                else f"Flag already existed: `{stored_flag}`",
             )
             return
 
@@ -11639,7 +11650,7 @@ async def _handle_discord_interaction(interaction: dict) -> None:
                 run["error"] = None
                 stop_event = {
                     "type": "system",
-                    "message": "Agent stopped from Discord.",
+                    "message": f"Agent stopped from Discord by {author}.",
                 }
                 await _append_run_event(ch_id, run_id, run, stop_event)
                 await stop_run(run, "discord_stop")
@@ -11662,7 +11673,8 @@ async def _handle_discord_interaction(interaction: dict) -> None:
                 "status": challenge["status"],
             })
             await bot.respond_to_interaction(
-                interaction_id, interaction_token, f"Stopped {len(stopped_ids)} agent(s)")
+                interaction_id, interaction_token,
+                f"{author} stopped {len(stopped_ids)} agent(s)")
         else:
             await bot.respond_to_interaction(
                 interaction_id, interaction_token, "No agents are currently running")
@@ -11685,7 +11697,8 @@ async def _handle_discord_interaction(interaction: dict) -> None:
             challenge["status"] = derive_challenge_status(challenge)
             save_metadata(challenge)
             await bot.respond_to_interaction(
-                interaction_id, interaction_token, f"Resumed {count} agent(s)")
+                interaction_id, interaction_token,
+                f"{author} resumed {count} agent(s)")
         else:
             await bot.respond_to_interaction(
                 interaction_id, interaction_token, "No agents to resume")
