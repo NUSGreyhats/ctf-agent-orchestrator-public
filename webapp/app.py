@@ -827,6 +827,11 @@ async def apply_solved_status(
             changed_run_ids.add(other_id)
 
     challenge["status"] = derive_challenge_status(challenge)
+    # Free any pinned swarm worker so it can be reused / idle-stopped. The
+    # worker keeps running (workspace stays inspectable) until idle timeout or
+    # a manual stop; it is just unpinned from this solved challenge.
+    if challenge.get("status") == "solved":
+        release_swarm_from_challenge(challenge)
     save_metadata(challenge)
 
     for changed_id in changed_run_ids:
