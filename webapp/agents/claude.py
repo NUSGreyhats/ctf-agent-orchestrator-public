@@ -112,6 +112,30 @@ async def _run_agent_sdk(
             "ctf-collab", tools=[notify_teammates]
         )
 
+    # Advisor tools: app.py passes a dict of name -> {description, schema, fn}.
+    # Each is exposed as an MCP tool dispatched in-process (same pattern as
+    # notify_teammates), giving the advisor read access to solver transcripts
+    # and a relay to the broadcast bus.
+    advisor_tools = kwargs.get("_advisor_tools") or {}
+    if advisor_tools:
+        adv_mcp_tools = []
+        for tname, spec in advisor_tools.items():
+            fn = spec["fn"]
+
+            def _make(fn):
+                async def _handler(params):
+                    text = await fn(params or {})
+                    return {"content": [{"type": "text", "text": str(text)}]}
+                return _handler
+
+            adv_mcp_tools.append(tool(
+                tname, spec.get("description", ""),
+                spec.get("schema", {"type": "object", "properties": {}}),
+            )(_make(fn)))
+        if adv_mcp_tools:
+            mcp_servers["advisor"] = create_sdk_mcp_server(
+                "advisor", tools=adv_mcp_tools)
+
     import shutil
     system_claude = shutil.which("claude")
     cli_path = _session_wrapper_path(system_claude) if system_claude else None
