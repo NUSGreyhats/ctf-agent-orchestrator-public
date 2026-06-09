@@ -255,6 +255,12 @@ class GCPClient:
         )
         return await self.wait_for_operation(op) if wait else op
 
+    async def delete_image(self, name: str, *, wait: bool = True) -> dict:
+        op = await self._request(
+            "DELETE", self._project_url(f"global/images/{name}")
+        )
+        return await self.wait_for_operation(op) if wait else op
+
     # -- connectivity -------------------------------------------------------
 
     async def test_connection(self) -> dict:
