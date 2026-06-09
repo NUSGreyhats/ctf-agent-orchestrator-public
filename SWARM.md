@@ -132,14 +132,29 @@ itself create that rule. If the controller runs outside that Terraform, add a
 `default-allow-ssh`; the design's "lock SSH to controller IP" rule is not yet
 implemented.)
 
+## Follow-ups (not yet implemented)
+
+The swarm works end-to-end without these, but they are hardening items the
+design calls for. The swarm currently relies on firewall rules that already
+exist rather than managing its own.
+
+- **Auto-create the `udp:51820` (WireGuard) ingress rule.** Today the VPN relies
+  on the Terraform controller VM already opening 51820. The swarm should create
+  this rule (scoped to the worker tag / controller) when VPN routing is enabled,
+  so a controller running outside that Terraform still works. *Found in testing:
+  the rule had to be added by hand for the worker→controller handshake.*
+- **Lock worker SSH (port 22) to the controller IP.** Workers currently accept
+  SSH from `0.0.0.0/0` via the project's `default-allow-ssh` (key-only auth, but
+  not IP-restricted). The design wants a dedicated rule restricting 22 to the
+  controller's egress IP, created at worker provisioning time.
+- **Re-enroll VPN on Stop→Start.** A worker's external IP changes across a
+  stop/start; the wg peer is not re-enrolled automatically (see below).
+
 ## Known limitations
 
 - A worker holds one challenge's state on its local disk; **Delete destroys the
   workspace** (centralized logs/flags/notes survive on the controller via the
   event stream). Stop preserves the disk.
-- **Files tab** currently reads controller-side workspace; for a remote run the
-  agent's files live on the worker. Live SSH browse of the worker workspace is
-  the remaining item-6 piece (use `ssh` to the worker until then).
 - **VPN on start/stop**: a worker is enrolled on VPN at create time and removed
   at delete. Stop/Start (which changes the external IP) does not yet re-enroll —
   re-create or re-enroll the peer if you cycle a VPN worker.
