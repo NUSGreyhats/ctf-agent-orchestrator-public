@@ -553,6 +553,7 @@
           <button class="sidebar-tab active" data-tab="tab-info">Info</button>
           <button class="sidebar-tab" data-tab="tab-stats">Stats</button>
           <button class="sidebar-tab" data-tab="tab-files">Files <span id="file-counter" class="tab-badge">0</span></button>
+          <button class="sidebar-tab" data-tab="tab-advisor">Advisor</button>
         </div>
 
         <!-- Info tab -->
@@ -606,6 +607,24 @@
             </div>
             <div id="files-breadcrumb" class="files-breadcrumb"></div>
             <div id="files-tree"></div>
+          </div>
+        </div>
+
+        <!-- Advisor tab -->
+        <div id="tab-advisor" class="sidebar-content">
+          <div class="advisor-panel">
+            <div id="advisor-config" class="advisor-config">
+              <select id="advisor-agent" class="advisor-select" title="Advisor agent"></select>
+              <select id="advisor-model" class="advisor-select" title="Model"></select>
+              <button id="btn-advisor-reset" class="btn-ghost btn-sm" title="New conversation">Reset</button>
+            </div>
+            <div id="advisor-log" class="advisor-log">
+              <div class="advisor-hint text-muted">Ask the advisor about the ongoing solve, or have it research techniques. It can read the solver transcripts and (sparingly) push hints to them.</div>
+            </div>
+            <form id="advisor-form" class="advisor-input-row">
+              <textarea id="advisor-input" rows="2" placeholder="Ask the advisor… (e.g. why is agent 2 stuck? any recent bypass for this?)"></textarea>
+              <button type="submit" id="advisor-send" class="btn-primary btn-sm">Send</button>
+            </form>
           </div>
         </div>
 

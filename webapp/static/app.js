@@ -2470,6 +2470,7 @@ function connectRunWS(challengeId, runId, agentLabel, options = {}) {
 }
 
 function disconnectAllWS() {
+  disconnectAdvisorWS();
   historyLoadToken++;
   historyLoadingRuns.clear();
   runHistoryState.clear();
@@ -4715,7 +4716,183 @@ function switchTab(tabId) {
   const content = document.getElementById(tabId);
   if (content) content.classList.add("active");
   if (tabId === "tab-files") loadFiles();
+  if (tabId === "tab-advisor") loadAdvisor();
 }
+
+// === Advisor ===
+let advisorWs = null;
+let advisorAgents = [];
+let advisorStarted = false;
+
+function disconnectAdvisorWS() {
+  if (advisorWs) {
+    advisorWs.onclose = null;
+    try { advisorWs.close(); } catch (_) {}
+    advisorWs = null;
+  }
+}
+
+function setAdvisorStatus(status) {
+  const btn = $("#advisor-send");
+  const thinking = status === "thinking";
+  if (btn) btn.disabled = thinking;
+  let ind = $("#advisor-thinking");
+  if (thinking && !ind) {
+    ind = document.createElement("div");
+    ind.id = "advisor-thinking";
+    ind.className = "advisor-thinking text-muted";
+    ind.textContent = "Advisor is thinking…";
+    $("#advisor-log").appendChild(ind);
+    $("#advisor-log").scrollTop = $("#advisor-log").scrollHeight;
+  } else if (!thinking && ind) {
+    ind.remove();
+  }
+}
+
+function populateAdvisorModels(agentName, selectedModel) {
+  const agent = advisorAgents.find((a) => a.name === agentName);
+  const sel = $("#advisor-model");
+  const models = (agent && agent.models) || [];
+  sel.innerHTML = models.map((m) =>
+    `<option value="${esc(m.value)}" ${m.value === selectedModel ? "selected" : ""}>${esc(m.label)}</option>`
+  ).join("") || `<option value="">default</option>`;
+}
+
+function populateAdvisorConfig(cfg) {
+  const agentSel = $("#advisor-agent");
+  agentSel.innerHTML = advisorAgents.map((a) =>
+    `<option value="${esc(a.name)}" ${a.name === cfg.agent ? "selected" : ""}>${esc(a.label)}</option>`
+  ).join("");
+  populateAdvisorModels(cfg.agent || (advisorAgents[0] && advisorAgents[0].name), cfg.model);
+  agentSel.disabled = advisorStarted;
+  $("#advisor-model").disabled = advisorStarted;
+}
+
+function advisorAppendUser(text) {
+  const log = $("#advisor-log");
+  const el = document.createElement("div");
+  el.className = "advisor-msg advisor-msg-user";
+  el.textContent = text;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
+function advisorAppend(kind, text, label) {
+  const log = $("#advisor-log");
+  const el = document.createElement("div");
+  el.className = `advisor-line advisor-${kind}`;
+  if (label) {
+    const b = document.createElement("span");
+    b.className = "advisor-label";
+    b.textContent = label + " ";
+    el.appendChild(b);
+  }
+  el.appendChild(document.createTextNode(text));
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
+function renderAdvisorEvent(event) {
+  if (!event || typeof event !== "object") return;
+  const et = event.type;
+  if (et === "assistant" || et === "user") {
+    for (const block of event.content || []) {
+      if (block.type === "text" && block.text) advisorAppend("text", block.text);
+      else if (block.type === "thinking" && block.thinking) advisorAppend("thinking", block.thinking, "thinking");
+      else if (block.type === "tool_use") advisorAppend("tool", `${block.name} ${JSON.stringify(block.input || {})}`, "→");
+      else if (block.type === "tool_result") advisorAppend("toolresult", String(block.content || "").slice(0, 1200), "⤷");
+    }
+  } else if (et === "error") {
+    advisorAppend("error", event.message || "error", "✗");
+  } else if (et === "system" && event.message) {
+    advisorAppend("system", event.message, "·");
+  }
+}
+
+function renderAdvisorHistory(messages) {
+  const log = $("#advisor-log");
+  log.innerHTML = "";
+  for (const m of messages) {
+    if (m.role === "user") advisorAppendUser(m.text || "");
+    else if (m.role === "agent") renderAdvisorEvent(m.event);
+  }
+  if (!messages.length) {
+    log.innerHTML = '<div class="advisor-hint text-muted">Ask the advisor about the ongoing solve, or have it research techniques. It can read the solver transcripts and (sparingly) push hints to them.</div>';
+  }
+}
+
+function connectAdvisorWS() {
+  disconnectAdvisorWS();
+  if (!currentChallengeId) return;
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const cid = currentChallengeId;
+  advisorWs = new WebSocket(`${proto}//${location.host}/ws/${cid}/advisor`);
+  advisorWs.onmessage = (e) => {
+    if (cid !== currentChallengeId) return;
+    const ev = JSON.parse(e.data);
+    if (ev.type === "advisor_user") advisorAppendUser(ev.text || "");
+    else if (ev.type === "advisor_event") renderAdvisorEvent(ev.event);
+    else if (ev.type === "advisor_status") setAdvisorStatus(ev.status);
+    else if (ev.type === "advisor_reset") { $("#advisor-log").innerHTML = ""; }
+  };
+  advisorWs.onclose = () => { advisorWs = null; };
+}
+
+async function loadAdvisor() {
+  if (!currentChallengeId) return;
+  const res = await api(`/api/challenges/${currentChallengeId}/advisor`);
+  if (!res || !res.ok) return;
+  const data = await res.json();
+  advisorAgents = data.agents || [];
+  advisorStarted = !!data.started;
+  populateAdvisorConfig(data.config || {});
+  renderAdvisorHistory(data.messages || []);
+  setAdvisorStatus(data.status || "idle");
+  connectAdvisorWS();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const agentSel = $("#advisor-agent");
+  if (agentSel) {
+    agentSel.addEventListener("change", () => populateAdvisorModels(agentSel.value, ""));
+  }
+  const form = $("#advisor-form");
+  if (form) {
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = $("#advisor-input");
+      const msg = input.value.trim();
+      if (!msg || !currentChallengeId) return;
+      const body = { message: msg };
+      if (!advisorStarted) {
+        body.agent = $("#advisor-agent").value;
+        body.model = $("#advisor-model").value;
+      }
+      input.value = "";
+      const res = await api(`/api/challenges/${currentChallengeId}/advisor`, {
+        method: "POST", body: JSON.stringify(body),
+      });
+      const data = res ? await res.json() : null;
+      if (!res || !res.ok) { showToast((data && data.error) || "Advisor error", "error"); return; }
+      advisorStarted = true;
+      $("#advisor-agent").disabled = true;
+      $("#advisor-model").disabled = true;
+    });
+  }
+  const resetBtn = $("#btn-advisor-reset");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", async () => {
+      if (!currentChallengeId) return;
+      const res = await api(`/api/challenges/${currentChallengeId}/advisor/reset`, { method: "POST" });
+      const data = res ? await res.json() : null;
+      if (!res || !res.ok) { showToast((data && data.error) || "Reset failed", "error"); return; }
+      advisorStarted = false;
+      $("#advisor-log").innerHTML = "";
+      $("#advisor-agent").disabled = false;
+      $("#advisor-model").disabled = false;
+    });
+  }
+});
 
 // === Files Browser ===
 function normalizeFileBrowserPath(path) {

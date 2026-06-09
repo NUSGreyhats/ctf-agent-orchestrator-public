@@ -2221,8 +2221,9 @@ async def _run_agent_sdk(
                 "sandbox": "danger-full-access",
             }
             # Add notify_teammates dynamic tool for parallel mode
+            dynamic_tools = []
             if challenge_id and run_id:
-                thread_params["dynamicTools"] = [{
+                dynamic_tools.append({
                     "name": "notify_teammates",
                     "description": (
                         "Broadcast a validated breakthrough to all "
@@ -2238,7 +2239,18 @@ async def _run_agent_sdk(
                         },
                         "required": ["message"],
                     },
-                }]
+                })
+            # Advisor tools (app.py passes name -> {description, schema, fn}).
+            advisor_tools = kwargs.get("_advisor_tools") or {}
+            for tname, spec in advisor_tools.items():
+                dynamic_tools.append({
+                    "name": tname,
+                    "description": spec.get("description", ""),
+                    "inputSchema": spec.get(
+                        "schema", {"type": "object", "properties": {}}),
+                })
+            if dynamic_tools:
+                thread_params["dynamicTools"] = dynamic_tools
             if model:
                 thread_params["model"] = model
             if effort:
@@ -2592,6 +2604,7 @@ async def _run_agent_sdk(
                     if not isinstance(tc_args, dict):
                         tc_args = {}
 
+                    advisor_tools = kwargs.get("_advisor_tools") or {}
                     if tc_tool == "notify_teammates" and challenge_id and run_id:
                         from .broadcast import broadcast_to_teammates
                         tc_msg = tc_args.get("message", "")
@@ -2604,6 +2617,19 @@ async def _run_agent_sdk(
                                 "text": f"Broadcast sent to {count} teammate(s)",
                             }],
                             "success": True,
+                        })
+                    elif tc_tool in advisor_tools:
+                        try:
+                            text = await advisor_tools[tc_tool]["fn"](tc_args)
+                            success = True
+                        except Exception as exc:  # noqa: BLE001
+                            text = f"tool error: {exc}"
+                            success = False
+                        await _respond(server_id, {
+                            "contentItems": [{
+                                "type": "inputText", "text": str(text),
+                            }],
+                            "success": success,
                         })
                     else:
                         await _respond(server_id, {
