@@ -4646,9 +4646,15 @@ function appendMsg(container, text, cls, ts) {
 }
 
 function esc(str) {
-  const d = document.createElement("div");
-  d.textContent = str;
-  return d.innerHTML;
+  // Escapes &<> AND quotes so the result is safe in both element-text and
+  // double/single-quoted HTML attribute contexts. innerHTML serialization does
+  // not encode quotes, so we escape explicitly to prevent attribute breakout.
+  return (str == null ? "" : String(str))
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function fmtElapsed(seconds) {
