@@ -6332,7 +6332,7 @@ function renderSwarmInstances(instances, image) {
       <td><span class="badge badge-${running ? "solving" : "pending"}">${esc(inst.status || "?")}</span></td>
       <td>${esc(inst.external_ip || "—")}</td>
       <td>${esc(inst.machine_type || "?")}</td>
-      <td>${esc(inst.challenge_id || "—")}</td>
+      <td>${esc(inst.challenge_name || inst.challenge_id || "—")}</td>
       <td class="swarm-actions">
         ${startStop}
         <button class="btn-ghost btn-sm swarm-act" data-act="sync-credentials" data-name="${esc(inst.name)}">Sync creds</button>

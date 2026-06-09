@@ -8756,11 +8756,19 @@ async def swarm_status(request: Request) -> JSONResponse:
     settings = load_settings()
     swarm_mod = _swarm_module()
     reg = swarm_mod.load_registry()
+    instances = []
+    for inst in reg.get("instances", {}).values():
+        item = dict(inst)
+        cid = inst.get("challenge_id")
+        if cid:
+            ch = challenges.get(cid)
+            item["challenge_name"] = ch.get("name") if ch else cid
+        instances.append(item)
     return JSONResponse({
         "configured": swarm_mod.is_configured(settings),
         "config": _swarm_config_view(settings),
         "image": reg.get("image", {}),
-        "instances": list(reg.get("instances", {}).values()),
+        "instances": instances,
         "busy": sorted(_swarm_busy),
         "log": _swarm_log_buffer[-SWARM_LOG_MAX:],
     })
