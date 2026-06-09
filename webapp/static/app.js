@@ -6251,17 +6251,31 @@ $("#btn-settings-back").addEventListener("click", () => {
 // === Swarm (GCP) ===
 let swarmConfigCache = {};
 
-function swarmLog(message, level) {
+function swarmLogLine(message, level, ts) {
   const el = $("#swarm-log");
   if (!el) return;
-  const ts = new Date().toLocaleTimeString();
+  const t = ts ? new Date(ts * 1000) : new Date();
   const prefix = level === "error" ? "✗" : level === "success" ? "✓" : "·";
-  el.textContent += `[${ts}] ${prefix} ${message}\n`;
+  el.textContent += `[${t.toLocaleTimeString()}] ${prefix} ${message}\n`;
   el.scrollTop = el.scrollHeight;
 }
 
+// Instant client-side feedback (ephemeral; replaced by the persisted server log
+// on the next loadSwarm).
+function swarmLog(message, level) {
+  swarmLogLine(message, level);
+}
+
+// Replace the panel with the persistent server-side log.
+function renderSwarmLog(entries) {
+  const el = $("#swarm-log");
+  if (!el) return;
+  el.textContent = "";
+  for (const e of entries || []) swarmLogLine(e.message, e.level, e.ts);
+}
+
 function handleSwarmEvent(event) {
-  swarmLog(event.message || "", event.level);
+  swarmLogLine(event.message || "", event.level, event.ts);
   if (event.refresh) loadSwarm();
 }
 
@@ -6331,6 +6345,7 @@ async function loadSwarm() {
   const data = await res.json();
   renderSwarmConfig(data.config || {});
   renderSwarmInstances(data.instances || [], data.image || {});
+  renderSwarmLog(data.log || []);
 }
 
 function swarmConfigBody() {
@@ -6440,15 +6455,14 @@ $("#swarm-instance-rows").addEventListener("click", async (e) => {
   const data = res ? await res.json() : null;
 
   if (res && res.ok) {
-    const extra = data && data.synced ? `: ${data.synced.join(", ") || "no creds"}` : "";
-    swarmLog(`${label} ${name} — done${extra}`, "success");
-    loadSwarm();  // re-renders the table (resets button state)
+    // The server records the persistent "done" line; loadSwarm re-renders the
+    // table + the persisted log (resetting button state).
+    loadSwarm();
   } else {
     btn.textContent = orig;
     rowBtns.forEach((b) => { b.disabled = false; });
     const msg = (data && data.error) || `${label} failed`;
-    swarmLog(`${label} ${name} — ${msg}`, "error");
-    showToast(msg, "error");
+    showToast(msg, "error");  // server also logs the failure persistently
   }
 });
 

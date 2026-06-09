@@ -8429,6 +8429,36 @@ async def discord_channels(request: Request) -> JSONResponse:
 # Names of swarm operations currently running, to prevent overlap.
 _swarm_busy: set[str] = set()
 
+# Persistent swarm activity log (survives page reloads and server restarts).
+SWARM_LOG_FILE = STATE_ROOT_DIR / "swarm-log.json"
+SWARM_LOG_MAX = 400
+_swarm_log_buffer: list[dict] = []
+
+
+def _load_swarm_log() -> list[dict]:
+    global _swarm_log_buffer
+    if SWARM_LOG_FILE.exists():
+        try:
+            data = json.loads(SWARM_LOG_FILE.read_text())
+            if isinstance(data, list):
+                _swarm_log_buffer = data[-SWARM_LOG_MAX:]
+        except (json.JSONDecodeError, OSError):
+            pass
+    return _swarm_log_buffer
+
+
+def _swarm_log_record(kind: str, level: str, message: str) -> dict:
+    """Append an entry to the persistent swarm log and return it."""
+    entry = {"ts": int(_time.time()), "kind": kind, "level": level,
+             "message": message}
+    _swarm_log_buffer.append(entry)
+    del _swarm_log_buffer[:-SWARM_LOG_MAX]
+    try:
+        SWARM_LOG_FILE.write_text(json.dumps(_swarm_log_buffer))
+    except OSError:
+        pass
+    return entry
+
 
 def _swarm_module():
     try:
@@ -8447,20 +8477,15 @@ def _swarm_gcp_error():
 
 
 def _swarm_log(kind: str):
-    """Return an async log fn that broadcasts swarm progress over the global WS."""
+    """Return an async log fn that records + broadcasts swarm progress."""
     async def _log(message: str) -> None:
-        await broadcast_global({
-            "type": "swarm_event", "kind": kind, "level": "info",
-            "message": message,
-        })
+        await _swarm_broadcast(kind, message, "info")
     return _log
 
 
 async def _swarm_broadcast(kind: str, message: str, level: str = "info", **extra):
-    await broadcast_global({
-        "type": "swarm_event", "kind": kind, "level": level,
-        "message": message, **extra,
-    })
+    entry = _swarm_log_record(kind, level, message)
+    await broadcast_global({"type": "swarm_event", **entry, **extra})
 
 
 def _swarm_config_view(settings: dict) -> dict:
@@ -8732,6 +8757,7 @@ async def swarm_status(request: Request) -> JSONResponse:
         "image": reg.get("image", {}),
         "instances": list(reg.get("instances", {}).values()),
         "busy": sorted(_swarm_busy),
+        "log": _swarm_log_buffer[-SWARM_LOG_MAX:],
     })
 
 
@@ -8939,8 +8965,10 @@ async def swarm_instance_action(request: Request) -> JSONResponse:
     try:
         if action == "start":
             rec = await swarm_mod.start_worker(settings, name)
+            await _swarm_broadcast("instance", f"Started {name}", "success")
         elif action == "stop":
             rec = await swarm_mod.stop_worker(settings, name)
+            await _swarm_broadcast("instance", f"Stopped {name}", "success")
         elif action == "sync-credentials":
             reg = swarm_mod.load_registry()
             inst = reg.get("instances", {}).get(name, {})
@@ -8950,11 +8978,15 @@ async def swarm_instance_action(request: Request) -> JSONResponse:
                     {"error": "instance has no external IP (is it running?)"},
                     status_code=400)
             synced = await swarm_mod.sync_agent_credentials(ip)
+            await _swarm_broadcast(
+                "instance", f"Synced credentials to {name}: "
+                f"{', '.join(synced) or 'none'}", "success")
             return JSONResponse({"ok": True, "synced": synced})
         else:
             return JSONResponse({"error": "unknown action"}, status_code=400)
         return JSONResponse({"ok": True, "instance": rec})
     except GCPError as exc:
+        await _swarm_broadcast("instance", f"{action} {name} failed: {exc}", "error")
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
@@ -8970,8 +9002,10 @@ async def swarm_delete_instance(request: Request) -> JSONResponse:
     try:
         await _swarm_remove_vpn(name)
         await swarm_mod.delete_worker(settings, name)
+        await _swarm_broadcast("instance", f"Deleted {name}", "success")
         return JSONResponse({"ok": True})
     except GCPError as exc:
+        await _swarm_broadcast("instance", f"delete {name} failed: {exc}", "error")
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
@@ -12717,6 +12751,7 @@ async def _reconcile_discord_gateway() -> None:
 
 @asynccontextmanager
 async def lifespan(app):
+    _load_swarm_log()
     asyncio.create_task(_reconcile_discord_gateway())
     asyncio.create_task(_swarm_idle_loop())
     yield
