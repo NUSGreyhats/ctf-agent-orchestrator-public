@@ -12775,9 +12775,9 @@ async def lifespan(app):
 
 ADVISOR_RUN_ID = "advisor"
 ADVISOR_MAX_MESSAGES = 400
-# The advisor defaults to Claude Sonnet 4.5 (fast/cheap for read+research),
+# The advisor defaults to Claude Sonnet 4.6 (fast/cheap for read+research),
 # independent of the solver default. Other providers use their own default.
-ADVISOR_DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+ADVISOR_DEFAULT_MODEL = "claude-sonnet-4-6"
 
 
 def _advisor_default_model(agent: str) -> str:
