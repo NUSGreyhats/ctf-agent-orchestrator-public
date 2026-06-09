@@ -147,17 +147,31 @@ exist rather than managing its own.
   SSH from `0.0.0.0/0` via the project's `default-allow-ssh` (key-only auth, but
   not IP-restricted). The design wants a dedicated rule restricting 22 to the
   controller's egress IP, created at worker provisioning time.
-- **Re-enroll VPN on Stop→Start.** A worker's external IP changes across a
-  stop/start; the wg peer is not re-enrolled automatically (see below).
+- **Enable wg on worker boot.** A worker's wg interface is brought up at enroll
+  time but `wg-quick@wg0` is not `systemctl enable`d, so a worker reboot/Stop→
+  Start drops its tunnel until re-enrolled. (Controller-side peer persistence is
+  handled — see below.)
+
+## VPN peer persistence (Fix B)
+
+Worker peers are **persisted into the controller's `wg0.conf`**, not just added
+at runtime, so they survive `wg-quick down/up` (VPN reconfigure/toggle/reboot).
+`_build_wg_server_conf` appends a `[Peer]` per enrolled worker from the swarm
+registry; `_wg_persist_and_sync` rebuilds the config (preserving the dial-in
+client parsed from the existing conf) and applies it live with `wg syncconf`
+(no interface bounce, so the client and other workers stay connected).
+Enroll/remove go through this path. **Note:** the base reverse-VPN feature is
+still **single dial-in client** (`VPN_CLIENT_IP` hardcoded); supporting multiple
+dial-in clients would be the larger "Fix A" refactor.
 
 ## Known limitations
 
 - A worker holds one challenge's state on its local disk; **Delete destroys the
   workspace** (centralized logs/flags/notes survive on the controller via the
   event stream). Stop preserves the disk.
-- **VPN on start/stop**: a worker is enrolled on VPN at create time and removed
-  at delete. Stop/Start (which changes the external IP) does not yet re-enroll —
-  re-create or re-enroll the peer if you cycle a VPN worker.
+- **VPN on worker reboot**: the controller keeps the worker's peer (Fix B), but
+  the worker doesn't auto-bring-up wg on boot, so a stopped/restarted worker
+  needs re-enrolling to reconnect its side.
 - VPN routing is the reverse-tunnel model only. CTF-provided *forward* VPN
   configs (drop a config directly on the worker) are a possible future add-on.
 - `notify_teammates` across agents works via the shared worker filesystem

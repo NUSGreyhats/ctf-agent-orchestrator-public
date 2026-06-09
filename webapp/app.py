@@ -8532,11 +8532,14 @@ async def _swarm_enroll_vpn(name: str) -> None:
         f"AllowedIPs = {allowed}\n"
         "PersistentKeepalive = 25\n"
     )
+    # Record the peer first, then rebuild wg0.conf from the registry and apply
+    # it live — this both persists the peer (survives wg-quick restarts) and
+    # adds it to the running interface without bouncing the client (Fix B).
+    inst["vpn_ip"] = vpn_ip
+    inst["vpn_pubkey"] = worker_pub
+    swarm_mod.save_registry(reg)
     try:
-        subprocess.run(
-            ["wg", "set", "wg0", "peer", worker_pub, "allowed-ips", f"{vpn_ip}/32"],
-            capture_output=True, timeout=10,
-        )
+        _wg_persist_and_sync()
         await swarm_mod.ssh_write_file(ip_addr, "/etc/wireguard/wg0.conf", worker_conf)
         await swarm_mod.ssh_run(
             ip_addr,
@@ -8544,11 +8547,13 @@ async def _swarm_enroll_vpn(name: str) -> None:
             check=False,
         )
     except Exception as exc:  # noqa: BLE001
+        # Roll back the registry entry so the config stays consistent.
+        inst.pop("vpn_ip", None)
+        inst.pop("vpn_pubkey", None)
+        swarm_mod.save_registry(reg)
+        _wg_persist_and_sync()
         await _swarm_broadcast("vpn", f"VPN setup failed on {name}: {exc}", "error")
         return
-    inst["vpn_ip"] = vpn_ip
-    inst["vpn_pubkey"] = worker_pub
-    swarm_mod.save_registry(reg)
     await _swarm_broadcast("vpn", f"{name} on VPN as {vpn_ip}", "success")
 
 
@@ -8558,16 +8563,15 @@ async def _swarm_remove_vpn(name: str) -> None:
     inst = reg.get("instances", {}).get(name)
     if not inst:
         return
-    pub = inst.get("vpn_pubkey")
-    if pub and _wg_interface_up():
-        try:
-            subprocess.run(["wg", "set", "wg0", "peer", pub, "remove"],
-                           capture_output=True, timeout=10)
-        except Exception:  # noqa: BLE001
-            pass
     inst.pop("vpn_ip", None)
     inst.pop("vpn_pubkey", None)
     swarm_mod.save_registry(reg)
+    # Rebuild wg0.conf without this peer and apply live (syncconf drops the
+    # removed peer while keeping the client + other workers connected).
+    try:
+        _wg_persist_and_sync()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def _swarm_idle_loop() -> None:
@@ -10735,6 +10739,19 @@ def _get_server_public_ip() -> str:
     return "YOUR_SERVER_IP"
 
 
+def _swarm_vpn_peers() -> list[dict]:
+    """Worker peers (pubkey + vpn_ip) enrolled on the VPN, from the swarm registry."""
+    try:
+        reg = _swarm_module().load_registry()
+    except Exception:  # noqa: BLE001 - swarm optional
+        return []
+    peers = []
+    for inst in reg.get("instances", {}).values():
+        if inst.get("vpn_pubkey") and inst.get("vpn_ip"):
+            peers.append({"pubkey": inst["vpn_pubkey"], "vpn_ip": inst["vpn_ip"]})
+    return peers
+
+
 def _build_wg_server_conf(
     client_public_key: str,
     client_networks: list[str],
@@ -10756,7 +10773,77 @@ PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j A
 PublicKey = {client_public_key}
 AllowedIPs = {allowed_ips}
 """
+    # Persist swarm worker peers so they survive wg-quick down/up (Fix B).
+    for peer in _swarm_vpn_peers():
+        conf += (
+            f"\n[Peer]\n# swarm worker\n"
+            f"PublicKey = {peer['pubkey']}\n"
+            f"AllowedIPs = {peer['vpn_ip']}/32\n"
+        )
     return conf
+
+
+def _wg_parse_client_peer() -> tuple[str, list[str], bool] | None:
+    """Extract the dial-in client's (pubkey, networks, dns_forward) from wg0.conf.
+
+    The first [Peer] is the client; worker peers follow. Used to rebuild the
+    config when swarm peers change without losing the client's settings.
+    """
+    if not WG_CONF.exists():
+        return None
+    pubkey, networks, dns_forward = "", [], True
+    seen_peer = False
+    in_client = False
+    for line in WG_CONF.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("# dns_forward="):
+            dns_forward = s.split("=", 1)[1].strip().lower() == "true"
+        elif s.startswith("[Peer]"):
+            if seen_peer:
+                break  # only the first peer is the client
+            seen_peer = True
+            in_client = True
+        elif in_client and s.startswith("PublicKey"):
+            pubkey = s.split("=", 1)[1].strip()
+        elif in_client and s.startswith("AllowedIPs"):
+            for v in s.split("=", 1)[1].split(","):
+                v = v.strip()
+                if v and v != f"{VPN_CLIENT_IP}/32":
+                    networks.append(v)
+    if not pubkey:
+        return None
+    return pubkey, networks, dns_forward
+
+
+def _wg_persist_and_sync() -> None:
+    """Rebuild wg0.conf (client + current swarm worker peers) and apply it live.
+
+    Uses `wg syncconf` so the interface is not bounced — the dial-in client's
+    handshake and existing worker peers survive while peers are added/removed.
+    No-op if no client is configured.
+    """
+    parsed = _wg_parse_client_peer()
+    if not parsed:
+        return
+    pubkey, networks, dns_forward = parsed
+    WG_CONF.write_text(_build_wg_server_conf(pubkey, networks, dns_forward))
+    os.chmod(str(WG_CONF), 0o600)
+    if not _wg_interface_up():
+        return
+    try:
+        stripped = subprocess.run(
+            ["wg-quick", "strip", "wg0"], capture_output=True, text=True, timeout=10)
+        if stripped.returncode != 0:
+            return
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".conf", delete=False) as tf:
+            tf.write(stripped.stdout)
+            tmp = tf.name
+        os.chmod(tmp, 0o600)
+        subprocess.run(["wg", "syncconf", "wg0", tmp], capture_output=True, timeout=10)
+        os.unlink(tmp)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _build_wg_client_conf(
