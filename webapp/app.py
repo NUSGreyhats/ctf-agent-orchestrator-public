@@ -8778,8 +8778,15 @@ async def swarm_test(request: Request) -> JSONResponse:
     swarm_mod = _swarm_module()
     GCPError = _swarm_gcp_error()
     if not swarm_mod.is_configured(settings):
-        return JSONResponse(
-            {"error": "Set the service account and zone first"}, status_code=400)
+        cfg = swarm_mod.swarm_config(settings)
+        if not cfg.get("zone"):
+            msg = "Set the zone (and save the config) first."
+        elif (cfg.get("use_adc") or cfg.get("access_token")) and not cfg.get("project"):
+            msg = "Set the Project ID — it is required for access-token/ADC auth."
+        else:
+            msg = ("No saved auth method. Enter an access token, enable ADC, or "
+                   "paste a service-account key, then save the config first.")
+        return JSONResponse({"error": msg}, status_code=400)
     try:
         client = swarm_mod.make_client(settings)
         info = await client.test_connection()

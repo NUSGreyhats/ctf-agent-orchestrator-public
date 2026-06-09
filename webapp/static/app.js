@@ -6333,8 +6333,8 @@ async function loadSwarm() {
   renderSwarmInstances(data.instances || [], data.image || {});
 }
 
-$("#btn-swarm-save").addEventListener("click", async () => {
-  const body = {
+function swarmConfigBody() {
+  return {
     service_account: $("#settings-swarm-sa").value.trim(),
     access_token: $("#settings-swarm-token").value.trim(),
     project: $("#settings-swarm-project").value.trim(),
@@ -6345,14 +6345,23 @@ $("#btn-swarm-save").addEventListener("click", async () => {
     vpn_route: $("#settings-swarm-vpn").checked,
     use_adc: $("#settings-swarm-adc").checked,
   };
-  const res = await api("/api/swarm/config", { method: "POST", body: JSON.stringify(body) });
-  if (!res) return;
+}
+
+async function saveSwarmConfig() {
+  const res = await api("/api/swarm/config", {
+    method: "POST", body: JSON.stringify(swarmConfigBody()),
+  });
+  if (!res) return null;
   const data = await res.json();
-  if (!res.ok) { showToast(data.error || "Save failed", "error"); return; }
+  if (!res.ok) { showToast(data.error || "Save failed", "error"); return null; }
   $("#settings-swarm-sa").value = "";
   $("#settings-swarm-token").value = "";
   renderSwarmConfig(data.config || {});
-  showToast("Swarm config saved", "success");
+  return data;
+}
+
+$("#btn-swarm-save").addEventListener("click", async () => {
+  if (await saveSwarmConfig()) showToast("Swarm config saved", "success");
 });
 
 $("#settings-swarm-adc").addEventListener("change", (e) => {
@@ -6365,7 +6374,9 @@ $("#settings-swarm-adc").addEventListener("change", (e) => {
 
 $("#btn-swarm-test").addEventListener("click", async () => {
   const out = $("#swarm-test-result");
-  out.textContent = "Testing…";
+  out.textContent = "Saving & testing…";
+  // Persist the current form first so the test reflects what you typed.
+  if (!(await saveSwarmConfig())) { out.textContent = "Save failed"; return; }
   const res = await api("/api/swarm/test", { method: "POST" });
   const data = res ? await res.json() : null;
   if (res && res.ok && data.ok) {
