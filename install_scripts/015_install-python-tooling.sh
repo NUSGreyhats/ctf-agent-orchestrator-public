@@ -11,7 +11,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 uv_pip_install \
   pwntools ipython pycryptodome sympy z3-solver gmpy2 angr unicorn zizmor \
   starlette uvicorn python-multipart itsdangerous websockets httpx requests \
-  claude-agent-sdk
+  claude-agent-sdk google-auth
 
 # Fast Python developer/security tools installed as uv-managed command-line tools.
 uv_tool_install --force ruff
