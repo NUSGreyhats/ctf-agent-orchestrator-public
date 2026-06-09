@@ -4796,7 +4796,10 @@ function renderAdvisorEvent(event) {
   if (!event || typeof event !== "object") return;
   const et = event.type;
   if (et === "assistant" || et === "user") {
-    for (const block of event.content || []) {
+    // Provider events carry blocks under event.message.content (claude) — fall
+    // back to event.content for other shapes.
+    const blocks = (event.message && event.message.content) || event.content || [];
+    for (const block of blocks) {
       if (block.type === "text" && block.text) advisorAppend("text", block.text);
       else if (block.type === "thinking" && block.thinking) advisorAppend("thinking", block.thinking, "thinking");
       else if (block.type === "tool_use") advisorAppend("tool", `${block.name} ${JSON.stringify(block.input || {})}`, "→");
