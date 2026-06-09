@@ -8604,7 +8604,7 @@ async def _swarm_idle_loop() -> None:
                 "idle_stop_minutes", 30) or 0)
             if timeout <= 0:
                 continue
-            now = time.time()
+            now = _time.time()
             reg = swarm_mod.load_registry()
             to_stop = []
             for name, inst in reg.get("instances", {}).items():
@@ -8680,7 +8680,7 @@ def release_swarm_from_challenge(challenge: dict) -> None:
     inst = reg.get("instances", {}).get(name)
     if inst and inst.get("challenge_id") == challenge.get("id"):
         inst["challenge_id"] = None
-        inst["idle_since"] = int(time.time())
+        inst["idle_since"] = int(_time.time())
         swarm_mod.save_registry(reg)
 
 
