@@ -12822,7 +12822,14 @@ def _advisor_event_text(ev: dict) -> str:
     et = ev.get("type", "")
     if et in ("assistant", "user"):
         parts = []
-        for block in ev.get("content", []) or []:
+        # Provider events nest blocks under message.content (claude); fall back
+        # to a top-level content list for other shapes.
+        msg = ev.get("message")
+        blocks = (msg.get("content") if isinstance(msg, dict) else None) \
+            or ev.get("content") or []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
             bt = block.get("type")
             if bt == "text" and block.get("text"):
                 parts.append(f"[text] {block['text']}")
