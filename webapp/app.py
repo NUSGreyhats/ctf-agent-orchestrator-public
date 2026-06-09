@@ -2056,8 +2056,24 @@ def skill_catalog_by_name() -> dict[str, dict]:
     return _skill_catalog_by_name_cache
 
 
+# Skills enabled by default for new challenges (when the operator has not
+# customized the set in Settings). Tool/forensics skills that should always be
+# available; methodology/category/tool-specific skills like the ROP and crypto
+# skills are left off so they load on demand via their triggers.
+DEFAULT_ENABLED_SKILLS = [
+    "kernel-gef-debugging",
+    "analyze-with-ida-domain-api",
+    "apk-analysis",
+    "volatility3-memdump",
+    "file-repair-and-stego",
+    "tsk-disk-recovery",
+    "pcap-extraction",
+]
+
+
 def default_enabled_skill_names() -> list[str]:
-    return [entry["name"] for entry in discover_skill_catalog()]
+    available = {entry["name"] for entry in discover_skill_catalog()}
+    return [name for name in DEFAULT_ENABLED_SKILLS if name in available]
 
 
 def _coerce_skill_list(value: object) -> list[str] | None:
