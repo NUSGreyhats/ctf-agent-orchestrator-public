@@ -11868,6 +11868,334 @@ async def lifespan(app):
 
 
 # ---------------------------------------------------------------------------
+# Advisor agent — read-only kibitzer + web researcher per challenge
+# ---------------------------------------------------------------------------
+
+ADVISOR_RUN_ID = "advisor"
+ADVISOR_MAX_MESSAGES = 400
+
+# Ephemeral in-memory advisor sessions (NOT persisted): challenge_id -> session.
+advisor_sessions: dict[str, dict] = {}
+
+ADVISOR_PREAMBLE = """You are the **CTF Advisor** for the challenge "{name}".
+
+Other AI agents are actively solving this challenge. You are a read-only
+assistant for the human operator. You can:
+- `list_runs()` — list the solver agents and their status/goals.
+- `read_transcript(run_id?, tail?, grep?)` — read what the solvers have actually
+  done (tool calls, outputs, errors). Omit run_id to scan all runs.
+- `read_working_notes()` — read solvers' working notes.
+- Web search / fetch — research recent techniques, CVEs, exploits, write-ups.
+- `notify_solvers(message)` — push ONE concise, high-signal hint to the live
+  solver agents. Use sparingly; never relay noise or unverified guesses.
+
+Answer the operator's questions, diagnose where solvers are stuck by reading
+their transcripts (do not fabricate — read), and research useful techniques.
+Be concise and concrete.
+
+Challenge description:
+{description}
+"""
+
+
+def _advisor_broadcast_bus():
+    try:
+        from .agents.broadcast import broadcast_to_teammates
+    except ImportError:
+        from agents.broadcast import broadcast_to_teammates
+    return broadcast_to_teammates
+
+
+def _advisor_event_text(ev: dict) -> str:
+    """Compact one-line-ish summary of a transcript event for the advisor."""
+    et = ev.get("type", "")
+    if et in ("assistant", "user"):
+        parts = []
+        for block in ev.get("content", []) or []:
+            bt = block.get("type")
+            if bt == "text" and block.get("text"):
+                parts.append(f"[text] {block['text']}")
+            elif bt == "thinking" and block.get("thinking"):
+                parts.append(f"[thinking] {block['thinking'][:400]}")
+            elif bt == "tool_use":
+                parts.append(f"[tool_use {block.get('name','?')}] "
+                              f"{json.dumps(block.get('input', {}))[:400]}")
+            elif bt == "tool_result":
+                parts.append(f"[tool_result] {str(block.get('content',''))[:600]}")
+        return "\n".join(parts)
+    if et in ("system", "error", "user_prompt", "user_steer"):
+        msg = ev.get("message", "")
+        return f"[{et}] {msg}" if msg else ""
+    return ""
+
+
+def _advisor_make_tools(cid: str) -> dict:
+    async def read_transcript(params: dict) -> str:
+        challenge = challenges.get(cid)
+        if not challenge:
+            return "challenge not found"
+        run_id = str(params.get("run_id", "") or "").strip()
+        try:
+            tail = max(1, min(int(params.get("tail", 40) or 40), 200))
+        except (TypeError, ValueError):
+            tail = 40
+        grep = str(params.get("grep", "") or "").strip().lower()
+        rids = [run_id] if run_id else list(challenge["runs"].keys())
+        blocks = []
+        for rid in rids:
+            if rid not in challenge["runs"]:
+                continue
+            path = _run_output_path(cid, rid)
+            lines = []
+            if path.exists():
+                for ln in path.read_text(errors="replace").splitlines():
+                    try:
+                        ev = json.loads(ln)
+                    except json.JSONDecodeError:
+                        continue
+                    txt = _advisor_event_text(ev)
+                    if not txt:
+                        continue
+                    if grep and grep not in txt.lower():
+                        continue
+                    lines.append(txt)
+            sel = lines[-tail:]
+            agent = challenge["runs"][rid].get("agent", "?")
+            blocks.append(
+                f"=== run {rid} ({agent}) — last {len(sel)} of {len(lines)} "
+                f"events ===\n" + "\n".join(sel))
+        return "\n\n".join(blocks) or "no transcript events yet"
+
+    async def list_runs(params: dict) -> str:
+        challenge = challenges.get(cid)
+        if not challenge:
+            return "challenge not found"
+        rows = []
+        for rid, run in challenge["runs"].items():
+            goal = normalize_run_goal(run.get("goal")) or {}
+            desc = (goal.get("description") or "") if isinstance(goal, dict) else ""
+            rows.append(
+                f"- {rid}: agent={run.get('agent')} model={run.get('model')} "
+                f"status={run.get('status')} goal={desc[:80]}")
+        return (f"Challenge: {challenge.get('name')} [{challenge.get('status')}]\n"
+                f"Runs:\n" + "\n".join(rows))
+
+    async def read_working_notes(params: dict) -> str:
+        challenge = challenges.get(cid)
+        if not challenge:
+            return "challenge not found"
+        out = []
+        for rid, run in challenge["runs"].items():
+            try:
+                notes = get_run_cwd(cid, run) / run_notes_filename(challenge, run)
+                if notes.exists():
+                    out.append(f"=== {rid} notes ===\n"
+                               f"{notes.read_text(errors='replace')[:4000]}")
+            except OSError:
+                continue
+        return "\n\n".join(out) or "no working notes found (solvers may run remotely)"
+
+    async def notify_solvers(params: dict) -> str:
+        msg = str(params.get("message", "") or "").strip()
+        if not msg:
+            return "message required"
+        count = await _advisor_broadcast_bus()(cid, ADVISOR_RUN_ID,
+                                                f"[Advisor]: {msg}")
+        return f"Sent hint to {count} solver(s)"
+
+    obj = {"type": "object", "properties": {}}
+    return {
+        "read_transcript": {
+            "description": "Read recent transcript events from solver agents. "
+            "Args: run_id (optional), tail (default 40, max 200), grep (optional "
+            "substring filter).",
+            "schema": {"type": "object", "properties": {
+                "run_id": {"type": "string"},
+                "tail": {"type": "integer"},
+                "grep": {"type": "string"}}},
+            "fn": read_transcript},
+        "list_runs": {
+            "description": "List the solver agents on this challenge with their "
+            "status and goals.", "schema": obj, "fn": list_runs},
+        "read_working_notes": {
+            "description": "Read the solver agents' working notes.",
+            "schema": obj, "fn": read_working_notes},
+        "notify_solvers": {
+            "description": "Push one concise, high-signal hint to the live solver "
+            "agents. Use sparingly.",
+            "schema": {"type": "object", "properties": {
+                "message": {"type": "string"}}, "required": ["message"]},
+            "fn": notify_solvers},
+    }
+
+
+def _get_advisor_session(cid: str) -> dict:
+    s = advisor_sessions.get(cid)
+    if s is None:
+        s = {
+            "agent": "", "model": "", "effort": "",
+            "session_state": {}, "messages": [], "ws_clients": set(),
+            "status": "idle", "started": False, "lock": asyncio.Lock(),
+        }
+        advisor_sessions[cid] = s
+    return s
+
+
+async def _advisor_emit(cid: str, data: dict) -> None:
+    s = advisor_sessions.get(cid)
+    if s:
+        await _broadcast_to_ws_set(s["ws_clients"], data)
+
+
+async def run_advisor_turn(cid: str, text: str) -> None:
+    s = _get_advisor_session(cid)
+    challenge = challenges.get(cid)
+    if not challenge:
+        return
+    provider = get_provider(s["agent"])
+    async with s["lock"]:
+        s["status"] = "thinking"
+        s["messages"].append({"role": "user", "text": text})
+        await _advisor_emit(cid, {"type": "advisor_user", "text": text})
+        await _advisor_emit(cid, {"type": "advisor_status", "status": "thinking"})
+        adv_cwd = CHALLENGES_DIR / cid / "_advisor"
+        adv_cwd.mkdir(parents=True, exist_ok=True)
+        is_continue = s["started"]
+        if is_continue:
+            prompt = text
+        else:
+            prompt = ADVISOR_PREAMBLE.format(
+                name=challenge.get("name", ""),
+                description=str(challenge.get("description", ""))[:2000],
+            ) + "\n\nOperator: " + text
+        try:
+            async for event in provider.run_agent(
+                prompt=prompt, model=s["model"], effort=s["effort"],
+                cwd=str(adv_cwd), continue_session=is_continue,
+                session_state=s["session_state"], challenge_id=cid, run_id="",
+                _advisor_tools=_advisor_make_tools(cid),
+                _env=agent_runtime_env(s["agent"]),
+            ):
+                if not isinstance(event, dict):
+                    continue
+                s["messages"].append({"role": "agent", "event": event})
+                del s["messages"][:-ADVISOR_MAX_MESSAGES]
+                await _advisor_emit(cid, {"type": "advisor_event", "event": event})
+                if event.get("type") == "result":
+                    break
+            s["started"] = True
+        except Exception as exc:  # noqa: BLE001
+            await _advisor_emit(cid, {"type": "advisor_event",
+                                      "event": {"type": "error", "message": str(exc)}})
+        finally:
+            s["status"] = "idle"
+            await _advisor_emit(cid, {"type": "advisor_status", "status": "idle"})
+
+
+async def advisor_get(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    cid = request.path_params["id"]
+    if cid not in challenges:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    s = advisor_sessions.get(cid)
+    if not s:
+        return JSONResponse({
+            "config": {"agent": DEFAULT_AGENT,
+                       "model": resolved_default_model(DEFAULT_AGENT),
+                       "effort": ""},
+            "messages": [], "status": "idle", "started": False,
+            "agents": [_provider_choice(p) for p in PROVIDERS.values()],
+        })
+    return JSONResponse({
+        "config": {"agent": s["agent"] or DEFAULT_AGENT,
+                   "model": s["model"], "effort": s["effort"]},
+        "messages": s["messages"][-ADVISOR_MAX_MESSAGES:],
+        "status": s["status"], "started": s["started"],
+        "agents": [_provider_choice(p) for p in PROVIDERS.values()],
+    })
+
+
+def _provider_choice(provider) -> dict:
+    return {"name": provider.name, "label": provider.label,
+            "models": [{"value": v, "label": l}
+                       for v, l in provider.resolved_models()],
+            "default_model": provider.resolved_default_model()}
+
+
+async def advisor_send(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    cid = request.path_params["id"]
+    if cid not in challenges:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    message = str_field(body.get("message", "")).strip()
+    if not message:
+        return JSONResponse({"error": "message required"}, status_code=400)
+    s = _get_advisor_session(cid)
+    if s["status"] == "thinking":
+        return JSONResponse({"error": "advisor is busy"}, status_code=409)
+    # Configure provider/model before the first turn (locked once started).
+    if not s["started"]:
+        agent = str_field(body.get("agent", "")) or DEFAULT_AGENT
+        if agent not in VALID_AGENTS:
+            return JSONResponse({"error": f"invalid agent: {agent}"},
+                                status_code=400)
+        s["agent"] = agent
+        s["model"] = str_field(body.get("model", "")) or resolved_default_model(agent)
+        s["effort"] = str_field(body.get("effort", ""))
+    asyncio.create_task(run_advisor_turn(cid, message))
+    return JSONResponse({"ok": True})
+
+
+async def advisor_reset(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    cid = request.path_params["id"]
+    s = advisor_sessions.get(cid)
+    if s:
+        if s["status"] == "thinking":
+            return JSONResponse({"error": "advisor is busy"}, status_code=409)
+        s.update({"session_state": {}, "messages": [], "started": False,
+                  "agent": "", "model": "", "effort": ""})
+        await _advisor_emit(cid, {"type": "advisor_reset"})
+    return JSONResponse({"ok": True})
+
+
+async def advisor_ws(websocket: WebSocket):
+    if not websocket_origin_allowed(websocket):
+        await websocket.close(code=4003)
+        return
+    if not websocket.session.get("authenticated"):
+        if not _check_basic_auth(websocket.headers.get("authorization", "")):
+            await websocket.close(code=4001)
+            return
+    cid = websocket.path_params["id"]
+    if cid not in challenges:
+        await websocket.close(code=4004)
+        return
+    await websocket.accept()
+    s = _get_advisor_session(cid)
+    s["ws_clients"].add(websocket)
+    try:
+        await _send_ws_json(websocket, {"type": "advisor_status",
+                                        "status": s["status"]})
+        while True:
+            await websocket.receive_text()
+    except Exception:  # noqa: BLE001 - normal disconnect
+        pass
+    finally:
+        s["ws_clients"].discard(websocket)
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -11942,8 +12270,12 @@ routes = [
     Route("/api/challenges/{id}/files/{path:path}", get_file, methods=["GET"]),
     Route("/api/challenges/{id}/download/{path:path}", download_file, methods=["GET"]),
     Route("/api/challenges/{id}/export", export_challenge, methods=["GET"]),
+    Route("/api/challenges/{id}/advisor", advisor_get, methods=["GET"]),
+    Route("/api/challenges/{id}/advisor", advisor_send, methods=["POST"]),
+    Route("/api/challenges/{id}/advisor/reset", advisor_reset, methods=["POST"]),
     WebSocketRoute("/ws/agents/auth/{session_id}", agent_auth_ws),
     WebSocketRoute("/ws/events", global_events_ws),
+    WebSocketRoute("/ws/{id}/advisor", advisor_ws),
     WebSocketRoute("/ws/{id}/{run_id}", challenge_ws),
     Mount(
         "/static",
