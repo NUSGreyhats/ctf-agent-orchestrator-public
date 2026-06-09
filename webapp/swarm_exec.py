@@ -16,8 +16,12 @@ import json
 import os
 from pathlib import Path
 
-from . import swarm as swarm_mod
-from .gcp import GCPError
+try:  # works whether imported as a package or run as a top-level script
+    from . import swarm as swarm_mod
+    from .gcp import GCPError
+except ImportError:
+    import swarm as swarm_mod
+    from gcp import GCPError
 
 APP_ROOT_DIR = Path(os.environ.get("APP_ROOT_DIR", "/root/ctf-agent-wrapper"))
 CHALLENGES_DIR = APP_ROOT_DIR / "challenges"

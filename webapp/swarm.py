@@ -18,7 +18,10 @@ import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from .gcp import GCPClient, GCPError, zone_to_region
+try:  # works whether the app is imported as a package or run as a script
+    from .gcp import GCPClient, GCPError, zone_to_region
+except ImportError:
+    from gcp import GCPClient, GCPError, zone_to_region
 
 # ---------------------------------------------------------------------------
 # Paths (kept in sync with app.py via the shared APP_ROOT_DIR env var)
