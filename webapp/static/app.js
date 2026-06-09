@@ -6096,9 +6096,12 @@ function renderSwarmConfig(cfg) {
   $("#settings-swarm-disk").value = cfg.default_disk_size_gb || 100;
   $("#settings-swarm-idle").value = cfg.idle_stop_minutes ?? 30;
   $("#settings-swarm-vpn").checked = !!cfg.vpn_route;
+  $("#settings-swarm-adc").checked = !!cfg.use_adc;
   $("#settings-swarm-sa-status").textContent = cfg.service_account_configured
     ? "Key configured. Leave blank to keep it."
     : "No key configured.";
+  const saGroup = $("#settings-swarm-sa-group");
+  if (saGroup) saGroup.style.display = cfg.use_adc ? "none" : "";
 }
 
 function renderSwarmInstances(instances, image) {
@@ -6154,6 +6157,7 @@ $("#btn-swarm-save").addEventListener("click", async () => {
     default_disk_size_gb: parseInt($("#settings-swarm-disk").value, 10) || 100,
     idle_stop_minutes: parseInt($("#settings-swarm-idle").value, 10) || 0,
     vpn_route: $("#settings-swarm-vpn").checked,
+    use_adc: $("#settings-swarm-adc").checked,
   };
   const res = await api("/api/swarm/config", { method: "POST", body: JSON.stringify(body) });
   if (!res) return;
@@ -6162,6 +6166,11 @@ $("#btn-swarm-save").addEventListener("click", async () => {
   $("#settings-swarm-sa").value = "";
   renderSwarmConfig(data.config || {});
   showToast("Swarm config saved", "success");
+});
+
+$("#settings-swarm-adc").addEventListener("change", (e) => {
+  const saGroup = $("#settings-swarm-sa-group");
+  if (saGroup) saGroup.style.display = e.target.checked ? "none" : "";
 });
 
 $("#btn-swarm-test").addEventListener("click", async () => {

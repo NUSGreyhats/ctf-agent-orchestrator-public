@@ -65,13 +65,28 @@ def swarm_config(settings: dict) -> dict:
     return cfg if isinstance(cfg, dict) else {}
 
 
+DEFAULT_ADC_TOKEN_COMMAND = "gcloud auth print-access-token"
+
+
 def is_configured(settings: dict) -> bool:
     cfg = swarm_config(settings)
-    return bool(cfg.get("service_account") and cfg.get("zone"))
+    if not cfg.get("zone"):
+        return False
+    if cfg.get("use_adc"):
+        # ADC has no embedded project, so one must be set explicitly.
+        return bool(cfg.get("project"))
+    return bool(cfg.get("service_account"))
 
 
 def make_client(settings: dict) -> GCPClient:
     cfg = swarm_config(settings)
+    project = cfg.get("project") or None
+    zone = cfg.get("zone", "")
+    if cfg.get("use_adc"):
+        return GCPClient(
+            project=project, zone=zone,
+            token_command=cfg.get("gcloud_token_command") or DEFAULT_ADC_TOKEN_COMMAND,
+        )
     sa = cfg.get("service_account")
     if isinstance(sa, str):
         try:
@@ -80,7 +95,7 @@ def make_client(settings: dict) -> GCPClient:
             raise GCPError(f"service account key is not valid JSON: {exc}") from exc
     if not sa:
         raise GCPError("no GCP service account configured")
-    return GCPClient(sa, project=cfg.get("project") or None, zone=cfg.get("zone", ""))
+    return GCPClient(sa, project=project, zone=zone)
 
 
 # ---------------------------------------------------------------------------

@@ -4966,6 +4966,59 @@ def _allowed_file_roots(challenge_id: str, base_dir: Path) -> list[Path]:
     return [root for root in roots if root.exists()]
 
 
+def _swarm_file_ip(challenge_id: str, run_id: str | None) -> str:
+    """If a run's workspace lives on a swarm worker, return that worker's IP."""
+    if not run_id:
+        return ""
+    challenge = challenges.get(challenge_id)
+    if not challenge or run_id not in challenge.get("runs", {}):
+        return ""
+    return _resolve_swarm_ip(challenge)
+
+
+def _classify_name(name: str) -> str:
+    ext = os.path.splitext(name)[1].lower()
+    if ext in IMAGE_EXTS:
+        return "image"
+    if ext in TEXT_EXTS:
+        return "text"
+    return "binary"
+
+
+def _render_file_payload(name: str, data: bytes, total: int) -> dict:
+    """Build a get_file JSON payload from raw bytes (used by the remote path)."""
+    ext = os.path.splitext(name)[1].lower()
+    if ext in IMAGE_EXTS:
+        mime = mimetypes.guess_type(name)[0] or "image/png"
+        return {"type": "image", "mime": mime,
+                "data": base64.b64encode(data).decode("ascii"),
+                "name": name, "size": total}
+    is_text = ext in TEXT_EXTS
+    if not is_text:
+        try:
+            data[:8192].decode("utf-8")
+            is_text = True
+        except UnicodeDecodeError:
+            is_text = False
+    if is_text:
+        content = data[:MAX_TEXT_SIZE].decode("utf-8", errors="replace")
+        if total > MAX_TEXT_SIZE:
+            content += f"\n\n... (truncated, {total} bytes total)"
+        return {"type": "text", "content": content, "name": name,
+                "ext": ext, "size": total}
+    chunk = data[:MAX_HEX_SIZE]
+    lines = []
+    for off in range(0, len(chunk), 16):
+        c = chunk[off:off + 16]
+        hexp = " ".join(f"{b:02x}" for b in c)
+        asc = "".join(chr(b) if 32 <= b < 127 else "." for b in c)
+        lines.append(f"{off:08x}  {hexp:<48s}  |{asc}|")
+    if total > MAX_HEX_SIZE:
+        lines.append(f"... ({total} bytes total, showing first {MAX_HEX_SIZE})")
+    return {"type": "binary", "hexdump": "\n".join(lines),
+            "name": name, "size": total}
+
+
 async def list_files(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
@@ -4975,6 +5028,40 @@ async def list_files(request: Request) -> JSONResponse:
         return JSONResponse({"error": "not found"}, status_code=404)
 
     run_id = request.query_params.get("run_id")
+
+    # Remote run: browse the worker's workspace over SSH.
+    swarm_ip = _swarm_file_ip(challenge_id, run_id)
+    if swarm_ip and request.query_params.get("browse") == "1":
+        requested_dir = request.query_params.get("dir", "")
+        safe_dir = safe_user_dir(requested_dir)
+        if safe_dir is None:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        try:
+            from .swarm_exec import ssh_browse
+        except ImportError:
+            from swarm_exec import ssh_browse
+        result = await ssh_browse(swarm_ip, challenge_id, run_id, safe_dir)
+        if result.get("error") == "forbidden":
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if result.get("error"):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        entries = []
+        for e in result.get("entries", []):
+            rel = (
+                (PurePosixPath(safe_dir) / e["name"]).as_posix()
+                if safe_dir else e["name"]
+            )
+            item = {"kind": e["kind"], "name": e["name"], "path": rel}
+            if e["kind"] == "file":
+                item["size"] = e.get("size", 0)
+                item["type"] = _classify_name(e["name"])
+            entries.append(item)
+        parent = ""
+        if safe_dir:
+            parent_path = PurePosixPath(safe_dir).parent.as_posix()
+            parent = "" if parent_path == "." else parent_path
+        return JSONResponse({"path": safe_dir, "parent": parent, "entries": entries})
+
     challenge_dir = _resolve_file_dir(challenge_id, run_id)
     if not challenge_dir or not challenge_dir.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -5076,6 +5163,26 @@ async def get_file(request: Request) -> Response:
         return JSONResponse({"error": "forbidden"}, status_code=403)
 
     run_id = request.query_params.get("run_id")
+
+    swarm_ip = _swarm_file_ip(challenge_id, run_id)
+    if swarm_ip:
+        safe_rel = safe_user_path(file_path)
+        if safe_rel is None:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        try:
+            from .swarm_exec import ssh_read
+        except ImportError:
+            from swarm_exec import ssh_read
+        result = await ssh_read(
+            swarm_ip, challenge_id, run_id, safe_rel, MAX_TEXT_SIZE + MAX_HEX_SIZE)
+        if result.get("error") == "forbidden":
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if result.get("error"):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        data = base64.b64decode(result.get("data", ""))
+        return JSONResponse(_render_file_payload(
+            PurePosixPath(file_path).name, data, int(result.get("total", len(data)))))
+
     challenge_dir = _resolve_file_dir(challenge_id, run_id)
     if not challenge_dir:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -5155,6 +5262,29 @@ async def download_file(request: Request) -> Response:
         return JSONResponse({"error": "forbidden"}, status_code=403)
 
     run_id = request.query_params.get("run_id")
+
+    swarm_ip = _swarm_file_ip(challenge_id, run_id)
+    if swarm_ip:
+        safe_rel = safe_user_path(file_path)
+        if safe_rel is None:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        try:
+            from .swarm_exec import ssh_read
+        except ImportError:
+            from swarm_exec import ssh_read
+        # Cap downloads to a sane size over SSH.
+        result = await ssh_read(
+            swarm_ip, challenge_id, run_id, safe_rel, 64 * 1024 * 1024)
+        if result.get("error") == "forbidden":
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if result.get("error"):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        name = PurePosixPath(file_path).name
+        data = base64.b64decode(result.get("data", ""))
+        mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        return Response(content=data, media_type=mime, headers={
+            "Content-Disposition": f'attachment; filename="{name}"'})
+
     challenge_dir = _resolve_file_dir(challenge_id, run_id)
     if not challenge_dir:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -8331,6 +8461,7 @@ def _swarm_config_view(settings: dict) -> dict:
         "subnetwork": cfg.get("subnetwork", "default"),
         "idle_stop_minutes": cfg.get("idle_stop_minutes", 30),
         "vpn_route": bool(cfg.get("vpn_route", False)),
+        "use_adc": bool(cfg.get("use_adc", False)),
     }
 
 
@@ -8602,6 +8733,8 @@ async def swarm_save_config(request: Request) -> JSONResponse:
             pass
     if "vpn_route" in body:
         swarm["vpn_route"] = bool(body["vpn_route"])
+    if "use_adc" in body:
+        swarm["use_adc"] = bool(body["use_adc"])
 
     settings["swarm"] = swarm
     save_settings(settings)

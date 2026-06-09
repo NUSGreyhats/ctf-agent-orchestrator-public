@@ -42,11 +42,11 @@ class GCPError(RuntimeError):
     """Raised for GCP configuration problems or API failures."""
 
 
-def _require_deps() -> None:
+def _require_deps(need_google_auth: bool) -> None:
     missing = []
     if httpx is None:
         missing.append("httpx")
-    if _gcp_service_account is None:
+    if need_google_auth and _gcp_service_account is None:
         missing.append("google-auth")
     if missing:
         raise GCPError(
@@ -67,22 +67,34 @@ class GCPClient:
 
     def __init__(
         self,
-        service_account_info: dict,
+        service_account_info: dict | None = None,
         project: str | None = None,
         zone: str = "",
         *,
+        access_token: str | None = None,
+        token_command: str | None = None,
         timeout: float = 30.0,
     ):
-        _require_deps()
-        if not isinstance(service_account_info, dict) or not service_account_info:
+        # Auth modes (priority): static token > token command (e.g. gcloud ADC)
+        # > service-account JSON. google-auth is only needed for the SA path.
+        self._info = service_account_info or None
+        self._static_token = access_token or None
+        self._token_command = token_command or None
+        if not (self._info or self._static_token or self._token_command):
+            raise GCPError(
+                "no GCP credentials (service account JSON, access token, or "
+                "token command)")
+        _require_deps(need_google_auth=bool(self._info) and not (
+            self._static_token or self._token_command))
+        if self._info is not None and (
+            not isinstance(self._info, dict) or not self._info
+        ):
             raise GCPError("service account key must be a non-empty JSON object")
-        self._info = service_account_info
-        self.project = project or service_account_info.get("project_id", "")
+        self.project = project or (self._info or {}).get("project_id", "")
         if not self.project:
             raise GCPError("no GCP project_id (set it in settings or the key)")
         self.zone = zone
         self._timeout = timeout
-        self._creds = None
         self._token: str = ""
         self._token_expiry: float = 0.0
         self._token_lock = asyncio.Lock()
@@ -90,6 +102,26 @@ class GCPClient:
     # -- auth ---------------------------------------------------------------
 
     def _refresh_token_sync(self) -> tuple[str, float]:
+        if self._static_token:
+            return self._static_token, time.time() + 3000
+        if self._token_command:
+            import shlex
+            import subprocess
+            try:
+                out = subprocess.run(
+                    shlex.split(self._token_command),
+                    capture_output=True, text=True, timeout=30,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise GCPError(f"token command failed: {exc}") from exc
+            if out.returncode != 0:
+                raise GCPError(
+                    f"token command failed: {out.stderr.strip() or out.stdout.strip()}")
+            token = out.stdout.strip()
+            if not token:
+                raise GCPError("token command produced no token")
+            # gcloud access tokens last ~1h; refresh well before that.
+            return token, time.time() + 2700
         creds = _gcp_service_account.Credentials.from_service_account_info(
             self._info, scopes=_SCOPES
         )

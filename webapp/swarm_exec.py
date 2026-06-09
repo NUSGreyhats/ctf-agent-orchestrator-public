@@ -173,3 +173,80 @@ async def stop_remote_run(run: dict, reason: str = "controller_stop") -> None:
 
 def is_remote_run(run: dict) -> bool:
     return run.get("_swarm_proc") is not None
+
+
+# ---------------------------------------------------------------------------
+# Live SSH file browsing of a worker's run workspace
+# ---------------------------------------------------------------------------
+
+# Remote helper: lists a dir or reads a file, enforcing containment within the
+# challenge dir (so symlinks like challenge_files/ -> _files resolve safely).
+_FS_HELPER = r"""
+import sys, os, json, base64
+join_root = os.path.realpath(base64.b64decode(sys.argv[1]).decode())
+allow_root = os.path.realpath(base64.b64decode(sys.argv[2]).decode())
+rel = base64.b64decode(sys.argv[3]).decode()
+op = sys.argv[4]
+def within(p):
+    return p == allow_root or p.startswith(allow_root + os.sep)
+target = os.path.realpath(os.path.join(join_root, rel)) if rel else join_root
+if not within(target):
+    print(json.dumps({"error": "forbidden"})); sys.exit(0)
+if op == "list":
+    if not os.path.isdir(target):
+        print(json.dumps({"error": "notfound"})); sys.exit(0)
+    entries = []
+    for name in sorted(os.listdir(target)):
+        p = os.path.join(target, name)
+        if not within(os.path.realpath(p)):
+            continue
+        try:
+            if os.path.isdir(p):
+                entries.append({"kind": "directory", "name": name})
+            elif os.path.isfile(p):
+                entries.append({"kind": "file", "name": name,
+                                "size": os.path.getsize(p)})
+        except OSError:
+            continue
+    print(json.dumps({"entries": entries}))
+elif op == "read":
+    if not os.path.isfile(target):
+        print(json.dumps({"error": "notfound"})); sys.exit(0)
+    total = os.path.getsize(target)
+    with open(target, "rb") as f:
+        data = f.read(int(sys.argv[5]))
+    print(json.dumps({"total": total, "data": base64.b64encode(data).decode()}))
+"""
+
+
+def _b64(s: str) -> str:
+    import base64
+    return base64.b64encode(s.encode()).decode()
+
+
+async def _ssh_fs(ip: str, cid: str, rid: str, rel: str, op: str,
+                  maxbytes: int = 0) -> dict:
+    join_root = f"{REMOTE_ROOT}/challenges/{cid}/_runs/{rid}"
+    allow_root = f"{REMOTE_ROOT}/challenges/{cid}"
+    code = _b64(_FS_HELPER)
+    # rel "." == the run cwd root; never pass an empty b64 token (it would
+    # collapse on the remote shell and shift argv).
+    cmd = (
+        f"printf %s {code} | base64 -d | python3 - "
+        f"{_b64(join_root)} {_b64(allow_root)} {_b64(rel or '.')} {op} {maxbytes}"
+    )
+    rc, out, err = await swarm_mod.ssh_run(ip, cmd, check=False, timeout=30)
+    if rc != 0:
+        return {"error": err.strip() or "ssh failed"}
+    try:
+        return json.loads(out.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return {"error": "bad response from worker"}
+
+
+async def ssh_browse(ip: str, cid: str, rid: str, rel: str) -> dict:
+    return await _ssh_fs(ip, cid, rid, rel, "list")
+
+
+async def ssh_read(ip: str, cid: str, rid: str, rel: str, maxbytes: int) -> dict:
+    return await _ssh_fs(ip, cid, rid, rel, "read", maxbytes)

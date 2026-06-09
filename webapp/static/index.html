@@ -274,7 +274,14 @@
         <h2 class="settings-section-title">Swarm (GCP)</h2>
         <p class="text-muted">Dispatch challenges to dedicated GCP worker VMs so heavy agent compute does not interfere with this host. See <code>SWARM.md</code>.</p>
 
-        <div class="form-group">
+        <div class="form-group form-group-inline">
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-swarm-adc">
+            <span>Use host gcloud credentials (ADC)</span>
+          </label>
+          <span class="checkbox-hint">Mints tokens via <code>gcloud auth print-access-token</code> on this host. Use when service-account keys are disabled by org policy. Requires a Project ID below.</span>
+        </div>
+        <div class="form-group" id="settings-swarm-sa-group">
           <label for="settings-swarm-sa">Service Account Key (JSON)</label>
           <textarea id="settings-swarm-sa" rows="4" placeholder='Paste the service-account JSON (Compute Admin). Leave blank to keep the existing key.'></textarea>
           <span class="checkbox-hint" id="settings-swarm-sa-status">No key configured.</span>
