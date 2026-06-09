@@ -104,11 +104,33 @@ unchanged.
 3. ✅ Clone/start/stop/delete + `state/swarm.json` + Swarm UI.
 4. ✅ `swarm_runner.py` + controller dispatch (`swarm_exec.py`) + event plumbing.
 5. ✅ Run-target selector + per-challenge pinning + stop over SSH.
-6. ✅ Creds resync + idle auto-stop + VPN hub-and-spoke peering. ⏳ live SSH file browse.
+6. ✅ Creds resync + idle auto-stop + VPN hub-and-spoke peering + live SSH file browse.
 
-> The GCP/SSH/VPN paths are implemented but require a live GCP project + a
-> running WireGuard tunnel to validate end-to-end; they have not yet been
-> exercised against real infrastructure.
+### Validated against live GCP (us-central1)
+
+All paths exercised end-to-end on a real project:
+
+- Auth (service-account **and** ADC token mode), connectivity, instance
+  create/start/stop/delete, SSH, rsync, `ssh_write_file`.
+- **Golden image build**: full `install_scripts/run.sh` ran clean (~12 min on
+  e2-standard-8), creds baked, snapshot created — 16.8 min total.
+- **Live agent execution**: a cloned worker ran a real Claude agent via
+  `swarm_runner`; it `Read` `./challenge_files/flag.txt` and the flag streamed
+  back through `remote_run_agent` into the normal event pipeline (~6s).
+- **SSH file browse**: listing, symlink resolution into `_files`, text+binary
+  read, traversal blocked.
+- **VPN hub-and-spoke**: worker enrolled as a `wg0` peer handshakes with the
+  hub and reaches a service on the hub's VPN IP (`10.13.37.1`).
+
+### Firewall requirement (found in testing)
+
+The controller must allow **`udp:51820` ingress** for workers to establish the
+WireGuard tunnel. The Terraform-provisioned controller VM already opens this
+(`allow-<name>-wireguard`), so production is covered — but the swarm does **not**
+itself create that rule. If the controller runs outside that Terraform, add a
+`udp:51820` ingress rule. (SSH/22 currently relies on the project's existing
+`default-allow-ssh`; the design's "lock SSH to controller IP" rule is not yet
+implemented.)
 
 ## Known limitations
 
