@@ -727,16 +727,29 @@ async def _terminate_run_process_group(run: dict, timeout: float = 5.0) -> bool:
 
 
 async def stop_run(run: dict, reason: str = "user_stop") -> None:
-    """Stop a run — handles both CLI (process) and SDK (task) execution."""
+    """Stop a run — handles CLI (process), SDK (task), and remote swarm runs."""
     proc = run.get("process")
     task = run.get("task")
-    has_active = (proc and proc.returncode is None) or (task and not task.done())
+    swarm_proc = run.get("_swarm_proc")
+    has_active = (
+        (proc and proc.returncode is None)
+        or (task and not task.done())
+        or (swarm_proc is not None and swarm_proc.returncode is None)
+    )
 
     if not has_active:
         return
 
     # Set BEFORE terminating so the finalizer sees it during unwind
     run["_stop_reason"] = reason
+
+    # Remote swarm run: ask the worker to wind down over the SSH control channel.
+    if swarm_proc is not None and swarm_proc.returncode is None:
+        try:
+            from .swarm_exec import stop_remote_run
+        except ImportError:
+            from swarm_exec import stop_remote_run
+        await stop_remote_run(run, reason)
 
     group_stopped = await _terminate_run_process_group(run)
     if not group_stopped and proc and proc.returncode is None:
@@ -2750,6 +2763,7 @@ def save_metadata(challenge: dict) -> None:
         "_tags": challenge.get("_tags", []),
         "_flag_questions": challenge.get("_flag_questions", []),
         "_instance_info": challenge.get("_instance_info"),
+        "_swarm_instance": challenge.get("_swarm_instance", ""),
         "_source_url": challenge.get("_source_url", ""),
         "_connection_id": challenge.get("_connection_id", ""),
         "_discord_thread_id": challenge.get("_discord_thread_id", ""),
@@ -3008,6 +3022,7 @@ def load_challenges_from_disk() -> None:
             "_tags": meta.get("_tags", []),
             "_flag_questions": meta.get("_flag_questions", []),
             "_instance_info": meta.get("_instance_info"),
+            "_swarm_instance": meta.get("_swarm_instance", ""),
             "_source_url": meta.get("_source_url", ""),
             "_connection_id": meta.get("_connection_id", ""),
             "_discord_thread_id": meta.get("_discord_thread_id", ""),
@@ -3790,6 +3805,15 @@ async def create_challenge(request: Request) -> JSONResponse:
         "runs": runs,
     }
     challenges[challenge_id] = challenge
+    # Optionally pin the challenge to a swarm worker (run target).
+    requested_target = form.get("swarm_instance", "").strip()
+    if requested_target:
+        assigned = assign_swarm_to_challenge(challenge, requested_target)
+        if not assigned and requested_target not in ("", "local"):
+            log.warning(
+                "[%s] swarm target '%s' unavailable; running locally",
+                challenge_id[:8], requested_target,
+            )
     sync_challenge_skill_links(challenge)
     save_metadata(challenge)
     asyncio.create_task(discord_ensure_destination(challenge))
@@ -4785,6 +4809,9 @@ async def delete_challenge(request: Request) -> JSONResponse:
     # Stop all runs
     for run in challenge["runs"].values():
         await stop_run(run, "deleted")
+
+    # Free any swarm worker pinned to this challenge.
+    release_swarm_from_challenge(challenge)
 
     challenge_dir = CHALLENGES_DIR / challenge_id
     if challenge_dir.exists():
@@ -6802,8 +6829,23 @@ async def _run_agent_sdk_path(
         challenge_id[:8], run_id[:8], run["agent"], run.get("model", ""),
         run.get("effort", ""), run_cwd, is_continue,
     )
-    try:
-        async for event in provider.run_agent(
+    swarm_ip = _resolve_swarm_ip(challenge)
+    if swarm_ip:
+        try:
+            from .swarm_exec import remote_run_agent
+        except ImportError:
+            from swarm_exec import remote_run_agent
+        log.info(
+            "[%s/%s] Dispatching to swarm worker %s (%s)",
+            challenge_id[:8], run_id[:8], challenge.get("_swarm_instance"), swarm_ip,
+        )
+        event_source = remote_run_agent(
+            challenge, run, prompt, is_continue, swarm_ip,
+            env=agent_runtime_env(run["agent"]),
+            codex_skill_mentions=codex_skill_mentions or [],
+        )
+    else:
+        event_source = provider.run_agent(
             prompt=prompt,
             model=run.get("model", ""),
             effort=run.get("effort", ""),
@@ -6815,7 +6857,9 @@ async def _run_agent_sdk_path(
             _codex_skill_mentions=codex_skill_mentions or [],
             _env=agent_runtime_env(run["agent"]),
             _run=run,
-        ):
+        )
+    try:
+        async for event in event_source:
             # Check if we've been stopped externally
             stop_reason = run.get("_stop_reason")
             if stop_reason:
@@ -8288,6 +8332,60 @@ def _swarm_config_view(settings: dict) -> dict:
         "idle_stop_minutes": cfg.get("idle_stop_minutes", 30),
         "vpn_route": bool(cfg.get("vpn_route", False)),
     }
+
+
+def _resolve_swarm_ip(challenge: dict) -> str:
+    """Return the external IP of the running worker assigned to a challenge."""
+    name = challenge.get("_swarm_instance")
+    if not name:
+        return ""
+    swarm_mod = _swarm_module()
+    inst = swarm_mod.load_registry().get("instances", {}).get(name)
+    if not inst or inst.get("status") != "running":
+        return ""
+    return inst.get("external_ip", "") or ""
+
+
+def assign_swarm_to_challenge(challenge: dict, requested: str) -> str:
+    """Pin a challenge to a worker. requested = '' (local), 'auto', or a name.
+
+    Returns the assigned instance name ('' if local / none available).
+    """
+    requested = (requested or "").strip()
+    if not requested or requested == "local":
+        challenge.pop("_swarm_instance", None)
+        return ""
+    swarm_mod = _swarm_module()
+    reg = swarm_mod.load_registry()
+    instances = reg.get("instances", {})
+    name = ""
+    if requested == "auto":
+        # First running worker not already pinned to another challenge.
+        for n, inst in instances.items():
+            if inst.get("status") == "running" and not inst.get("challenge_id"):
+                name = n
+                break
+    elif requested in instances:
+        name = requested
+    if not name:
+        return ""
+    challenge["_swarm_instance"] = name
+    instances[name]["challenge_id"] = challenge.get("id")
+    swarm_mod.save_registry(reg)
+    return name
+
+
+def release_swarm_from_challenge(challenge: dict) -> None:
+    """Unpin a challenge's worker so it can be reused."""
+    name = challenge.get("_swarm_instance")
+    if not name:
+        return
+    swarm_mod = _swarm_module()
+    reg = swarm_mod.load_registry()
+    inst = reg.get("instances", {}).get(name)
+    if inst and inst.get("challenge_id") == challenge.get("id"):
+        inst["challenge_id"] = None
+        swarm_mod.save_registry(reg)
 
 
 async def swarm_status(request: Request) -> JSONResponse:

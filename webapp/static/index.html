@@ -408,6 +408,14 @@
           <div id="file-list" class="file-list"></div>
         </div>
 
+        <div class="form-group" id="challenge-run-target-group">
+          <label for="challenge-run-target">Run target</label>
+          <select id="challenge-run-target">
+            <option value="local">This host (local)</option>
+          </select>
+          <span class="checkbox-hint">Run on a GCP swarm worker to isolate heavy compute. Configure workers in Settings → Swarm.</span>
+        </div>
+
         <button type="submit" class="btn-primary btn-full">Create & Solve</button>
       </form>
     </div>

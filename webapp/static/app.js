@@ -1041,9 +1041,30 @@ $("#btn-new-challenge").addEventListener("click", () => {
   populateAgentList($("#challenge-agent-list"));
   renderSkillChecklist($("#challenge-skill-list"), defaultEnabledSkills);
   $("#challenge-flag").value = defaultFlagFormat;
+  populateRunTargets();
   $("#modal-overlay").classList.remove("hidden");
   $("#challenge-name").focus();
 });
+
+async function populateRunTargets() {
+  const sel = $("#challenge-run-target");
+  if (!sel) return;
+  let options = '<option value="local">This host (local)</option>';
+  try {
+    const res = await api("/api/swarm");
+    if (res && res.ok) {
+      const data = await res.json();
+      const running = (data.instances || []).filter((i) => i.status === "running");
+      if (running.length) {
+        options += '<option value="auto">Swarm — auto-pick free worker</option>';
+        options += running.map((i) =>
+          `<option value="${esc(i.name)}">Swarm — ${esc(i.name)}${i.challenge_id ? " (busy)" : ""}</option>`
+        ).join("");
+      }
+    }
+  } catch (_) { /* swarm not configured — local only */ }
+  sel.innerHTML = options;
+}
 $("#modal-close").addEventListener("click", closeModal);
 $("#modal-overlay").addEventListener("click", (e) => {
   if (e.target === $("#modal-overlay")) closeModal();
@@ -1159,6 +1180,8 @@ $("#challenge-form").addEventListener("submit", async (e) => {
   fd.append("mode", mode);
   fd.append("agents", JSON.stringify(agents));
   fd.append("enabled_skills", JSON.stringify(getSelectedSkills($("#challenge-skill-list"))));
+  const runTarget = $("#challenge-run-target");
+  if (runTarget) fd.append("swarm_instance", runTarget.value || "local");
 
   for (const upload of pendingChallengeUploads) {
     fd.append("files", upload.file, upload.path);
