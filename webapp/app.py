@@ -8591,6 +8591,34 @@ async def _swarm_remove_vpn(name: str) -> None:
         pass
 
 
+async def _swarm_enroll_pending_workers() -> None:
+    """Enroll running workers that should be on the VPN but aren't yet.
+
+    Called after the VPN comes up so workers created while wg0 was down (which
+    were skipped at create time) get enrolled retroactively. Gated on the
+    vpn_route toggle and a live wg0.
+    """
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    if not swarm_mod.is_configured(settings):
+        return
+    if not swarm_mod.swarm_config(settings).get("vpn_route"):
+        return
+    if not _wg_interface_up():
+        return
+    reg = swarm_mod.load_registry()
+    pending = [
+        name for name, inst in reg.get("instances", {}).items()
+        if inst.get("status") == "running" and inst.get("external_ip")
+        and not inst.get("vpn_pubkey")
+    ]
+    for name in pending:
+        try:
+            await _swarm_enroll_vpn(name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("swarm VPN re-enroll of %s failed: %s", name, exc)
+
+
 async def _swarm_idle_loop() -> None:
     """Periodically stop running workers that have been idle past the timeout."""
     swarm_mod = _swarm_module()
@@ -11089,6 +11117,10 @@ async def vpn_configure(request: Request) -> JSONResponse:
     else:
         _teardown_dns_forwarder()
 
+    # VPN just came up — enroll any swarm workers that were skipped while it
+    # was down (so setting up the VPN later retroactively covers them).
+    asyncio.create_task(_swarm_enroll_pending_workers())
+
     return JSONResponse({
         "ok": True,
         "client_config": client_conf,
@@ -11133,6 +11165,7 @@ async def vpn_toggle(request: Request) -> JSONResponse:
             _setup_dns_forwarder()
         else:
             _teardown_dns_forwarder()
+        asyncio.create_task(_swarm_enroll_pending_workers())
     elif action == "down":
         _persist_wg_settings(_dns_forward_enabled())
         if _wg_interface_up():
