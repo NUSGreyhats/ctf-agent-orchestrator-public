@@ -6410,28 +6410,45 @@ $("#btn-swarm-refresh").addEventListener("click", async () => {
   if (res && res.ok) loadSwarm();
 });
 
+const SWARM_ACT_LABELS = {
+  start: "Starting", stop: "Stopping", "sync-credentials": "Syncing creds",
+  delete: "Deleting",
+};
+
 $("#swarm-instance-rows").addEventListener("click", async (e) => {
   const btn = e.target.closest(".swarm-act");
   if (!btn) return;
   const name = btn.dataset.name;
   const act = btn.dataset.act;
-  if (act === "delete") {
-    if (!confirm(`Delete instance ${name}? Its workspace is destroyed (logs stay here).`)) return;
-    const res = await api(`/api/swarm/instances/${encodeURIComponent(name)}`, { method: "DELETE" });
-    const data = res ? await res.json() : null;
-    if (res && res.ok) { swarmLog(`Deleted ${name}`, "success"); loadSwarm(); }
-    else showToast((data && data.error) || "Delete failed", "error");
+  if (act === "delete" &&
+      !confirm(`Delete instance ${name}? Its workspace is destroyed (logs stay here).`)) {
     return;
   }
-  btn.disabled = true;
-  const res = await api(`/api/swarm/instances/${encodeURIComponent(name)}/${act}`, { method: "POST" });
+  // In-flight feedback: GCP stop/delete can take 30–60s. Disable the row's
+  // buttons, mark the active one, and log immediately so it doesn't look dead.
+  const label = SWARM_ACT_LABELS[act] || act;
+  const row = btn.closest("tr");
+  const rowBtns = row ? row.querySelectorAll(".swarm-act") : [btn];
+  rowBtns.forEach((b) => { b.disabled = true; });
+  const orig = btn.textContent;
+  btn.textContent = `${label}…`;
+  swarmLog(`${label} ${name}…`);
+
+  const url = `/api/swarm/instances/${encodeURIComponent(name)}` +
+    (act === "delete" ? "" : `/${act}`);
+  const res = await api(url, { method: act === "delete" ? "DELETE" : "POST" });
   const data = res ? await res.json() : null;
-  btn.disabled = false;
+
   if (res && res.ok) {
-    swarmLog(`${act} ${name}${data.synced ? `: ${data.synced.join(", ") || "no creds"}` : ""}`, "success");
-    loadSwarm();
+    const extra = data && data.synced ? `: ${data.synced.join(", ") || "no creds"}` : "";
+    swarmLog(`${label} ${name} — done${extra}`, "success");
+    loadSwarm();  // re-renders the table (resets button state)
   } else {
-    showToast((data && data.error) || `${act} failed`, "error");
+    btn.textContent = orig;
+    rowBtns.forEach((b) => { b.disabled = false; });
+    const msg = (data && data.error) || `${label} failed`;
+    swarmLog(`${label} ${name} — ${msg}`, "error");
+    showToast(msg, "error");
   }
 });
 
