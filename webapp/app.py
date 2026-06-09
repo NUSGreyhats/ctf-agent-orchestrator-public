@@ -8478,6 +8478,7 @@ def _swarm_config_view(settings: dict) -> dict:
         "idle_stop_minutes": cfg.get("idle_stop_minutes", 30),
         "vpn_route": bool(cfg.get("vpn_route", False)),
         "use_adc": bool(cfg.get("use_adc", False)),
+        "access_token_configured": bool(cfg.get("access_token")),
     }
 
 
@@ -8755,6 +8756,13 @@ async def swarm_save_config(request: Request) -> JSONResponse:
         swarm["vpn_route"] = bool(body["vpn_route"])
     if "use_adc" in body:
         swarm["use_adc"] = bool(body["use_adc"])
+    # Access token: set when non-empty; the literal "clear" wipes it.
+    if "access_token" in body:
+        tok = str_field(body["access_token"]).strip()
+        if tok == "clear":
+            swarm.pop("access_token", None)
+        elif tok:
+            swarm["access_token"] = tok
 
     settings["swarm"] = swarm
     save_settings(settings)

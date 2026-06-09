@@ -72,8 +72,8 @@ def is_configured(settings: dict) -> bool:
     cfg = swarm_config(settings)
     if not cfg.get("zone"):
         return False
-    if cfg.get("use_adc"):
-        # ADC has no embedded project, so one must be set explicitly.
+    # ADC and pasted-token modes have no embedded project, so one is required.
+    if cfg.get("use_adc") or cfg.get("access_token"):
         return bool(cfg.get("project"))
     return bool(cfg.get("service_account"))
 
@@ -82,11 +82,15 @@ def make_client(settings: dict) -> GCPClient:
     cfg = swarm_config(settings)
     project = cfg.get("project") or None
     zone = cfg.get("zone", "")
+    # Priority: host ADC (auto-refreshing) > pasted access token > SA key.
     if cfg.get("use_adc"):
         return GCPClient(
             project=project, zone=zone,
             token_command=cfg.get("gcloud_token_command") or DEFAULT_ADC_TOKEN_COMMAND,
         )
+    if cfg.get("access_token"):
+        return GCPClient(
+            project=project, zone=zone, access_token=cfg["access_token"])
     sa = cfg.get("service_account")
     if isinstance(sa, str):
         try:

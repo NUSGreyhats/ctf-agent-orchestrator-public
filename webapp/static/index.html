@@ -281,6 +281,12 @@
           </label>
           <span class="checkbox-hint">Mints tokens via <code>gcloud auth print-access-token</code> on this host. Use when service-account keys are disabled by org policy. Requires a Project ID below.</span>
         </div>
+        <div class="form-group" id="settings-swarm-token-group">
+          <label for="settings-swarm-token">Access Token</label>
+          <input type="password" id="settings-swarm-token" placeholder="Paste a GCP OAuth access token (e.g. from `gcloud auth print-access-token`). Leave blank to keep the existing one.">
+          <span class="checkbox-hint" id="settings-swarm-token-status">No token set.</span>
+          <span class="checkbox-hint">Alternative to ADC when you can't run gcloud on this host. Tokens expire (~1h) and don't auto-refresh — re-paste when API calls start failing. Requires a Project ID below. Type <code>clear</code> and save to remove. (ADC, if checked, takes precedence.)</span>
+        </div>
         <div class="form-group" id="settings-swarm-sa-group">
           <label for="settings-swarm-sa">Service Account Key (JSON)</label>
           <textarea id="settings-swarm-sa" rows="4" placeholder='Paste the service-account JSON (Compute Admin). Leave blank to keep the existing key.'></textarea>

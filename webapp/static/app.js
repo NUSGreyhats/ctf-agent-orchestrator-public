@@ -6277,8 +6277,16 @@ function renderSwarmConfig(cfg) {
   $("#settings-swarm-sa-status").textContent = cfg.service_account_configured
     ? "Key configured. Leave blank to keep it."
     : "No key configured.";
+  const tokStatus = $("#settings-swarm-token-status");
+  if (tokStatus) tokStatus.textContent = cfg.access_token_configured
+    ? "Token set. Leave blank to keep it; type 'clear' to remove."
+    : "No token set.";
+  // ADC takes precedence; hide token + SA fields when ADC is on.
+  const adc = !!cfg.use_adc;
   const saGroup = $("#settings-swarm-sa-group");
-  if (saGroup) saGroup.style.display = cfg.use_adc ? "none" : "";
+  if (saGroup) saGroup.style.display = adc ? "none" : "";
+  const tokGroup = $("#settings-swarm-token-group");
+  if (tokGroup) tokGroup.style.display = adc ? "none" : "";
 }
 
 function renderSwarmInstances(instances, image) {
@@ -6328,6 +6336,7 @@ async function loadSwarm() {
 $("#btn-swarm-save").addEventListener("click", async () => {
   const body = {
     service_account: $("#settings-swarm-sa").value.trim(),
+    access_token: $("#settings-swarm-token").value.trim(),
     project: $("#settings-swarm-project").value.trim(),
     zone: $("#settings-swarm-zone").value.trim(),
     default_machine_type: $("#settings-swarm-machine").value.trim(),
@@ -6341,13 +6350,17 @@ $("#btn-swarm-save").addEventListener("click", async () => {
   const data = await res.json();
   if (!res.ok) { showToast(data.error || "Save failed", "error"); return; }
   $("#settings-swarm-sa").value = "";
+  $("#settings-swarm-token").value = "";
   renderSwarmConfig(data.config || {});
   showToast("Swarm config saved", "success");
 });
 
 $("#settings-swarm-adc").addEventListener("change", (e) => {
+  const hide = e.target.checked ? "none" : "";
   const saGroup = $("#settings-swarm-sa-group");
-  if (saGroup) saGroup.style.display = e.target.checked ? "none" : "";
+  if (saGroup) saGroup.style.display = hide;
+  const tokGroup = $("#settings-swarm-token-group");
+  if (tokGroup) tokGroup.style.display = hide;
 });
 
 $("#btn-swarm-test").addEventListener("click", async () => {
