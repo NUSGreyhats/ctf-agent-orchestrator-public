@@ -16,7 +16,7 @@ Repo-owned skills live in `skills/`. During install-script setup, repo-owned and
 
 | Agent | Models | Effort levels | Session resume | Collaboration | Steering |
 |-------|--------|---------------|----------------|---------------|----------|
-| Claude Code | Provider default, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5. Default: Opus 4.6 (1M) | Provider default, Low, Medium, High, Max | Yes | `notify_teammates`, working notes | Yes |
+| Claude Code | Provider default, Fable 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5. Default: Opus 4.6 | Provider default, Low, Medium, High, Max | Yes | `notify_teammates`, working notes | Yes |
 | Codex | Discovered from local cache/config | Per-model, discovered from local cache; common fallback includes Low, Medium, High, XHigh. Default: XHigh | Yes | Dynamic `notify_teammates`, working notes | Yes |
 
 Both agents run through their provider integration paths. Multiple agents can race the same challenge by adding multiple agent rows when creating, bulk uploading, or importing challenges; two or more agent rows automatically create a parallel challenge.
