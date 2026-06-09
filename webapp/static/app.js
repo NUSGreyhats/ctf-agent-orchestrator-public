@@ -90,6 +90,7 @@ const views = {
 function showView(name) {
   Object.values(views).forEach((v) => v.classList.add("hidden"));
   views[name].classList.remove("hidden");
+  if (name !== "detail") document.title = "CTF Solver";
 }
 
 // === Agent Helpers ===
@@ -1489,6 +1490,7 @@ async function openChallenge(id) {
   }));
 
   $("#detail-name").textContent = c.name;
+  document.title = c.name ? `${c.name} - CTF Solver` : "CTF Solver";
   updateStatusBadge(c.status);
 
   // Mode badge
