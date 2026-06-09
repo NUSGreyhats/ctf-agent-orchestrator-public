@@ -8527,7 +8527,13 @@ async def _swarm_enroll_vpn(name: str) -> None:
     if not vpn_ip:
         await _swarm_broadcast("vpn", "no free VPN address", "error")
         return
-    rc, out, _ = await swarm_mod.ssh_run(
+    # A freshly-created worker may not be accepting SSH yet; wait for it.
+    try:
+        await swarm_mod.ssh_wait_ready(ip_addr, timeout=120)
+    except Exception as exc:  # noqa: BLE001
+        await _swarm_broadcast("vpn", f"{name}: SSH not ready for VPN ({exc})", "error")
+        return
+    rc, out, err = await swarm_mod.ssh_run(
         ip_addr,
         "priv=$(wg genkey); pub=$(printf '%s' \"$priv\" | wg pubkey); "
         "printf '%s\\n%s\\n' \"$priv\" \"$pub\"",
@@ -8535,7 +8541,9 @@ async def _swarm_enroll_vpn(name: str) -> None:
     )
     lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
     if rc != 0 or len(lines) < 2:
-        await _swarm_broadcast("vpn", f"key generation failed on {name}", "error")
+        detail = (err or out).strip()[:200] or "no output"
+        await _swarm_broadcast(
+            "vpn", f"key generation failed on {name}: {detail}", "error")
         return
     worker_priv, worker_pub = lines[0], lines[1]
     allowed = ", ".join([VPN_CIDR, *_wg_routed_networks()])
