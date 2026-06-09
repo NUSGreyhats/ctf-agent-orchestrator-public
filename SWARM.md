@@ -97,20 +97,32 @@ worker (`Endpoint = <controller_pub_ip>:51820`, `AllowedIPs = {VPN_CIDR} + inter
 CIDRs`, `DNS = {VPN_SERVER_IP}` when dns_forward is on). User-facing VPN setup is
 unchanged.
 
-## Build order
+## Build order / status
 
-1. **GCP client + creds settings + connectivity test.**
-2. **Golden-image build** (provision base via `install_scripts`, bake agent
-   creds, snapshot to image).
-3. **Clone/start/stop/delete + `state/swarm.json` + Swarm UI.**
-4. **`swarm_runner.py` + controller dispatch + event-stream plumbing** (core).
-5. **Run-target selector + sticky pinning + steer/stop/add-run over SSH.**
-6. **Live SSH file browse + creds resync + idle auto-stop + VPN peering.**
+1. ✅ GCP client (`gcp.py`) + creds settings + connectivity test.
+2. ✅ Golden-image build (provision base via `install_scripts`, bake creds, snapshot).
+3. ✅ Clone/start/stop/delete + `state/swarm.json` + Swarm UI.
+4. ✅ `swarm_runner.py` + controller dispatch (`swarm_exec.py`) + event plumbing.
+5. ✅ Run-target selector + per-challenge pinning + stop over SSH.
+6. ✅ Creds resync + idle auto-stop + VPN hub-and-spoke peering. ⏳ live SSH file browse.
+
+> The GCP/SSH/VPN paths are implemented but require a live GCP project + a
+> running WireGuard tunnel to validate end-to-end; they have not yet been
+> exercised against real infrastructure.
 
 ## Known limitations
 
 - A worker holds one challenge's state on its local disk; **Delete destroys the
   workspace** (centralized logs/flags/notes survive on the controller via the
   event stream). Stop preserves the disk.
+- **Files tab** currently reads controller-side workspace; for a remote run the
+  agent's files live on the worker. Live SSH browse of the worker workspace is
+  the remaining item-6 piece (use `ssh` to the worker until then).
+- **VPN on start/stop**: a worker is enrolled on VPN at create time and removed
+  at delete. Stop/Start (which changes the external IP) does not yet re-enroll —
+  re-create or re-enroll the peer if you cycle a VPN worker.
 - VPN routing is the reverse-tunnel model only. CTF-provided *forward* VPN
   configs (drop a config directly on the worker) are a possible future add-on.
+- `notify_teammates` across agents works via the shared worker filesystem
+  (same instance per challenge); the controller-side relay path exists for
+  cross-process injection (`swarm_runner` `inject` control message).

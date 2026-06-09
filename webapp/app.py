@@ -8334,6 +8334,149 @@ def _swarm_config_view(settings: dict) -> dict:
     }
 
 
+def _wg_routed_networks() -> list[str]:
+    """Internal CIDRs the reverse client routes (parsed from wg0.conf's peer)."""
+    nets: list[str] = []
+    if not WG_CONF.exists():
+        return nets
+    in_peer = False
+    for line in WG_CONF.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("[Peer]"):
+            in_peer = True
+            continue
+        if in_peer and s.startswith("AllowedIPs"):
+            for v in s.split("=", 1)[1].split(","):
+                v = v.strip()
+                if v and not v.startswith(VPN_SUBNET):
+                    nets.append(v)
+            break
+    return nets
+
+
+async def _swarm_enroll_vpn(name: str) -> None:
+    """Enroll a worker as a wg0 peer so it routes internal CIDRs via the controller.
+
+    Hub-and-spoke (SWARM.md, Solution 2). Best-effort; gated by the vpn_route
+    toggle at the call site and a live wg0 here.
+    """
+    swarm_mod = _swarm_module()
+    if not _wg_interface_up():
+        await _swarm_broadcast("vpn", f"wg0 is down; skipped VPN for {name}", "error")
+        return
+    reg = swarm_mod.load_registry()
+    inst = reg.get("instances", {}).get(name)
+    if not inst or not inst.get("external_ip"):
+        return
+    ip_addr = inst["external_ip"]
+    used = {i.get("vpn_ip") for i in reg["instances"].values() if i.get("vpn_ip")}
+    used |= {VPN_SERVER_IP, VPN_CLIENT_IP}
+    vpn_ip = next(
+        (f"{VPN_SUBNET}.{o}" for o in range(3, 254)
+         if f"{VPN_SUBNET}.{o}" not in used),
+        "",
+    )
+    if not vpn_ip:
+        await _swarm_broadcast("vpn", "no free VPN address", "error")
+        return
+    rc, out, _ = await swarm_mod.ssh_run(
+        ip_addr,
+        "priv=$(wg genkey); pub=$(printf '%s' \"$priv\" | wg pubkey); "
+        "printf '%s\\n%s\\n' \"$priv\" \"$pub\"",
+        check=False,
+    )
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if rc != 0 or len(lines) < 2:
+        await _swarm_broadcast("vpn", f"key generation failed on {name}", "error")
+        return
+    worker_priv, worker_pub = lines[0], lines[1]
+    allowed = ", ".join([VPN_CIDR, *_wg_routed_networks()])
+    worker_conf = (
+        "[Interface]\n"
+        f"Address = {vpn_ip}/24\n"
+        f"PrivateKey = {worker_priv}\n"
+        "\n[Peer]\n"
+        f"PublicKey = {WG_SERVER_PUBLIC_KEY.read_text().strip()}\n"
+        f"Endpoint = {_get_server_public_ip()}:51820\n"
+        f"AllowedIPs = {allowed}\n"
+        "PersistentKeepalive = 25\n"
+    )
+    try:
+        subprocess.run(
+            ["wg", "set", "wg0", "peer", worker_pub, "allowed-ips", f"{vpn_ip}/32"],
+            capture_output=True, timeout=10,
+        )
+        await swarm_mod.ssh_write_file(ip_addr, "/etc/wireguard/wg0.conf", worker_conf)
+        await swarm_mod.ssh_run(
+            ip_addr,
+            "wg-quick down wg0 2>/dev/null; wg-quick up wg0",
+            check=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        await _swarm_broadcast("vpn", f"VPN setup failed on {name}: {exc}", "error")
+        return
+    inst["vpn_ip"] = vpn_ip
+    inst["vpn_pubkey"] = worker_pub
+    swarm_mod.save_registry(reg)
+    await _swarm_broadcast("vpn", f"{name} on VPN as {vpn_ip}", "success")
+
+
+async def _swarm_remove_vpn(name: str) -> None:
+    swarm_mod = _swarm_module()
+    reg = swarm_mod.load_registry()
+    inst = reg.get("instances", {}).get(name)
+    if not inst:
+        return
+    pub = inst.get("vpn_pubkey")
+    if pub and _wg_interface_up():
+        try:
+            subprocess.run(["wg", "set", "wg0", "peer", pub, "remove"],
+                           capture_output=True, timeout=10)
+        except Exception:  # noqa: BLE001
+            pass
+    inst.pop("vpn_ip", None)
+    inst.pop("vpn_pubkey", None)
+    swarm_mod.save_registry(reg)
+
+
+async def _swarm_idle_loop() -> None:
+    """Periodically stop running workers that have been idle past the timeout."""
+    swarm_mod = _swarm_module()
+    while True:
+        await asyncio.sleep(120)
+        try:
+            settings = load_settings()
+            if not swarm_mod.is_configured(settings):
+                continue
+            timeout = int(swarm_mod.swarm_config(settings).get(
+                "idle_stop_minutes", 30) or 0)
+            if timeout <= 0:
+                continue
+            now = time.time()
+            reg = swarm_mod.load_registry()
+            to_stop = []
+            for name, inst in reg.get("instances", {}).items():
+                if inst.get("status") != "running":
+                    continue
+                if inst.get("challenge_id"):
+                    inst["idle_since"] = int(now)  # busy → reset the clock
+                    continue
+                idle_since = inst.get("idle_since") or inst.get("created_at") or now
+                if now - idle_since > timeout * 60:
+                    to_stop.append(name)
+            swarm_mod.save_registry(reg)
+            for name in to_stop:
+                try:
+                    await swarm_mod.stop_worker(settings, name)
+                    await _swarm_broadcast(
+                        "idle", f"Auto-stopped idle worker {name}", "info",
+                        refresh=True)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("swarm idle-stop %s failed: %s", name, exc)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("swarm idle loop error: %s", exc)
+
+
 def _resolve_swarm_ip(challenge: dict) -> str:
     """Return the external IP of the running worker assigned to a challenge."""
     name = challenge.get("_swarm_instance")
@@ -8385,6 +8528,7 @@ def release_swarm_from_challenge(challenge: dict) -> None:
     inst = reg.get("instances", {}).get(name)
     if inst and inst.get("challenge_id") == challenge.get("id"):
         inst["challenge_id"] = None
+        inst["idle_since"] = int(time.time())
         swarm_mod.save_registry(reg)
 
 
@@ -8565,6 +8709,8 @@ async def swarm_create_instances(request: Request) -> JSONResponse:
                         subnetwork=cfg.get("subnetwork", "default"),
                     )
                     await _swarm_broadcast("create", f"{name} is up", "success")
+                    if cfg.get("vpn_route"):
+                        await _swarm_enroll_vpn(name)
                 except Exception as exc:  # noqa: BLE001
                     await _swarm_broadcast(
                         "create", f"{name} failed: {exc}", "error")
@@ -8618,6 +8764,7 @@ async def swarm_delete_instance(request: Request) -> JSONResponse:
     swarm_mod = _swarm_module()
     GCPError = _swarm_gcp_error()
     try:
+        await _swarm_remove_vpn(name)
         await swarm_mod.delete_worker(settings, name)
         return JSONResponse({"ok": True})
     except GCPError as exc:
@@ -12279,6 +12426,7 @@ async def _reconcile_discord_gateway() -> None:
 @asynccontextmanager
 async def lifespan(app):
     asyncio.create_task(_reconcile_discord_gateway())
+    asyncio.create_task(_swarm_idle_loop())
     yield
     await _stop_discord_gateway()
     for challenge in challenges.values():

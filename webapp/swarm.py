@@ -169,6 +169,21 @@ async def ssh_run(
     return rc, so, se
 
 
+async def ssh_write_file(ip: str, remote_path: str, content: str,
+                         *, mode: str = "600") -> None:
+    """Write text to a file on the worker over SSH (content via stdin)."""
+    args = ["ssh", "-i", str(SWARM_KEY), *SSH_OPTS, f"root@{ip}",
+            f"cat > {remote_path} && chmod {mode} {remote_path}"]
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate(content.encode())
+    if proc.returncode != 0:
+        raise GCPError(f"failed to write {remote_path}: "
+                       f"{err.decode(errors='replace').strip()}")
+
+
 async def ssh_wait_ready(ip: str, *, timeout: float = 300.0) -> None:
     """Block until the worker accepts SSH."""
     deadline = time.time() + timeout
