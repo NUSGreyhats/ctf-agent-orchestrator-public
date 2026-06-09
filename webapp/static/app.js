@@ -657,6 +657,7 @@ async function loadChallenges() {
 
       html += `
       <div class="challenge-card status-${c.status}" data-id="${c.id}">
+        <a class="card-link" href="#/challenge/${c.id}" aria-label="Open challenge"></a>
         <span class="badge badge-${c.status}">${c.status}</span>
         <span class="card-name">${esc(c.name)}</span>
         <span class="card-info-line">${esc(challengeInfo)}</span>
@@ -673,8 +674,14 @@ async function loadChallenges() {
   list.querySelectorAll(".challenge-card").forEach((card) =>
     card.addEventListener("click", (e) => {
       if (e.target.closest(".btn-card-delete") || e.target.closest(".btn-card-start")) return;
-      if (exportMode) { toggleExportCard(card); return; }
-      openChallenge(card.dataset.id);
+      if (exportMode) { e.preventDefault(); toggleExportCard(card); return; }
+      // Plain left-click: navigate in-place without a full reload. Ctrl/Cmd/middle
+      // clicks are left to the .card-link anchor so the browser opens a new tab.
+      const link = e.target.closest(".card-link");
+      if (link && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.button === 0) {
+        e.preventDefault();
+        openChallenge(card.dataset.id);
+      }
     })
   );
   list.querySelectorAll(".btn-card-delete").forEach((btn) =>

@@ -213,6 +213,10 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
   position: relative;
 }
 .challenge-card:hover { border-color: var(--accent); background: var(--bg-hover); }
+.challenge-card .card-link { position: absolute; inset: 0; z-index: 1; border-radius: 8px; }
+.challenge-card .btn-card-delete,
+.challenge-card .btn-card-start { z-index: 2; }
+.export-mode .challenge-card .card-link { pointer-events: none; }
 .challenge-card.status-solving { border-left: 3px solid var(--yellow); }
 .challenge-card.status-solved { border-left: 3px solid var(--green); background: var(--green-dim); border-color: var(--green); }
 .challenge-card.status-failed { border-left: 3px solid var(--red); }
@@ -228,7 +232,7 @@ header h1 { font-size: 0.95rem; font-weight: 600; flex: 1; }
 .challenge-card .btn-card-delete:hover { color: var(--red); }
 .challenge-card .btn-card-start {
   font-size: 0.65rem; padding: 0.15rem 0.4rem; margin-top: 0.15rem;
-  align-self: flex-start;
+  align-self: flex-start; position: relative;
 }
 .card-name { font-weight: 600; font-size: 0.82rem; padding-right: 3rem; }
 .card-info-line {
