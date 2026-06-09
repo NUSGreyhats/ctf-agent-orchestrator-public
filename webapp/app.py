@@ -10817,7 +10817,7 @@ async def _discord_stop_runs(
 async def _discord_resume_runs(
     challenge_id: str,
     challenge: dict,
-    continue_msg: str = "Resume from Discord",
+    continue_msg: str = "Continue solving the challenge.",
     actor: str = "",
 ) -> str:
     resumed = []
