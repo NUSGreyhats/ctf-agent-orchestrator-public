@@ -8547,16 +8547,20 @@ async def _swarm_enroll_vpn(name: str) -> None:
     if not inst or not inst.get("external_ip"):
         return
     ip_addr = inst["external_ip"]
-    used = {i.get("vpn_ip") for i in reg["instances"].values() if i.get("vpn_ip")}
-    used |= {VPN_SERVER_IP, VPN_CLIENT_IP}
-    vpn_ip = next(
-        (f"{VPN_SUBNET}.{o}" for o in range(3, 254)
-         if f"{VPN_SUBNET}.{o}" not in used),
-        "",
-    )
+    # Reuse the worker's existing VPN IP on re-enroll (e.g. a route refresh);
+    # only allocate a fresh address when the worker isn't on the VPN yet.
+    vpn_ip = inst.get("vpn_ip")
     if not vpn_ip:
-        await _swarm_broadcast("vpn", "no free VPN address", "error")
-        return
+        used = {i.get("vpn_ip") for i in reg["instances"].values() if i.get("vpn_ip")}
+        used |= {VPN_SERVER_IP, VPN_CLIENT_IP}
+        vpn_ip = next(
+            (f"{VPN_SUBNET}.{o}" for o in range(3, 254)
+             if f"{VPN_SUBNET}.{o}" not in used),
+            "",
+        )
+        if not vpn_ip:
+            await _swarm_broadcast("vpn", "no free VPN address", "error")
+            return
     # A freshly-created worker may not be accepting SSH yet; wait for it.
     try:
         await swarm_mod.ssh_wait_ready(ip_addr, timeout=120)
@@ -8655,6 +8659,49 @@ async def _swarm_enroll_pending_workers() -> None:
             await _swarm_enroll_vpn(name)
         except Exception as exc:  # noqa: BLE001
             log.warning("swarm VPN re-enroll of %s failed: %s", name, exc)
+
+
+async def _swarm_resync_vpn_routes() -> None:
+    """Re-push enrolled workers' wg0 configs after the reverse-routed CIDRs change.
+
+    A worker's AllowedIPs are written once at enroll time (_swarm_enroll_vpn), so
+    when the controller's routed networks change the workers keep routing the old
+    CIDRs. Re-enrolling each rewrites its config with the current
+    _wg_routed_networks() (the IP is reused). Gated on the vpn_route toggle and a
+    live wg0.
+    """
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    if not swarm_mod.is_configured(settings):
+        return
+    if not swarm_mod.swarm_config(settings).get("vpn_route"):
+        return
+    if not _wg_interface_up():
+        return
+    reg = swarm_mod.load_registry()
+    enrolled = [
+        name for name, inst in reg.get("instances", {}).items()
+        if inst.get("status") == "running" and inst.get("external_ip")
+        and inst.get("vpn_pubkey")
+    ]
+    for name in enrolled:
+        try:
+            await _swarm_enroll_vpn(name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("swarm VPN route resync of %s failed: %s", name, exc)
+
+
+async def _swarm_sync_vpn_after_reconfigure(routes_changed: bool) -> None:
+    """Post-reconfigure swarm VPN sync.
+
+    Enrolls workers skipped while wg0 was down, then — only if the reverse-routed
+    CIDRs changed — refreshes already-enrolled workers so they pick up the new
+    networks. Run sequentially in one task so the two registry read/modify/write
+    passes don't race.
+    """
+    await _swarm_enroll_pending_workers()
+    if routes_changed:
+        await _swarm_resync_vpn_routes()
 
 
 async def _swarm_idle_loop() -> None:
@@ -11139,6 +11186,10 @@ async def vpn_configure(request: Request) -> JSONResponse:
     if network_error:
         return JSONResponse({"error": network_error}, status_code=400)
 
+    # Capture the reverse-routed CIDRs before overwriting wg0.conf so we can tell
+    # whether they changed; enrolled swarm workers need a refresh only if so.
+    routes_changed = set(_wg_routed_networks()) != set(client_networks)
+
     # Bring down existing interface if up
     if _wg_interface_up():
         subprocess.run(["wg-quick", "down", "wg0"], capture_output=True)
@@ -11172,9 +11223,10 @@ async def vpn_configure(request: Request) -> JSONResponse:
     else:
         _teardown_dns_forwarder()
 
-    # VPN just came up — enroll any swarm workers that were skipped while it
-    # was down (so setting up the VPN later retroactively covers them).
-    asyncio.create_task(_swarm_enroll_pending_workers())
+    # VPN just came up — enroll any swarm workers that were skipped while it was
+    # down (so setting up the VPN later retroactively covers them), then refresh
+    # already-enrolled workers if the reverse-routed CIDRs changed.
+    asyncio.create_task(_swarm_sync_vpn_after_reconfigure(routes_changed))
 
     return JSONResponse({
         "ok": True,
