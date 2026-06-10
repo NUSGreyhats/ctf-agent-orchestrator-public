@@ -694,6 +694,7 @@ provider = AgentProvider(
         ("low", "Low"),
         ("medium", "Medium"),
         ("high", "High"),
+        ("xhigh", "XHigh"),
         ("max", "Max"),
     ),
     default_effort="high",
