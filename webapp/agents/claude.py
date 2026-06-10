@@ -647,6 +647,8 @@ provider = AgentProvider(
     label="Claude",
     models=(
         ("", "Provider default"),
+        ("claude-fable-5", "Fable 5.0"),
+        ("claude-opus-4-8[1m]", "Opus 4.8 (1M)"),
         ("claude-opus-4-8", "Opus 4.8"),
         ("claude-opus-4-7", "Opus 4.7"),
         ("claude-sonnet-4-6", "Sonnet 4.6"),
@@ -669,6 +671,7 @@ provider = AgentProvider(
         ("low", "Low"),
         ("medium", "Medium"),
         ("high", "High"),
+        ("xhigh", "xHigh"),
         ("max", "Max"),
     ),
     default_effort="high",
