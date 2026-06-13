@@ -16,7 +16,7 @@ Repo-owned skills live in `skills/`. During install-script setup, repo-owned and
 
 | Agent | Models | Effort levels | Session resume | Collaboration | Steering |
 |-------|--------|---------------|----------------|---------------|----------|
-| Claude Code | Provider default, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5. Default: Opus 4.6 (1M) | Provider default, Low, Medium, High, Max | Yes | `notify_teammates`, working notes | Yes |
+| Claude Code | Provider default, Fable 5, Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5. Default: Opus 4.6 | Provider default, Low, Medium, High, Max | Yes | `notify_teammates`, working notes | Yes |
 | Codex | Discovered from local cache/config | Per-model, discovered from local cache; common fallback includes Low, Medium, High, XHigh. Default: XHigh | Yes | Dynamic `notify_teammates`, working notes | Yes |
 
 Both agents run through their provider integration paths. Multiple agents can race the same challenge by adding multiple agent rows when creating, bulk uploading, or importing challenges; two or more agent rows automatically create a parallel challenge.
@@ -29,6 +29,7 @@ Both agents run through their provider integration paths. Multiple agents can ra
 - **Per-run views** — Single challenges have one run. Parallel challenges have one run per agent and can be viewed side-by-side or as tabs.
 - **Flag detection** — Flags matching known patterns (`flag{...}`, `CTF{...}`, `HTB{...}`, `picoCTF{...}`, or custom formats) are automatically detected and surfaced in the sidebar. A fresh run also performs a silent `ctfgrep` preflight over challenge files and adds bounded matches as detected flag candidates without putting scan output into the agent prompt. Flags show as neutral until submitted — green for correct, red for rejected. State persists across page navigations.
 - **Steering** — Send guidance to a running agent mid-solve. The agent is stopped and resumed with your message from the current session where supported.
+- **Advisor** — A per-challenge conversational advisor agent (configurable provider/model) that reads the solver agents' live transcripts, answers your questions about the solve, researches techniques/CVEs online, and can relay a concise hint to the running solvers via the broadcast bus. Available from the **Advisor** tab in the challenge view.
 - **Runtime agent controls** — Stop a single active agent, stop all active agents, or add new agents to an existing unsolved challenge with a custom prompt and skill list.
 - **Resume & Retry** — Resume continues from saved session state when available. Retry starts fresh. Mark Solved and Unsolve let you manually override challenge status.
 - **Chat view modes** — Split view (agents side-by-side) or tabbed view (click to switch), configurable in settings.

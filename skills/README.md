@@ -36,6 +36,7 @@ from `all-skills/` into each challenge run's `.claude/skills` and
 | [apk-analysis](tools/apk-analysis/SKILL.md) | Android reverse engineering | jadx, apktool, IDA Pro |
 | [analyze-with-ida-domain-api](tools/ida/SKILL.md) | Static binary analysis | IDA Pro Domain API (idalib, headless mode) |
 | [kernel-gef-debugging](tools/kernel-gef/SKILL.md) | Kernel debugging | GDB + GEF via MCP |
+| [craft-rop-chains-with-angrop](tools/angrop-rop-chains/SKILL.md) | ROP chain building (pwn) | angr + angrop |
 
 ## External (ljagiello/ctf-skills)
 

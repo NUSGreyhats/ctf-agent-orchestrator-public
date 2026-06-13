@@ -268,6 +268,107 @@
           </div>
         </div>
       </div>
+
+      <!-- Swarm (remote GCP execution) -->
+      <div class="settings-section">
+        <h2 class="settings-section-title">Swarm (GCP)</h2>
+        <p class="text-muted">Dispatch challenges to dedicated GCP worker VMs so heavy agent compute does not interfere with this host. See <code>SWARM.md</code>.</p>
+
+        <div class="form-group form-group-inline">
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-swarm-adc">
+            <span>Use host gcloud credentials (ADC)</span>
+          </label>
+          <span class="checkbox-hint">Mints tokens via <code>gcloud auth print-access-token</code> on this host. Use when service-account keys are disabled by org policy. Requires a Project ID below.</span>
+        </div>
+        <div class="form-group" id="settings-swarm-token-group">
+          <label for="settings-swarm-token">Access Token</label>
+          <input type="password" id="settings-swarm-token" placeholder="Paste a GCP OAuth access token (e.g. from `gcloud auth print-access-token`). Leave blank to keep the existing one.">
+          <span class="checkbox-hint" id="settings-swarm-token-status">No token set.</span>
+          <span class="checkbox-hint">Alternative to ADC when you can't run gcloud on this host. Tokens expire (~1h) and don't auto-refresh — re-paste when API calls start failing. Requires a Project ID below. Type <code>clear</code> and save to remove. (ADC, if checked, takes precedence.)</span>
+        </div>
+        <div class="form-group" id="settings-swarm-sa-group">
+          <label for="settings-swarm-sa">Service Account Key (JSON)</label>
+          <textarea id="settings-swarm-sa" rows="4" placeholder='Paste the service-account JSON (Compute Admin). Leave blank to keep the existing key.'></textarea>
+          <span class="checkbox-hint" id="settings-swarm-sa-status">No key configured.</span>
+        </div>
+        <div class="form-group form-row">
+          <div>
+            <label for="settings-swarm-project">Project ID</label>
+            <input type="text" id="settings-swarm-project" placeholder="from key if blank">
+          </div>
+          <div>
+            <label for="settings-swarm-zone">Zone</label>
+            <input type="text" id="settings-swarm-zone" placeholder="e.g. asia-southeast1-c">
+          </div>
+        </div>
+        <div class="form-group form-row">
+          <div>
+            <label for="settings-swarm-machine">Default machine type</label>
+            <input type="text" id="settings-swarm-machine" placeholder="e2-standard-4 or custom">
+          </div>
+          <div>
+            <label for="settings-swarm-disk">Disk (GB)</label>
+            <input type="number" id="settings-swarm-disk" min="10" placeholder="100">
+          </div>
+        </div>
+        <div class="form-group form-row">
+          <div>
+            <label for="settings-swarm-idle">Idle auto-stop (min, 0 = off)</label>
+            <input type="number" id="settings-swarm-idle" min="0" placeholder="30">
+          </div>
+          <div class="form-group-inline" style="align-self:end">
+            <label class="checkbox-label">
+              <input type="checkbox" id="settings-swarm-vpn">
+              <span>Route VPN to workers</span>
+            </label>
+          </div>
+        </div>
+        <div class="settings-actions">
+          <button id="btn-swarm-save" class="btn-primary">Save GCP Config</button>
+          <button id="btn-swarm-test" class="btn-ghost btn-sm">Test Connection</button>
+          <span id="swarm-test-result" class="text-muted" style="margin-left:0.5rem"></span>
+        </div>
+
+        <div class="swarm-image-row">
+          <h3 class="settings-subtitle">Golden Image</h3>
+          <span id="swarm-image-status" class="text-muted">No image built yet.</span>
+          <button id="btn-swarm-build-image" class="btn-ghost btn-sm">Build / Rebuild Image</button>
+          <span class="checkbox-hint">Provisions one base VM with the install scripts and snapshots it. Takes ~10–15 min.</span>
+        </div>
+
+        <div class="swarm-spinup-row">
+          <h3 class="settings-subtitle">Spin Up Workers</h3>
+          <div class="form-group form-row">
+            <div>
+              <label for="settings-swarm-count">Count</label>
+              <input type="number" id="settings-swarm-count" min="1" max="20" value="1">
+            </div>
+            <div>
+              <label for="settings-swarm-spinup-machine">Machine type (blank = default)</label>
+              <input type="text" id="settings-swarm-spinup-machine" placeholder="e2-standard-4">
+            </div>
+          </div>
+          <button id="btn-swarm-spinup" class="btn-primary">Spin Up</button>
+          <button id="btn-swarm-refresh" class="btn-ghost btn-sm">Refresh</button>
+        </div>
+
+        <div class="swarm-instances">
+          <h3 class="settings-subtitle">Instances</h3>
+          <table id="swarm-instance-table" class="swarm-table">
+            <thead>
+              <tr><th>Name</th><th>Status</th><th>IP</th><th>Type</th><th>Challenge</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="swarm-instance-rows"></tbody>
+          </table>
+          <p id="swarm-no-instances" class="text-muted">No instances.</p>
+        </div>
+
+        <div class="swarm-log-wrap">
+          <h3 class="settings-subtitle">Activity</h3>
+          <pre id="swarm-log" class="swarm-log"></pre>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -318,6 +419,14 @@
             <input type="file" id="challenge-files" multiple>
           </div>
           <div id="file-list" class="file-list"></div>
+        </div>
+
+        <div class="form-group" id="challenge-run-target-group">
+          <label for="challenge-run-target">Run target</label>
+          <select id="challenge-run-target">
+            <option value="local">This host (local)</option>
+          </select>
+          <span class="checkbox-hint">Run on a GCP swarm worker to isolate heavy compute. Configure workers in Settings → Swarm.</span>
         </div>
 
         <button type="submit" class="btn-primary btn-full">Create & Solve</button>
@@ -450,6 +559,7 @@
           <button class="sidebar-tab active" data-tab="tab-info">Info</button>
           <button class="sidebar-tab" data-tab="tab-stats">Stats</button>
           <button class="sidebar-tab" data-tab="tab-files">Files <span id="file-counter" class="tab-badge">0</span></button>
+          <button class="sidebar-tab" data-tab="tab-advisor">Advisor</button>
         </div>
 
         <!-- Info tab -->
@@ -503,6 +613,24 @@
             </div>
             <div id="files-breadcrumb" class="files-breadcrumb"></div>
             <div id="files-tree"></div>
+          </div>
+        </div>
+
+        <!-- Advisor tab -->
+        <div id="tab-advisor" class="sidebar-content">
+          <div class="advisor-panel">
+            <div id="advisor-config" class="advisor-config">
+              <select id="advisor-agent" class="advisor-select" title="Advisor agent"></select>
+              <select id="advisor-model" class="advisor-select" title="Model"></select>
+              <button id="btn-advisor-reset" class="btn-ghost btn-sm" title="New conversation">Reset</button>
+            </div>
+            <div id="advisor-log" class="advisor-log">
+              <div class="advisor-hint text-muted">Ask the advisor about the ongoing solve, or have it research techniques. It can read the solver transcripts and (sparingly) push hints to them.</div>
+            </div>
+            <form id="advisor-form" class="advisor-input-row">
+              <textarea id="advisor-input" rows="2" placeholder="Ask the advisor… (e.g. why is agent 2 stuck? any recent bypass for this?)"></textarea>
+              <button type="submit" id="advisor-send" class="btn-primary btn-sm">Send</button>
+            </form>
           </div>
         </div>
 

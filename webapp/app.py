@@ -727,16 +727,29 @@ async def _terminate_run_process_group(run: dict, timeout: float = 5.0) -> bool:
 
 
 async def stop_run(run: dict, reason: str = "user_stop") -> None:
-    """Stop a run — handles both CLI (process) and SDK (task) execution."""
+    """Stop a run — handles CLI (process), SDK (task), and remote swarm runs."""
     proc = run.get("process")
     task = run.get("task")
-    has_active = (proc and proc.returncode is None) or (task and not task.done())
+    swarm_proc = run.get("_swarm_proc")
+    has_active = (
+        (proc and proc.returncode is None)
+        or (task and not task.done())
+        or (swarm_proc is not None and swarm_proc.returncode is None)
+    )
 
     if not has_active:
         return
 
     # Set BEFORE terminating so the finalizer sees it during unwind
     run["_stop_reason"] = reason
+
+    # Remote swarm run: ask the worker to wind down over the SSH control channel.
+    if swarm_proc is not None and swarm_proc.returncode is None:
+        try:
+            from .swarm_exec import stop_remote_run
+        except ImportError:
+            from swarm_exec import stop_remote_run
+        await stop_remote_run(run, reason)
 
     group_stopped = await _terminate_run_process_group(run)
     if not group_stopped and proc and proc.returncode is None:
@@ -814,6 +827,11 @@ async def apply_solved_status(
             changed_run_ids.add(other_id)
 
     challenge["status"] = derive_challenge_status(challenge)
+    # Free any pinned swarm worker so it can be reused / idle-stopped. The
+    # worker keeps running (workspace stays inspectable) until idle timeout or
+    # a manual stop; it is just unpinned from this solved challenge.
+    if challenge.get("status") == "solved":
+        release_swarm_from_challenge(challenge)
     save_metadata(challenge)
 
     for changed_id in changed_run_ids:
@@ -2043,8 +2061,24 @@ def skill_catalog_by_name() -> dict[str, dict]:
     return _skill_catalog_by_name_cache
 
 
+# Skills enabled by default for new challenges (when the operator has not
+# customized the set in Settings). Tool/forensics skills that should always be
+# available; methodology/category/tool-specific skills like the ROP and crypto
+# skills are left off so they load on demand via their triggers.
+DEFAULT_ENABLED_SKILLS = [
+    "kernel-gef-debugging",
+    "analyze-with-ida-domain-api",
+    "apk-analysis",
+    "volatility3-memdump",
+    "file-repair-and-stego",
+    "tsk-disk-recovery",
+    "pcap-extraction",
+]
+
+
 def default_enabled_skill_names() -> list[str]:
-    return [entry["name"] for entry in discover_skill_catalog()]
+    available = {entry["name"] for entry in discover_skill_catalog()}
+    return [name for name in DEFAULT_ENABLED_SKILLS if name in available]
 
 
 def _coerce_skill_list(value: object) -> list[str] | None:
@@ -2328,6 +2362,7 @@ def load_settings() -> dict:
         "discord_channel_id": "",
         "discord_guild_id": "",
         "discord_challenge_layout": DEFAULT_DISCORD_CHALLENGE_LAYOUT,
+        "swarm": {},
     }
     if SETTINGS_FILE.exists():
         try:
@@ -2673,6 +2708,20 @@ def _discord_resume_prompt_message(run: dict, prompt: str) -> str:
 def save_settings(settings: dict) -> None:
     """Persist global settings to disk."""
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+    try:
+        os.chmod(SETTINGS_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def settings_for_client(settings: dict) -> dict:
+    """Return settings safe to send to the browser (GCP key redacted)."""
+    out = dict(settings)
+    swarm = dict(out.get("swarm") or {})
+    sa = swarm.pop("service_account", None)
+    swarm["service_account_configured"] = bool(sa)
+    out["swarm"] = swarm
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2735,6 +2784,7 @@ def save_metadata(challenge: dict) -> None:
         "_tags": challenge.get("_tags", []),
         "_flag_questions": challenge.get("_flag_questions", []),
         "_instance_info": challenge.get("_instance_info"),
+        "_swarm_instance": challenge.get("_swarm_instance", ""),
         "_source_url": challenge.get("_source_url", ""),
         "_connection_id": challenge.get("_connection_id", ""),
         "_discord_thread_id": challenge.get("_discord_thread_id", ""),
@@ -2993,6 +3043,7 @@ def load_challenges_from_disk() -> None:
             "_tags": meta.get("_tags", []),
             "_flag_questions": meta.get("_flag_questions", []),
             "_instance_info": meta.get("_instance_info"),
+            "_swarm_instance": meta.get("_swarm_instance", ""),
             "_source_url": meta.get("_source_url", ""),
             "_connection_id": meta.get("_connection_id", ""),
             "_discord_thread_id": meta.get("_discord_thread_id", ""),
@@ -3775,6 +3826,15 @@ async def create_challenge(request: Request) -> JSONResponse:
         "runs": runs,
     }
     challenges[challenge_id] = challenge
+    # Optionally pin the challenge to a swarm worker (run target).
+    requested_target = form.get("swarm_instance", "").strip()
+    if requested_target:
+        assigned = assign_swarm_to_challenge(challenge, requested_target)
+        if not assigned and requested_target not in ("", "local"):
+            log.warning(
+                "[%s] swarm target '%s' unavailable; running locally",
+                challenge_id[:8], requested_target,
+            )
     sync_challenge_skill_links(challenge)
     save_metadata(challenge)
     asyncio.create_task(discord_ensure_destination(challenge))
@@ -4771,6 +4831,9 @@ async def delete_challenge(request: Request) -> JSONResponse:
     for run in challenge["runs"].values():
         await stop_run(run, "deleted")
 
+    # Free any swarm worker pinned to this challenge.
+    release_swarm_from_challenge(challenge)
+
     challenge_dir = CHALLENGES_DIR / challenge_id
     if challenge_dir.exists():
         shutil.rmtree(challenge_dir)
@@ -4924,6 +4987,59 @@ def _allowed_file_roots(challenge_id: str, base_dir: Path) -> list[Path]:
     return [root for root in roots if root.exists()]
 
 
+def _swarm_file_ip(challenge_id: str, run_id: str | None) -> str:
+    """If a run's workspace lives on a swarm worker, return that worker's IP."""
+    if not run_id:
+        return ""
+    challenge = challenges.get(challenge_id)
+    if not challenge or run_id not in challenge.get("runs", {}):
+        return ""
+    return _resolve_swarm_ip(challenge)
+
+
+def _classify_name(name: str) -> str:
+    ext = os.path.splitext(name)[1].lower()
+    if ext in IMAGE_EXTS:
+        return "image"
+    if ext in TEXT_EXTS:
+        return "text"
+    return "binary"
+
+
+def _render_file_payload(name: str, data: bytes, total: int) -> dict:
+    """Build a get_file JSON payload from raw bytes (used by the remote path)."""
+    ext = os.path.splitext(name)[1].lower()
+    if ext in IMAGE_EXTS:
+        mime = mimetypes.guess_type(name)[0] or "image/png"
+        return {"type": "image", "mime": mime,
+                "data": base64.b64encode(data).decode("ascii"),
+                "name": name, "size": total}
+    is_text = ext in TEXT_EXTS
+    if not is_text:
+        try:
+            data[:8192].decode("utf-8")
+            is_text = True
+        except UnicodeDecodeError:
+            is_text = False
+    if is_text:
+        content = data[:MAX_TEXT_SIZE].decode("utf-8", errors="replace")
+        if total > MAX_TEXT_SIZE:
+            content += f"\n\n... (truncated, {total} bytes total)"
+        return {"type": "text", "content": content, "name": name,
+                "ext": ext, "size": total}
+    chunk = data[:MAX_HEX_SIZE]
+    lines = []
+    for off in range(0, len(chunk), 16):
+        c = chunk[off:off + 16]
+        hexp = " ".join(f"{b:02x}" for b in c)
+        asc = "".join(chr(b) if 32 <= b < 127 else "." for b in c)
+        lines.append(f"{off:08x}  {hexp:<48s}  |{asc}|")
+    if total > MAX_HEX_SIZE:
+        lines.append(f"... ({total} bytes total, showing first {MAX_HEX_SIZE})")
+    return {"type": "binary", "hexdump": "\n".join(lines),
+            "name": name, "size": total}
+
+
 async def list_files(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
@@ -4933,6 +5049,40 @@ async def list_files(request: Request) -> JSONResponse:
         return JSONResponse({"error": "not found"}, status_code=404)
 
     run_id = request.query_params.get("run_id")
+
+    # Remote run: browse the worker's workspace over SSH.
+    swarm_ip = _swarm_file_ip(challenge_id, run_id)
+    if swarm_ip and request.query_params.get("browse") == "1":
+        requested_dir = request.query_params.get("dir", "")
+        safe_dir = safe_user_dir(requested_dir)
+        if safe_dir is None:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        try:
+            from .swarm_exec import ssh_browse
+        except ImportError:
+            from swarm_exec import ssh_browse
+        result = await ssh_browse(swarm_ip, challenge_id, run_id, safe_dir)
+        if result.get("error") == "forbidden":
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if result.get("error"):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        entries = []
+        for e in result.get("entries", []):
+            rel = (
+                (PurePosixPath(safe_dir) / e["name"]).as_posix()
+                if safe_dir else e["name"]
+            )
+            item = {"kind": e["kind"], "name": e["name"], "path": rel}
+            if e["kind"] == "file":
+                item["size"] = e.get("size", 0)
+                item["type"] = _classify_name(e["name"])
+            entries.append(item)
+        parent = ""
+        if safe_dir:
+            parent_path = PurePosixPath(safe_dir).parent.as_posix()
+            parent = "" if parent_path == "." else parent_path
+        return JSONResponse({"path": safe_dir, "parent": parent, "entries": entries})
+
     challenge_dir = _resolve_file_dir(challenge_id, run_id)
     if not challenge_dir or not challenge_dir.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -5034,6 +5184,26 @@ async def get_file(request: Request) -> Response:
         return JSONResponse({"error": "forbidden"}, status_code=403)
 
     run_id = request.query_params.get("run_id")
+
+    swarm_ip = _swarm_file_ip(challenge_id, run_id)
+    if swarm_ip:
+        safe_rel = safe_user_path(file_path)
+        if safe_rel is None:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        try:
+            from .swarm_exec import ssh_read
+        except ImportError:
+            from swarm_exec import ssh_read
+        result = await ssh_read(
+            swarm_ip, challenge_id, run_id, safe_rel, MAX_TEXT_SIZE + MAX_HEX_SIZE)
+        if result.get("error") == "forbidden":
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if result.get("error"):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        data = base64.b64decode(result.get("data", ""))
+        return JSONResponse(_render_file_payload(
+            PurePosixPath(file_path).name, data, int(result.get("total", len(data)))))
+
     challenge_dir = _resolve_file_dir(challenge_id, run_id)
     if not challenge_dir:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -5113,6 +5283,29 @@ async def download_file(request: Request) -> Response:
         return JSONResponse({"error": "forbidden"}, status_code=403)
 
     run_id = request.query_params.get("run_id")
+
+    swarm_ip = _swarm_file_ip(challenge_id, run_id)
+    if swarm_ip:
+        safe_rel = safe_user_path(file_path)
+        if safe_rel is None:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        try:
+            from .swarm_exec import ssh_read
+        except ImportError:
+            from swarm_exec import ssh_read
+        # Cap downloads to a sane size over SSH.
+        result = await ssh_read(
+            swarm_ip, challenge_id, run_id, safe_rel, 64 * 1024 * 1024)
+        if result.get("error") == "forbidden":
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if result.get("error"):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        name = PurePosixPath(file_path).name
+        data = base64.b64decode(result.get("data", ""))
+        mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        return Response(content=data, media_type=mime, headers={
+            "Content-Disposition": f'attachment; filename="{name}"'})
+
     challenge_dir = _resolve_file_dir(challenge_id, run_id)
     if not challenge_dir:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -6787,8 +6980,23 @@ async def _run_agent_sdk_path(
         challenge_id[:8], run_id[:8], run["agent"], run.get("model", ""),
         run.get("effort", ""), run_cwd, is_continue,
     )
-    try:
-        async for event in provider.run_agent(
+    swarm_ip = _resolve_swarm_ip(challenge)
+    if swarm_ip:
+        try:
+            from .swarm_exec import remote_run_agent
+        except ImportError:
+            from swarm_exec import remote_run_agent
+        log.info(
+            "[%s/%s] Dispatching to swarm worker %s (%s)",
+            challenge_id[:8], run_id[:8], challenge.get("_swarm_instance"), swarm_ip,
+        )
+        event_source = remote_run_agent(
+            challenge, run, prompt, is_continue, swarm_ip,
+            env=agent_runtime_env(run["agent"]),
+            codex_skill_mentions=codex_skill_mentions or [],
+        )
+    else:
+        event_source = provider.run_agent(
             prompt=prompt,
             model=run.get("model", ""),
             effort=run.get("effort", ""),
@@ -6800,7 +7008,9 @@ async def _run_agent_sdk_path(
             _codex_skill_mentions=codex_skill_mentions or [],
             _env=agent_runtime_env(run["agent"]),
             _run=run,
-        ):
+        )
+    try:
+        async for event in event_source:
             # Check if we've been stopped externally
             stop_reason = run.get("_stop_reason")
             if stop_reason:
@@ -8092,7 +8302,7 @@ async def agent_auth_ws(websocket: WebSocket):
 async def get_settings(request: Request) -> JSONResponse:
     if err := require_auth(request):
         return err
-    return JSONResponse(load_settings())
+    return JSONResponse(settings_for_client(load_settings()))
 
 
 async def get_skills(request: Request) -> JSONResponse:
@@ -8215,6 +8425,663 @@ async def discord_channels(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)})
     finally:
         await bot.close()
+
+
+# ---------------------------------------------------------------------------
+# Swarm (remote GCP execution) — management endpoints
+# ---------------------------------------------------------------------------
+
+# Names of swarm operations currently running, to prevent overlap.
+_swarm_busy: set[str] = set()
+
+# Persistent swarm activity log (survives page reloads and server restarts).
+SWARM_LOG_FILE = STATE_ROOT_DIR / "swarm-log.json"
+SWARM_LOG_MAX = 400
+_swarm_log_buffer: list[dict] = []
+
+
+def _load_swarm_log() -> list[dict]:
+    global _swarm_log_buffer
+    if SWARM_LOG_FILE.exists():
+        try:
+            data = json.loads(SWARM_LOG_FILE.read_text())
+            if isinstance(data, list):
+                _swarm_log_buffer = data[-SWARM_LOG_MAX:]
+        except (json.JSONDecodeError, OSError):
+            pass
+    return _swarm_log_buffer
+
+
+def _swarm_log_record(kind: str, level: str, message: str) -> dict:
+    """Append an entry to the persistent swarm log and return it."""
+    entry = {"ts": int(_time.time()), "kind": kind, "level": level,
+             "message": message}
+    _swarm_log_buffer.append(entry)
+    del _swarm_log_buffer[:-SWARM_LOG_MAX]
+    try:
+        SWARM_LOG_FILE.write_text(json.dumps(_swarm_log_buffer))
+    except OSError:
+        pass
+    return entry
+
+
+def _swarm_module():
+    try:
+        from . import swarm as swarm_mod
+    except ImportError:
+        import swarm as swarm_mod
+    return swarm_mod
+
+
+def _swarm_gcp_error():
+    try:
+        from .gcp import GCPError
+    except ImportError:
+        from gcp import GCPError
+    return GCPError
+
+
+def _swarm_log(kind: str):
+    """Return an async log fn that records + broadcasts swarm progress."""
+    async def _log(message: str) -> None:
+        await _swarm_broadcast(kind, message, "info")
+    return _log
+
+
+async def _swarm_broadcast(kind: str, message: str, level: str = "info", **extra):
+    entry = _swarm_log_record(kind, level, message)
+    await broadcast_global({"type": "swarm_event", **entry, **extra})
+
+
+def _swarm_config_view(settings: dict) -> dict:
+    swarm_mod = _swarm_module()
+    cfg = swarm_mod.swarm_config(settings)
+    return {
+        "service_account_configured": bool(cfg.get("service_account")),
+        "project": cfg.get("project", ""),
+        "zone": cfg.get("zone", ""),
+        "default_machine_type": cfg.get("default_machine_type", "e2-standard-4"),
+        "default_disk_size_gb": cfg.get("default_disk_size_gb", 100),
+        "default_disk_type": cfg.get("default_disk_type", "pd-ssd"),
+        "network": cfg.get("network", "default"),
+        "subnetwork": cfg.get("subnetwork", "default"),
+        "idle_stop_minutes": cfg.get("idle_stop_minutes", 30),
+        "vpn_route": bool(cfg.get("vpn_route", False)),
+        "use_adc": bool(cfg.get("use_adc", False)),
+        "access_token_configured": bool(cfg.get("access_token")),
+    }
+
+
+def _wg_routed_networks() -> list[str]:
+    """Internal CIDRs the reverse client routes (parsed from wg0.conf's peer)."""
+    nets: list[str] = []
+    if not WG_CONF.exists():
+        return nets
+    in_peer = False
+    for line in WG_CONF.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("[Peer]"):
+            in_peer = True
+            continue
+        if in_peer and s.startswith("AllowedIPs"):
+            for v in s.split("=", 1)[1].split(","):
+                v = v.strip()
+                if v and not v.startswith(VPN_SUBNET):
+                    nets.append(v)
+            break
+    return nets
+
+
+async def _swarm_enroll_vpn(name: str) -> None:
+    """Enroll a worker as a wg0 peer so it routes internal CIDRs via the controller.
+
+    Hub-and-spoke (SWARM.md, Solution 2). Best-effort; gated by the vpn_route
+    toggle at the call site and a live wg0 here.
+    """
+    swarm_mod = _swarm_module()
+    if not _wg_interface_up():
+        await _swarm_broadcast("vpn", f"wg0 is down; skipped VPN for {name}", "error")
+        return
+    reg = swarm_mod.load_registry()
+    inst = reg.get("instances", {}).get(name)
+    if not inst or not inst.get("external_ip"):
+        return
+    ip_addr = inst["external_ip"]
+    # Reuse the worker's existing VPN IP on re-enroll (e.g. a route refresh);
+    # only allocate a fresh address when the worker isn't on the VPN yet.
+    vpn_ip = inst.get("vpn_ip")
+    if not vpn_ip:
+        used = {i.get("vpn_ip") for i in reg["instances"].values() if i.get("vpn_ip")}
+        used |= {VPN_SERVER_IP, VPN_CLIENT_IP}
+        vpn_ip = next(
+            (f"{VPN_SUBNET}.{o}" for o in range(3, 254)
+             if f"{VPN_SUBNET}.{o}" not in used),
+            "",
+        )
+        if not vpn_ip:
+            await _swarm_broadcast("vpn", "no free VPN address", "error")
+            return
+    # A freshly-created worker may not be accepting SSH yet; wait for it.
+    try:
+        await swarm_mod.ssh_wait_ready(ip_addr, timeout=120)
+    except Exception as exc:  # noqa: BLE001
+        await _swarm_broadcast("vpn", f"{name}: SSH not ready for VPN ({exc})", "error")
+        return
+    rc, out, err = await swarm_mod.ssh_run(
+        ip_addr,
+        "priv=$(wg genkey); pub=$(printf '%s' \"$priv\" | wg pubkey); "
+        "printf '%s\\n%s\\n' \"$priv\" \"$pub\"",
+        check=False,
+    )
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if rc != 0 or len(lines) < 2:
+        detail = (err or out).strip()[:200] or "no output"
+        await _swarm_broadcast(
+            "vpn", f"key generation failed on {name}: {detail}", "error")
+        return
+    worker_priv, worker_pub = lines[0], lines[1]
+    allowed = ", ".join([VPN_CIDR, *_wg_routed_networks()])
+    worker_conf = (
+        "[Interface]\n"
+        f"Address = {vpn_ip}/24\n"
+        f"PrivateKey = {worker_priv}\n"
+        "\n[Peer]\n"
+        f"PublicKey = {WG_SERVER_PUBLIC_KEY.read_text().strip()}\n"
+        f"Endpoint = {_get_server_public_ip()}:51820\n"
+        f"AllowedIPs = {allowed}\n"
+        "PersistentKeepalive = 25\n"
+    )
+    # Record the peer first, then rebuild wg0.conf from the registry and apply
+    # it live — this both persists the peer (survives wg-quick restarts) and
+    # adds it to the running interface without bouncing the client (Fix B).
+    inst["vpn_ip"] = vpn_ip
+    inst["vpn_pubkey"] = worker_pub
+    swarm_mod.save_registry(reg)
+    try:
+        _wg_persist_and_sync()
+        await swarm_mod.ssh_write_file(ip_addr, "/etc/wireguard/wg0.conf", worker_conf)
+        await swarm_mod.ssh_run(
+            ip_addr,
+            "wg-quick down wg0 2>/dev/null; wg-quick up wg0",
+            check=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Roll back the registry entry so the config stays consistent.
+        inst.pop("vpn_ip", None)
+        inst.pop("vpn_pubkey", None)
+        swarm_mod.save_registry(reg)
+        _wg_persist_and_sync()
+        await _swarm_broadcast("vpn", f"VPN setup failed on {name}: {exc}", "error")
+        return
+    await _swarm_broadcast("vpn", f"{name} on VPN as {vpn_ip}", "success")
+
+
+async def _swarm_remove_vpn(name: str) -> None:
+    swarm_mod = _swarm_module()
+    reg = swarm_mod.load_registry()
+    inst = reg.get("instances", {}).get(name)
+    if not inst:
+        return
+    inst.pop("vpn_ip", None)
+    inst.pop("vpn_pubkey", None)
+    swarm_mod.save_registry(reg)
+    # Rebuild wg0.conf without this peer and apply live (syncconf drops the
+    # removed peer while keeping the client + other workers connected).
+    try:
+        _wg_persist_and_sync()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _swarm_enroll_pending_workers() -> None:
+    """Enroll running workers that should be on the VPN but aren't yet.
+
+    Called after the VPN comes up so workers created while wg0 was down (which
+    were skipped at create time) get enrolled retroactively. Gated on the
+    vpn_route toggle and a live wg0.
+    """
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    if not swarm_mod.is_configured(settings):
+        return
+    if not swarm_mod.swarm_config(settings).get("vpn_route"):
+        return
+    if not _wg_interface_up():
+        return
+    reg = swarm_mod.load_registry()
+    pending = [
+        name for name, inst in reg.get("instances", {}).items()
+        if inst.get("status") == "running" and inst.get("external_ip")
+        and not inst.get("vpn_pubkey")
+    ]
+    for name in pending:
+        try:
+            await _swarm_enroll_vpn(name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("swarm VPN re-enroll of %s failed: %s", name, exc)
+
+
+async def _swarm_resync_vpn_routes() -> None:
+    """Re-push enrolled workers' wg0 configs after the reverse-routed CIDRs change.
+
+    A worker's AllowedIPs are written once at enroll time (_swarm_enroll_vpn), so
+    when the controller's routed networks change the workers keep routing the old
+    CIDRs. Re-enrolling each rewrites its config with the current
+    _wg_routed_networks() (the IP is reused). Gated on the vpn_route toggle and a
+    live wg0.
+    """
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    if not swarm_mod.is_configured(settings):
+        return
+    if not swarm_mod.swarm_config(settings).get("vpn_route"):
+        return
+    if not _wg_interface_up():
+        return
+    reg = swarm_mod.load_registry()
+    enrolled = [
+        name for name, inst in reg.get("instances", {}).items()
+        if inst.get("status") == "running" and inst.get("external_ip")
+        and inst.get("vpn_pubkey")
+    ]
+    for name in enrolled:
+        try:
+            await _swarm_enroll_vpn(name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("swarm VPN route resync of %s failed: %s", name, exc)
+
+
+async def _swarm_sync_vpn_after_reconfigure(routes_changed: bool) -> None:
+    """Post-reconfigure swarm VPN sync.
+
+    Enrolls workers skipped while wg0 was down, then — only if the reverse-routed
+    CIDRs changed — refreshes already-enrolled workers so they pick up the new
+    networks. Run sequentially in one task so the two registry read/modify/write
+    passes don't race.
+    """
+    await _swarm_enroll_pending_workers()
+    if routes_changed:
+        await _swarm_resync_vpn_routes()
+
+
+async def _swarm_idle_loop() -> None:
+    """Periodically stop running workers that have been idle past the timeout."""
+    swarm_mod = _swarm_module()
+    while True:
+        await asyncio.sleep(120)
+        try:
+            settings = load_settings()
+            if not swarm_mod.is_configured(settings):
+                continue
+            timeout = int(swarm_mod.swarm_config(settings).get(
+                "idle_stop_minutes", 30) or 0)
+            if timeout <= 0:
+                continue
+            now = _time.time()
+            reg = swarm_mod.load_registry()
+            to_stop = []
+            for name, inst in reg.get("instances", {}).items():
+                if inst.get("status") != "running":
+                    continue
+                if inst.get("challenge_id"):
+                    inst["idle_since"] = int(now)  # busy → reset the clock
+                    continue
+                idle_since = inst.get("idle_since") or inst.get("created_at") or now
+                if now - idle_since > timeout * 60:
+                    to_stop.append(name)
+            swarm_mod.save_registry(reg)
+            for name in to_stop:
+                try:
+                    await swarm_mod.stop_worker(settings, name)
+                    await _swarm_broadcast(
+                        "idle", f"Auto-stopped idle worker {name}", "info",
+                        refresh=True)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("swarm idle-stop %s failed: %s", name, exc)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("swarm idle loop error: %s", exc)
+
+
+def _resolve_swarm_ip(challenge: dict) -> str:
+    """Return the external IP of the running worker assigned to a challenge."""
+    name = challenge.get("_swarm_instance")
+    if not name:
+        return ""
+    swarm_mod = _swarm_module()
+    inst = swarm_mod.load_registry().get("instances", {}).get(name)
+    if not inst or inst.get("status") != "running":
+        return ""
+    return inst.get("external_ip", "") or ""
+
+
+def assign_swarm_to_challenge(challenge: dict, requested: str) -> str:
+    """Pin a challenge to a worker. requested = '' (local), 'auto', or a name.
+
+    Returns the assigned instance name ('' if local / none available).
+    """
+    requested = (requested or "").strip()
+    if not requested or requested == "local":
+        challenge.pop("_swarm_instance", None)
+        return ""
+    swarm_mod = _swarm_module()
+    reg = swarm_mod.load_registry()
+    instances = reg.get("instances", {})
+    name = ""
+    if requested == "auto":
+        # First running worker not already pinned to another challenge.
+        for n, inst in instances.items():
+            if inst.get("status") == "running" and not inst.get("challenge_id"):
+                name = n
+                break
+    elif requested in instances:
+        name = requested
+    if not name:
+        return ""
+    challenge["_swarm_instance"] = name
+    instances[name]["challenge_id"] = challenge.get("id")
+    swarm_mod.save_registry(reg)
+    return name
+
+
+def release_swarm_from_challenge(challenge: dict) -> None:
+    """Unpin a challenge's worker so it can be reused."""
+    name = challenge.get("_swarm_instance")
+    if not name:
+        return
+    swarm_mod = _swarm_module()
+    reg = swarm_mod.load_registry()
+    inst = reg.get("instances", {}).get(name)
+    if inst and inst.get("challenge_id") == challenge.get("id"):
+        inst["challenge_id"] = None
+        inst["idle_since"] = int(_time.time())
+        swarm_mod.save_registry(reg)
+
+
+async def swarm_status(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    reg = swarm_mod.load_registry()
+    instances = []
+    for inst in reg.get("instances", {}).values():
+        item = dict(inst)
+        cid = inst.get("challenge_id")
+        if cid:
+            ch = challenges.get(cid)
+            item["challenge_name"] = ch.get("name") if ch else cid
+        instances.append(item)
+    return JSONResponse({
+        "configured": swarm_mod.is_configured(settings),
+        "config": _swarm_config_view(settings),
+        "image": reg.get("image", {}),
+        "instances": instances,
+        "busy": sorted(_swarm_busy),
+        "log": _swarm_log_buffer[-SWARM_LOG_MAX:],
+    })
+
+
+async def swarm_save_config(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    settings = load_settings()
+    swarm = dict(settings.get("swarm") or {})
+
+    # Service account is only replaced when a non-empty value is sent.
+    sa_raw = body.get("service_account")
+    if isinstance(sa_raw, str) and sa_raw.strip():
+        try:
+            sa = json.loads(sa_raw)
+        except json.JSONDecodeError:
+            return JSONResponse(
+                {"error": "Service account key is not valid JSON"}, status_code=400)
+        if not isinstance(sa, dict) or "private_key" not in sa or (
+            "client_email" not in sa
+        ):
+            return JSONResponse(
+                {"error": "Service account JSON is missing required fields"},
+                status_code=400)
+        swarm["service_account"] = sa
+        if not swarm.get("project") and sa.get("project_id"):
+            swarm["project"] = sa["project_id"]
+    elif isinstance(sa_raw, dict) and sa_raw:
+        swarm["service_account"] = sa_raw
+
+    if "project" in body:
+        swarm["project"] = str_field(body["project"]).strip()
+    if "zone" in body:
+        swarm["zone"] = str_field(body["zone"]).strip()
+    if "default_machine_type" in body:
+        swarm["default_machine_type"] = str_field(body["default_machine_type"]).strip()
+    if "default_disk_size_gb" in body:
+        try:
+            swarm["default_disk_size_gb"] = max(10, int(body["default_disk_size_gb"]))
+        except (TypeError, ValueError):
+            pass
+    if "default_disk_type" in body:
+        swarm["default_disk_type"] = str_field(body["default_disk_type"]).strip()
+    if "network" in body:
+        swarm["network"] = str_field(body["network"]).strip() or "default"
+    if "subnetwork" in body:
+        swarm["subnetwork"] = str_field(body["subnetwork"]).strip() or "default"
+    if "idle_stop_minutes" in body:
+        try:
+            swarm["idle_stop_minutes"] = max(0, int(body["idle_stop_minutes"]))
+        except (TypeError, ValueError):
+            pass
+    if "vpn_route" in body:
+        swarm["vpn_route"] = bool(body["vpn_route"])
+    if "use_adc" in body:
+        swarm["use_adc"] = bool(body["use_adc"])
+    # Access token: set when non-empty; the literal "clear" wipes it.
+    if "access_token" in body:
+        tok = str_field(body["access_token"]).strip()
+        if tok == "clear":
+            swarm.pop("access_token", None)
+        elif tok:
+            swarm["access_token"] = tok
+
+    settings["swarm"] = swarm
+    save_settings(settings)
+    return JSONResponse({"ok": True, "config": _swarm_config_view(settings)})
+
+
+async def swarm_test(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    GCPError = _swarm_gcp_error()
+    if not swarm_mod.is_configured(settings):
+        cfg = swarm_mod.swarm_config(settings)
+        if not cfg.get("zone"):
+            msg = "Set the zone (and save the config) first."
+        elif (cfg.get("use_adc") or cfg.get("access_token")) and not cfg.get("project"):
+            msg = "Set the Project ID — it is required for access-token/ADC auth."
+        else:
+            msg = ("No saved auth method. Enter an access token, enable ADC, or "
+                   "paste a service-account key, then save the config first.")
+        return JSONResponse({"error": msg}, status_code=400)
+    try:
+        client = swarm_mod.make_client(settings)
+        info = await client.test_connection()
+        return JSONResponse({"ok": True, "info": info})
+    except GCPError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": f"unexpected: {exc}"}, status_code=400)
+
+
+async def swarm_build_image(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    if not swarm_mod.is_configured(settings):
+        return JSONResponse({"error": "Configure GCP first"}, status_code=400)
+    if "image" in _swarm_busy:
+        return JSONResponse({"error": "Image build already running"}, status_code=409)
+    cfg = swarm_mod.swarm_config(settings)
+
+    async def _run() -> None:
+        _swarm_busy.add("image")
+        try:
+            await swarm_mod.build_golden_image(
+                settings, repo_root=APP_ROOT_DIR,
+                machine_type=cfg.get("default_machine_type", "e2-standard-4"),
+                disk_size_gb=int(cfg.get("default_disk_size_gb", 100)),
+                disk_type=cfg.get("default_disk_type", "pd-ssd"),
+                network=cfg.get("network", "default"),
+                subnetwork=cfg.get("subnetwork", "default"),
+                log=_swarm_log("image"),
+            )
+            await _swarm_broadcast("image", "Golden image build complete", "success")
+        except Exception as exc:  # noqa: BLE001
+            await _swarm_broadcast("image", f"Image build failed: {exc}", "error")
+        finally:
+            _swarm_busy.discard("image")
+
+    asyncio.create_task(_run())
+    return JSONResponse({"ok": True, "started": True})
+
+
+async def swarm_create_instances(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    if not swarm_mod.is_configured(settings):
+        return JSONResponse({"error": "Configure GCP first"}, status_code=400)
+    cfg = swarm_mod.swarm_config(settings)
+    try:
+        count = max(1, min(20, int(body.get("count", 1))))
+    except (TypeError, ValueError):
+        count = 1
+    machine_type = str_field(body.get("machine_type", "")) or cfg.get(
+        "default_machine_type", "e2-standard-4")
+    try:
+        cpus = int(body.get("cpus", 0) or 0)
+        mem_mb = int(body.get("mem_mb", 0) or 0)
+    except (TypeError, ValueError):
+        cpus, mem_mb = 0, 0
+    try:
+        disk_size_gb = int(body.get("disk_size_gb", 0) or cfg.get(
+            "default_disk_size_gb", 100))
+    except (TypeError, ValueError):
+        disk_size_gb = int(cfg.get("default_disk_size_gb", 100))
+
+    async def _run() -> None:
+        _swarm_busy.add("create")
+        try:
+            for _ in range(count):
+                name = f"ctf-swarm-{secrets.token_hex(3)}"
+                await _swarm_broadcast("create", f"Creating {name}…")
+                try:
+                    await swarm_mod.create_worker(
+                        settings, name, machine_type=machine_type, cpus=cpus,
+                        mem_mb=mem_mb, disk_size_gb=disk_size_gb,
+                        disk_type=cfg.get("default_disk_type", "pd-ssd"),
+                        network=cfg.get("network", "default"),
+                        subnetwork=cfg.get("subnetwork", "default"),
+                    )
+                    await _swarm_broadcast("create", f"{name} is up", "success")
+                    if cfg.get("vpn_route"):
+                        await _swarm_enroll_vpn(name)
+                except Exception as exc:  # noqa: BLE001
+                    await _swarm_broadcast(
+                        "create", f"{name} failed: {exc}", "error")
+        finally:
+            _swarm_busy.discard("create")
+            await _swarm_broadcast("create", "done", "info", refresh=True)
+
+    asyncio.create_task(_run())
+    return JSONResponse({"ok": True, "started": True, "count": count})
+
+
+async def swarm_instance_action(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    name = request.path_params["name"]
+    action = request.path_params["action"]
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    GCPError = _swarm_gcp_error()
+    try:
+        if action == "start":
+            rec = await swarm_mod.start_worker(settings, name)
+            await _swarm_broadcast("instance", f"Started {name}", "success")
+        elif action == "stop":
+            rec = await swarm_mod.stop_worker(settings, name)
+            await _swarm_broadcast("instance", f"Stopped {name}", "success")
+        elif action == "sync-credentials":
+            reg = swarm_mod.load_registry()
+            inst = reg.get("instances", {}).get(name, {})
+            ip = inst.get("external_ip", "")
+            if not ip:
+                return JSONResponse(
+                    {"error": "instance has no external IP (is it running?)"},
+                    status_code=400)
+            synced = await swarm_mod.sync_agent_credentials(ip)
+            await _swarm_broadcast(
+                "instance", f"Synced credentials to {name}: "
+                f"{', '.join(synced) or 'none'}", "success")
+            return JSONResponse({"ok": True, "synced": synced})
+        else:
+            return JSONResponse({"error": "unknown action"}, status_code=400)
+        return JSONResponse({"ok": True, "instance": rec})
+    except GCPError as exc:
+        await _swarm_broadcast("instance", f"{action} {name} failed: {exc}", "error")
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def swarm_delete_instance(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    name = request.path_params["name"]
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    GCPError = _swarm_gcp_error()
+    try:
+        await _swarm_remove_vpn(name)
+        await swarm_mod.delete_worker(settings, name)
+        await _swarm_broadcast("instance", f"Deleted {name}", "success")
+        return JSONResponse({"ok": True})
+    except GCPError as exc:
+        await _swarm_broadcast("instance", f"delete {name} failed: {exc}", "error")
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def swarm_refresh(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    settings = load_settings()
+    swarm_mod = _swarm_module()
+    GCPError = _swarm_gcp_error()
+    try:
+        instances = await swarm_mod.refresh_workers(settings)
+        return JSONResponse({"ok": True, "instances": instances})
+    except GCPError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 def _static_provider_metadata(provider) -> dict:
@@ -8352,7 +9219,7 @@ async def update_settings(request: Request) -> JSONResponse:
     save_settings(settings)
     if discord_changed:
         asyncio.create_task(_reconcile_discord_gateway())
-    return JSONResponse(settings)
+    return JSONResponse(settings_for_client(settings))
 
 
 def get_agent_challenge_stats() -> dict:
@@ -10033,6 +10900,19 @@ def _get_server_public_ip() -> str:
     return "YOUR_SERVER_IP"
 
 
+def _swarm_vpn_peers() -> list[dict]:
+    """Worker peers (pubkey + vpn_ip) enrolled on the VPN, from the swarm registry."""
+    try:
+        reg = _swarm_module().load_registry()
+    except Exception:  # noqa: BLE001 - swarm optional
+        return []
+    peers = []
+    for inst in reg.get("instances", {}).values():
+        if inst.get("vpn_pubkey") and inst.get("vpn_ip"):
+            peers.append({"pubkey": inst["vpn_pubkey"], "vpn_ip": inst["vpn_ip"]})
+    return peers
+
+
 def _build_wg_server_conf(
     client_public_key: str,
     client_networks: list[str],
@@ -10054,7 +10934,77 @@ PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j A
 PublicKey = {client_public_key}
 AllowedIPs = {allowed_ips}
 """
+    # Persist swarm worker peers so they survive wg-quick down/up (Fix B).
+    for peer in _swarm_vpn_peers():
+        conf += (
+            f"\n[Peer]\n# swarm worker\n"
+            f"PublicKey = {peer['pubkey']}\n"
+            f"AllowedIPs = {peer['vpn_ip']}/32\n"
+        )
     return conf
+
+
+def _wg_parse_client_peer() -> tuple[str, list[str], bool] | None:
+    """Extract the dial-in client's (pubkey, networks, dns_forward) from wg0.conf.
+
+    The first [Peer] is the client; worker peers follow. Used to rebuild the
+    config when swarm peers change without losing the client's settings.
+    """
+    if not WG_CONF.exists():
+        return None
+    pubkey, networks, dns_forward = "", [], True
+    seen_peer = False
+    in_client = False
+    for line in WG_CONF.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("# dns_forward="):
+            dns_forward = s.split("=", 1)[1].strip().lower() == "true"
+        elif s.startswith("[Peer]"):
+            if seen_peer:
+                break  # only the first peer is the client
+            seen_peer = True
+            in_client = True
+        elif in_client and s.startswith("PublicKey"):
+            pubkey = s.split("=", 1)[1].strip()
+        elif in_client and s.startswith("AllowedIPs"):
+            for v in s.split("=", 1)[1].split(","):
+                v = v.strip()
+                if v and v != f"{VPN_CLIENT_IP}/32":
+                    networks.append(v)
+    if not pubkey:
+        return None
+    return pubkey, networks, dns_forward
+
+
+def _wg_persist_and_sync() -> None:
+    """Rebuild wg0.conf (client + current swarm worker peers) and apply it live.
+
+    Uses `wg syncconf` so the interface is not bounced — the dial-in client's
+    handshake and existing worker peers survive while peers are added/removed.
+    No-op if no client is configured.
+    """
+    parsed = _wg_parse_client_peer()
+    if not parsed:
+        return
+    pubkey, networks, dns_forward = parsed
+    WG_CONF.write_text(_build_wg_server_conf(pubkey, networks, dns_forward))
+    os.chmod(str(WG_CONF), 0o600)
+    if not _wg_interface_up():
+        return
+    try:
+        stripped = subprocess.run(
+            ["wg-quick", "strip", "wg0"], capture_output=True, text=True, timeout=10)
+        if stripped.returncode != 0:
+            return
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".conf", delete=False) as tf:
+            tf.write(stripped.stdout)
+            tmp = tf.name
+        os.chmod(tmp, 0o600)
+        subprocess.run(["wg", "syncconf", "wg0", tmp], capture_output=True, timeout=10)
+        os.unlink(tmp)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _build_wg_client_conf(
@@ -10236,6 +11186,10 @@ async def vpn_configure(request: Request) -> JSONResponse:
     if network_error:
         return JSONResponse({"error": network_error}, status_code=400)
 
+    # Capture the reverse-routed CIDRs before overwriting wg0.conf so we can tell
+    # whether they changed; enrolled swarm workers need a refresh only if so.
+    routes_changed = set(_wg_routed_networks()) != set(client_networks)
+
     # Bring down existing interface if up
     if _wg_interface_up():
         subprocess.run(["wg-quick", "down", "wg0"], capture_output=True)
@@ -10268,6 +11222,11 @@ async def vpn_configure(request: Request) -> JSONResponse:
         _setup_dns_forwarder()
     else:
         _teardown_dns_forwarder()
+
+    # VPN just came up — enroll any swarm workers that were skipped while it was
+    # down (so setting up the VPN later retroactively covers them), then refresh
+    # already-enrolled workers if the reverse-routed CIDRs changed.
+    asyncio.create_task(_swarm_sync_vpn_after_reconfigure(routes_changed))
 
     return JSONResponse({
         "ok": True,
@@ -10313,6 +11272,7 @@ async def vpn_toggle(request: Request) -> JSONResponse:
             _setup_dns_forwarder()
         else:
             _teardown_dns_forwarder()
+        asyncio.create_task(_swarm_enroll_pending_workers())
     elif action == "down":
         _persist_wg_settings(_dns_forward_enabled())
         if _wg_interface_up():
@@ -11856,7 +12816,9 @@ async def _reconcile_discord_gateway() -> None:
 
 @asynccontextmanager
 async def lifespan(app):
+    _load_swarm_log()
     asyncio.create_task(_reconcile_discord_gateway())
+    asyncio.create_task(_swarm_idle_loop())
     yield
     await _stop_discord_gateway()
     for challenge in challenges.values():
@@ -11865,6 +12827,350 @@ async def lifespan(app):
     for preview in _bulk_previews.values():
         shutil.rmtree(preview["base_dir"], ignore_errors=True)
     _bulk_previews.clear()
+
+
+# ---------------------------------------------------------------------------
+# Advisor agent — read-only kibitzer + web researcher per challenge
+# ---------------------------------------------------------------------------
+
+ADVISOR_RUN_ID = "advisor"
+ADVISOR_MAX_MESSAGES = 400
+# The advisor defaults to Claude Sonnet 4.6 (fast/cheap for read+research),
+# independent of the solver default. Other providers use their own default.
+ADVISOR_DEFAULT_MODEL = "claude-sonnet-4-6"
+
+
+def _advisor_default_model(agent: str) -> str:
+    if agent == "claude":
+        return ADVISOR_DEFAULT_MODEL
+    return resolved_default_model(agent)
+
+# Ephemeral in-memory advisor sessions (NOT persisted): challenge_id -> session.
+advisor_sessions: dict[str, dict] = {}
+
+ADVISOR_PREAMBLE = """You are the **CTF Advisor** for the challenge "{name}".
+
+Other AI agents are actively solving this challenge. You are a read-only
+assistant for the human operator. You can:
+- `list_runs()` — list the solver agents and their status/goals.
+- `read_transcript(run_id?, tail?, grep?)` — read what the solvers have actually
+  done (tool calls, outputs, errors). Omit run_id to scan all runs.
+- `read_working_notes()` — read solvers' working notes.
+- Web search / fetch — research recent techniques, CVEs, exploits, write-ups.
+- `notify_solvers(message)` — push ONE concise, high-signal hint to the live
+  solver agents. Use sparingly; never relay noise or unverified guesses.
+
+Answer the operator's questions, diagnose where solvers are stuck by reading
+their transcripts (do not fabricate — read), and research useful techniques.
+Be concise and concrete.
+
+Challenge description:
+{description}
+"""
+
+
+def _advisor_broadcast_bus():
+    try:
+        from .agents.broadcast import broadcast_to_teammates
+    except ImportError:
+        from agents.broadcast import broadcast_to_teammates
+    return broadcast_to_teammates
+
+
+def _advisor_event_text(ev: dict) -> str:
+    """Compact one-line-ish summary of a transcript event for the advisor."""
+    et = ev.get("type", "")
+    if et in ("assistant", "user"):
+        parts = []
+        # Provider events nest blocks under message.content (claude); fall back
+        # to a top-level content list for other shapes.
+        msg = ev.get("message")
+        blocks = (msg.get("content") if isinstance(msg, dict) else None) \
+            or ev.get("content") or []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            bt = block.get("type")
+            if bt == "text" and block.get("text"):
+                parts.append(f"[text] {block['text']}")
+            elif bt == "thinking" and block.get("thinking"):
+                parts.append(f"[thinking] {block['thinking'][:400]}")
+            elif bt == "tool_use":
+                parts.append(f"[tool_use {block.get('name','?')}] "
+                              f"{json.dumps(block.get('input', {}))[:400]}")
+            elif bt == "tool_result":
+                parts.append(f"[tool_result] {str(block.get('content',''))[:600]}")
+        return "\n".join(parts)
+    if et in ("system", "error", "user_prompt", "user_steer"):
+        msg = ev.get("message", "")
+        return f"[{et}] {msg}" if msg else ""
+    return ""
+
+
+def _advisor_make_tools(cid: str) -> dict:
+    async def read_transcript(params: dict) -> str:
+        challenge = challenges.get(cid)
+        if not challenge:
+            return "challenge not found"
+        run_id = str(params.get("run_id", "") or "").strip()
+        try:
+            tail = max(1, min(int(params.get("tail", 40) or 40), 200))
+        except (TypeError, ValueError):
+            tail = 40
+        grep = str(params.get("grep", "") or "").strip().lower()
+        rids = [run_id] if run_id else list(challenge["runs"].keys())
+        blocks = []
+        for rid in rids:
+            if rid not in challenge["runs"]:
+                continue
+            path = _run_output_path(cid, rid)
+            lines = []
+            if path.exists():
+                for ln in path.read_text(errors="replace").splitlines():
+                    try:
+                        ev = json.loads(ln)
+                    except json.JSONDecodeError:
+                        continue
+                    txt = _advisor_event_text(ev)
+                    if not txt:
+                        continue
+                    if grep and grep not in txt.lower():
+                        continue
+                    lines.append(txt)
+            sel = lines[-tail:]
+            agent = challenge["runs"][rid].get("agent", "?")
+            blocks.append(
+                f"=== run {rid} ({agent}) — last {len(sel)} of {len(lines)} "
+                f"events ===\n" + "\n".join(sel))
+        return "\n\n".join(blocks) or "no transcript events yet"
+
+    async def list_runs(params: dict) -> str:
+        challenge = challenges.get(cid)
+        if not challenge:
+            return "challenge not found"
+        rows = []
+        for rid, run in challenge["runs"].items():
+            goal = normalize_run_goal(run.get("goal")) or {}
+            desc = (goal.get("description") or "") if isinstance(goal, dict) else ""
+            rows.append(
+                f"- {rid}: agent={run.get('agent')} model={run.get('model')} "
+                f"status={run.get('status')} goal={desc[:80]}")
+        return (f"Challenge: {challenge.get('name')} [{challenge.get('status')}]\n"
+                f"Runs:\n" + "\n".join(rows))
+
+    async def read_working_notes(params: dict) -> str:
+        challenge = challenges.get(cid)
+        if not challenge:
+            return "challenge not found"
+        out = []
+        for rid, run in challenge["runs"].items():
+            try:
+                notes = get_run_cwd(cid, run) / run_notes_filename(challenge, run)
+                if notes.exists():
+                    out.append(f"=== {rid} notes ===\n"
+                               f"{notes.read_text(errors='replace')[:4000]}")
+            except OSError:
+                continue
+        return "\n\n".join(out) or "no working notes found (solvers may run remotely)"
+
+    async def notify_solvers(params: dict) -> str:
+        msg = str(params.get("message", "") or "").strip()
+        if not msg:
+            return "message required"
+        count = await _advisor_broadcast_bus()(cid, ADVISOR_RUN_ID,
+                                                f"[Advisor]: {msg}")
+        return f"Sent hint to {count} solver(s)"
+
+    obj = {"type": "object", "properties": {}}
+    return {
+        "read_transcript": {
+            "description": "Read recent transcript events from solver agents. "
+            "Args: run_id (optional), tail (default 40, max 200), grep (optional "
+            "substring filter).",
+            "schema": {"type": "object", "properties": {
+                "run_id": {"type": "string"},
+                "tail": {"type": "integer"},
+                "grep": {"type": "string"}}},
+            "fn": read_transcript},
+        "list_runs": {
+            "description": "List the solver agents on this challenge with their "
+            "status and goals.", "schema": obj, "fn": list_runs},
+        "read_working_notes": {
+            "description": "Read the solver agents' working notes.",
+            "schema": obj, "fn": read_working_notes},
+        "notify_solvers": {
+            "description": "Push one concise, high-signal hint to the live solver "
+            "agents. Use sparingly.",
+            "schema": {"type": "object", "properties": {
+                "message": {"type": "string"}}, "required": ["message"]},
+            "fn": notify_solvers},
+    }
+
+
+def _get_advisor_session(cid: str) -> dict:
+    s = advisor_sessions.get(cid)
+    if s is None:
+        s = {
+            "agent": "", "model": "", "effort": "",
+            "session_state": {}, "messages": [], "ws_clients": set(),
+            "status": "idle", "started": False, "lock": asyncio.Lock(),
+        }
+        advisor_sessions[cid] = s
+    return s
+
+
+async def _advisor_emit(cid: str, data: dict) -> None:
+    s = advisor_sessions.get(cid)
+    if s:
+        await _broadcast_to_ws_set(s["ws_clients"], data)
+
+
+async def run_advisor_turn(cid: str, text: str) -> None:
+    s = _get_advisor_session(cid)
+    challenge = challenges.get(cid)
+    if not challenge:
+        return
+    provider = get_provider(s["agent"])
+    async with s["lock"]:
+        s["status"] = "thinking"
+        s["messages"].append({"role": "user", "text": text})
+        await _advisor_emit(cid, {"type": "advisor_user", "text": text})
+        await _advisor_emit(cid, {"type": "advisor_status", "status": "thinking"})
+        adv_cwd = CHALLENGES_DIR / cid / "_advisor"
+        adv_cwd.mkdir(parents=True, exist_ok=True)
+        is_continue = s["started"]
+        if is_continue:
+            prompt = text
+        else:
+            prompt = ADVISOR_PREAMBLE.format(
+                name=challenge.get("name", ""),
+                description=str(challenge.get("description", ""))[:2000],
+            ) + "\n\nOperator: " + text
+        try:
+            async for event in provider.run_agent(
+                prompt=prompt, model=s["model"], effort=s["effort"],
+                cwd=str(adv_cwd), continue_session=is_continue,
+                session_state=s["session_state"], challenge_id=cid, run_id="",
+                _advisor_tools=_advisor_make_tools(cid),
+                _env=agent_runtime_env(s["agent"]),
+            ):
+                if not isinstance(event, dict):
+                    continue
+                s["messages"].append({"role": "agent", "event": event})
+                del s["messages"][:-ADVISOR_MAX_MESSAGES]
+                await _advisor_emit(cid, {"type": "advisor_event", "event": event})
+                if event.get("type") == "result":
+                    break
+            s["started"] = True
+        except Exception as exc:  # noqa: BLE001
+            await _advisor_emit(cid, {"type": "advisor_event",
+                                      "event": {"type": "error", "message": str(exc)}})
+        finally:
+            s["status"] = "idle"
+            await _advisor_emit(cid, {"type": "advisor_status", "status": "idle"})
+
+
+async def advisor_get(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    cid = request.path_params["id"]
+    if cid not in challenges:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    s = advisor_sessions.get(cid)
+    if not s:
+        return JSONResponse({
+            "config": {"agent": DEFAULT_AGENT,
+                       "model": _advisor_default_model(DEFAULT_AGENT),
+                       "effort": ""},
+            "messages": [], "status": "idle", "started": False,
+            "agents": [_provider_choice(p) for p in PROVIDERS.values()],
+        })
+    return JSONResponse({
+        "config": {"agent": s["agent"] or DEFAULT_AGENT,
+                   "model": s["model"], "effort": s["effort"]},
+        "messages": s["messages"][-ADVISOR_MAX_MESSAGES:],
+        "status": s["status"], "started": s["started"],
+        "agents": [_provider_choice(p) for p in PROVIDERS.values()],
+    })
+
+
+def _provider_choice(provider) -> dict:
+    return {"name": provider.name, "label": provider.label,
+            "models": [{"value": v, "label": l}
+                       for v, l in provider.resolved_models()],
+            "default_model": provider.resolved_default_model()}
+
+
+async def advisor_send(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    cid = request.path_params["id"]
+    if cid not in challenges:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    body, json_err = await read_json_object(request)
+    if json_err:
+        return json_err
+    message = str_field(body.get("message", "")).strip()
+    if not message:
+        return JSONResponse({"error": "message required"}, status_code=400)
+    s = _get_advisor_session(cid)
+    if s["status"] == "thinking":
+        return JSONResponse({"error": "advisor is busy"}, status_code=409)
+    # Configure provider/model before the first turn (locked once started).
+    if not s["started"]:
+        agent = str_field(body.get("agent", "")) or DEFAULT_AGENT
+        if agent not in VALID_AGENTS:
+            return JSONResponse({"error": f"invalid agent: {agent}"},
+                                status_code=400)
+        s["agent"] = agent
+        s["model"] = str_field(body.get("model", "")) or _advisor_default_model(agent)
+        s["effort"] = str_field(body.get("effort", ""))
+    asyncio.create_task(run_advisor_turn(cid, message))
+    return JSONResponse({"ok": True})
+
+
+async def advisor_reset(request: Request) -> JSONResponse:
+    if err := require_auth(request):
+        return err
+    if err := require_csrf(request):
+        return err
+    cid = request.path_params["id"]
+    s = advisor_sessions.get(cid)
+    if s:
+        if s["status"] == "thinking":
+            return JSONResponse({"error": "advisor is busy"}, status_code=409)
+        s.update({"session_state": {}, "messages": [], "started": False,
+                  "agent": "", "model": "", "effort": ""})
+        await _advisor_emit(cid, {"type": "advisor_reset"})
+    return JSONResponse({"ok": True})
+
+
+async def advisor_ws(websocket: WebSocket):
+    if not websocket_origin_allowed(websocket):
+        await websocket.close(code=4003)
+        return
+    if not websocket.session.get("authenticated"):
+        if not _check_basic_auth(websocket.headers.get("authorization", "")):
+            await websocket.close(code=4001)
+            return
+    cid = websocket.path_params["id"]
+    if cid not in challenges:
+        await websocket.close(code=4004)
+        return
+    await websocket.accept()
+    s = _get_advisor_session(cid)
+    s["ws_clients"].add(websocket)
+    try:
+        await _send_ws_json(websocket, {"type": "advisor_status",
+                                        "status": s["status"]})
+        while True:
+            await websocket.receive_text()
+    except Exception:  # noqa: BLE001 - normal disconnect
+        pass
+    finally:
+        s["ws_clients"].discard(websocket)
 
 
 # ---------------------------------------------------------------------------
@@ -11901,6 +13207,15 @@ routes = [
     Route("/api/connections/poll", poll_connections, methods=["GET"]),
     Route("/api/settings", get_settings, methods=["GET"]),
     Route("/api/settings", update_settings, methods=["PUT"]),
+    Route("/api/swarm", swarm_status, methods=["GET"]),
+    Route("/api/swarm/config", swarm_save_config, methods=["POST"]),
+    Route("/api/swarm/test", swarm_test, methods=["POST"]),
+    Route("/api/swarm/refresh", swarm_refresh, methods=["POST"]),
+    Route("/api/swarm/image/build", swarm_build_image, methods=["POST"]),
+    Route("/api/swarm/instances", swarm_create_instances, methods=["POST"]),
+    Route("/api/swarm/instances/{name}/{action}", swarm_instance_action,
+          methods=["POST"]),
+    Route("/api/swarm/instances/{name}", swarm_delete_instance, methods=["DELETE"]),
     Route("/api/skills", get_skills, methods=["GET"]),
     Route("/api/skills/upload", upload_skill, methods=["POST"]),
     Route("/api/discord/test", discord_test, methods=["POST"]),
@@ -11942,8 +13257,12 @@ routes = [
     Route("/api/challenges/{id}/files/{path:path}", get_file, methods=["GET"]),
     Route("/api/challenges/{id}/download/{path:path}", download_file, methods=["GET"]),
     Route("/api/challenges/{id}/export", export_challenge, methods=["GET"]),
+    Route("/api/challenges/{id}/advisor", advisor_get, methods=["GET"]),
+    Route("/api/challenges/{id}/advisor", advisor_send, methods=["POST"]),
+    Route("/api/challenges/{id}/advisor/reset", advisor_reset, methods=["POST"]),
     WebSocketRoute("/ws/agents/auth/{session_id}", agent_auth_ws),
     WebSocketRoute("/ws/events", global_events_ws),
+    WebSocketRoute("/ws/{id}/advisor", advisor_ws),
     WebSocketRoute("/ws/{id}/{run_id}", challenge_ws),
     Mount(
         "/static",

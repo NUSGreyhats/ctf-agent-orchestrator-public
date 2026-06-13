@@ -1041,9 +1041,30 @@ $("#btn-new-challenge").addEventListener("click", () => {
   populateAgentList($("#challenge-agent-list"));
   renderSkillChecklist($("#challenge-skill-list"), defaultEnabledSkills);
   $("#challenge-flag").value = defaultFlagFormat;
+  populateRunTargets();
   $("#modal-overlay").classList.remove("hidden");
   $("#challenge-name").focus();
 });
+
+async function populateRunTargets() {
+  const sel = $("#challenge-run-target");
+  if (!sel) return;
+  let options = '<option value="local">This host (local)</option>';
+  try {
+    const res = await api("/api/swarm");
+    if (res && res.ok) {
+      const data = await res.json();
+      const running = (data.instances || []).filter((i) => i.status === "running");
+      if (running.length) {
+        options += '<option value="auto">Swarm — auto-pick free worker</option>';
+        options += running.map((i) =>
+          `<option value="${esc(i.name)}">Swarm — ${esc(i.name)}${i.challenge_id ? " (busy)" : ""}</option>`
+        ).join("");
+      }
+    }
+  } catch (_) { /* swarm not configured — local only */ }
+  sel.innerHTML = options;
+}
 $("#modal-close").addEventListener("click", closeModal);
 $("#modal-overlay").addEventListener("click", (e) => {
   if (e.target === $("#modal-overlay")) closeModal();
@@ -1159,6 +1180,8 @@ $("#challenge-form").addEventListener("submit", async (e) => {
   fd.append("mode", mode);
   fd.append("agents", JSON.stringify(agents));
   fd.append("enabled_skills", JSON.stringify(getSelectedSkills($("#challenge-skill-list"))));
+  const runTarget = $("#challenge-run-target");
+  if (runTarget) fd.append("swarm_instance", runTarget.value || "local");
 
   for (const upload of pendingChallengeUploads) {
     fd.append("files", upload.file, upload.path);
@@ -1933,6 +1956,9 @@ function connectGlobalWS() {
     if (event.type === "challenge_status" && event.challenge_id) {
       updateDashboardChallengeStatus(event.challenge_id, event.status);
     }
+    if (event.type === "swarm_event") {
+      handleSwarmEvent(event);
+    }
   };
   globalWs.onclose = () => {
     globalWs = null;
@@ -2444,6 +2470,7 @@ function connectRunWS(challengeId, runId, agentLabel, options = {}) {
 }
 
 function disconnectAllWS() {
+  disconnectAdvisorWS();
   historyLoadToken++;
   historyLoadingRuns.clear();
   runHistoryState.clear();
@@ -4689,7 +4716,186 @@ function switchTab(tabId) {
   const content = document.getElementById(tabId);
   if (content) content.classList.add("active");
   if (tabId === "tab-files") loadFiles();
+  if (tabId === "tab-advisor") loadAdvisor();
 }
+
+// === Advisor ===
+let advisorWs = null;
+let advisorAgents = [];
+let advisorStarted = false;
+
+function disconnectAdvisorWS() {
+  if (advisorWs) {
+    advisorWs.onclose = null;
+    try { advisorWs.close(); } catch (_) {}
+    advisorWs = null;
+  }
+}
+
+function setAdvisorStatus(status) {
+  const btn = $("#advisor-send");
+  const thinking = status === "thinking";
+  if (btn) btn.disabled = thinking;
+  let ind = $("#advisor-thinking");
+  if (thinking && !ind) {
+    ind = document.createElement("div");
+    ind.id = "advisor-thinking";
+    ind.className = "advisor-thinking text-muted";
+    ind.textContent = "Advisor is thinking…";
+    $("#advisor-log").appendChild(ind);
+    $("#advisor-log").scrollTop = $("#advisor-log").scrollHeight;
+  } else if (!thinking && ind) {
+    ind.remove();
+  }
+}
+
+function populateAdvisorModels(agentName, selectedModel) {
+  const agent = advisorAgents.find((a) => a.name === agentName);
+  const sel = $("#advisor-model");
+  const models = (agent && agent.models) || [];
+  sel.innerHTML = models.map((m) =>
+    `<option value="${esc(m.value)}" ${m.value === selectedModel ? "selected" : ""}>${esc(m.label)}</option>`
+  ).join("") || `<option value="">default</option>`;
+}
+
+function populateAdvisorConfig(cfg) {
+  const agentSel = $("#advisor-agent");
+  agentSel.innerHTML = advisorAgents.map((a) =>
+    `<option value="${esc(a.name)}" ${a.name === cfg.agent ? "selected" : ""}>${esc(a.label)}</option>`
+  ).join("");
+  populateAdvisorModels(cfg.agent || (advisorAgents[0] && advisorAgents[0].name), cfg.model);
+  agentSel.disabled = advisorStarted;
+  $("#advisor-model").disabled = advisorStarted;
+}
+
+function advisorAppendUser(text) {
+  const log = $("#advisor-log");
+  const el = document.createElement("div");
+  el.className = "advisor-msg advisor-msg-user";
+  el.textContent = text;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
+function advisorAppend(kind, text, label) {
+  const log = $("#advisor-log");
+  const el = document.createElement("div");
+  el.className = `advisor-line advisor-${kind}`;
+  if (label) {
+    const b = document.createElement("span");
+    b.className = "advisor-label";
+    b.textContent = label + " ";
+    el.appendChild(b);
+  }
+  el.appendChild(document.createTextNode(text));
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
+function renderAdvisorEvent(event) {
+  if (!event || typeof event !== "object") return;
+  const et = event.type;
+  if (et === "assistant" || et === "user") {
+    // Provider events carry blocks under event.message.content (claude) — fall
+    // back to event.content for other shapes.
+    const blocks = (event.message && event.message.content) || event.content || [];
+    for (const block of blocks) {
+      if (block.type === "text" && block.text) advisorAppend("text", block.text);
+      else if (block.type === "thinking" && block.thinking) advisorAppend("thinking", block.thinking, "thinking");
+      else if (block.type === "tool_use") advisorAppend("tool", `${block.name} ${JSON.stringify(block.input || {})}`, "→");
+      else if (block.type === "tool_result") advisorAppend("toolresult", String(block.content || "").slice(0, 1200), "⤷");
+    }
+  } else if (et === "error") {
+    advisorAppend("error", event.message || "error", "✗");
+  } else if (et === "system" && event.message) {
+    advisorAppend("system", event.message, "·");
+  }
+}
+
+function renderAdvisorHistory(messages) {
+  const log = $("#advisor-log");
+  log.innerHTML = "";
+  for (const m of messages) {
+    if (m.role === "user") advisorAppendUser(m.text || "");
+    else if (m.role === "agent") renderAdvisorEvent(m.event);
+  }
+  if (!messages.length) {
+    log.innerHTML = '<div class="advisor-hint text-muted">Ask the advisor about the ongoing solve, or have it research techniques. It can read the solver transcripts and (sparingly) push hints to them.</div>';
+  }
+}
+
+function connectAdvisorWS() {
+  disconnectAdvisorWS();
+  if (!currentChallengeId) return;
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const cid = currentChallengeId;
+  advisorWs = new WebSocket(`${proto}//${location.host}/ws/${cid}/advisor`);
+  advisorWs.onmessage = (e) => {
+    if (cid !== currentChallengeId) return;
+    const ev = JSON.parse(e.data);
+    if (ev.type === "advisor_user") advisorAppendUser(ev.text || "");
+    else if (ev.type === "advisor_event") renderAdvisorEvent(ev.event);
+    else if (ev.type === "advisor_status") setAdvisorStatus(ev.status);
+    else if (ev.type === "advisor_reset") { $("#advisor-log").innerHTML = ""; }
+  };
+  advisorWs.onclose = () => { advisorWs = null; };
+}
+
+async function loadAdvisor() {
+  if (!currentChallengeId) return;
+  const res = await api(`/api/challenges/${currentChallengeId}/advisor`);
+  if (!res || !res.ok) return;
+  const data = await res.json();
+  advisorAgents = data.agents || [];
+  advisorStarted = !!data.started;
+  populateAdvisorConfig(data.config || {});
+  renderAdvisorHistory(data.messages || []);
+  setAdvisorStatus(data.status || "idle");
+  connectAdvisorWS();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const agentSel = $("#advisor-agent");
+  if (agentSel) {
+    agentSel.addEventListener("change", () => populateAdvisorModels(agentSel.value, ""));
+  }
+  const form = $("#advisor-form");
+  if (form) {
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = $("#advisor-input");
+      const msg = input.value.trim();
+      if (!msg || !currentChallengeId) return;
+      const body = { message: msg };
+      if (!advisorStarted) {
+        body.agent = $("#advisor-agent").value;
+        body.model = $("#advisor-model").value;
+      }
+      input.value = "";
+      const res = await api(`/api/challenges/${currentChallengeId}/advisor`, {
+        method: "POST", body: JSON.stringify(body),
+      });
+      const data = res ? await res.json() : null;
+      if (!res || !res.ok) { showToast((data && data.error) || "Advisor error", "error"); return; }
+      advisorStarted = true;
+      $("#advisor-agent").disabled = true;
+      $("#advisor-model").disabled = true;
+    });
+  }
+  const resetBtn = $("#btn-advisor-reset");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", async () => {
+      if (!currentChallengeId) return;
+      const res = await api(`/api/challenges/${currentChallengeId}/advisor/reset`, { method: "POST" });
+      const data = res ? await res.json() : null;
+      if (!res || !res.ok) { showToast((data && data.error) || "Reset failed", "error"); return; }
+      advisorStarted = false;
+      $("#advisor-log").innerHTML = "";
+      $("#advisor-agent").disabled = false;
+      $("#advisor-model").disabled = false;
+    });
+  }
+});
 
 // === Files Browser ===
 function normalizeFileBrowserPath(path) {
@@ -6035,12 +6241,232 @@ $("#btn-settings").addEventListener("click", async () => {
     }
   }
 
+  loadSwarm();
+
   showView("settings");
 });
 
 $("#btn-settings-back").addEventListener("click", () => {
   showView("dashboard");
   loadChallenges();
+});
+
+// === Swarm (GCP) ===
+let swarmConfigCache = {};
+
+function swarmLogLine(message, level, ts) {
+  const el = $("#swarm-log");
+  if (!el) return;
+  const t = ts ? new Date(ts * 1000) : new Date();
+  const prefix = level === "error" ? "✗" : level === "success" ? "✓" : "·";
+  el.textContent += `[${t.toLocaleTimeString()}] ${prefix} ${message}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+// Instant client-side feedback (ephemeral; replaced by the persisted server log
+// on the next loadSwarm).
+function swarmLog(message, level) {
+  swarmLogLine(message, level);
+}
+
+// Replace the panel with the persistent server-side log.
+function renderSwarmLog(entries) {
+  const el = $("#swarm-log");
+  if (!el) return;
+  el.textContent = "";
+  for (const e of entries || []) swarmLogLine(e.message, e.level, e.ts);
+}
+
+function handleSwarmEvent(event) {
+  swarmLogLine(event.message || "", event.level, event.ts);
+  if (event.refresh) loadSwarm();
+}
+
+function renderSwarmConfig(cfg) {
+  swarmConfigCache = cfg || {};
+  $("#settings-swarm-project").value = cfg.project || "";
+  $("#settings-swarm-zone").value = cfg.zone || "";
+  $("#settings-swarm-machine").value = cfg.default_machine_type || "e2-standard-4";
+  $("#settings-swarm-disk").value = cfg.default_disk_size_gb || 100;
+  $("#settings-swarm-idle").value = cfg.idle_stop_minutes ?? 30;
+  $("#settings-swarm-vpn").checked = !!cfg.vpn_route;
+  $("#settings-swarm-adc").checked = !!cfg.use_adc;
+  $("#settings-swarm-sa-status").textContent = cfg.service_account_configured
+    ? "Key configured. Leave blank to keep it."
+    : "No key configured.";
+  const tokStatus = $("#settings-swarm-token-status");
+  if (tokStatus) tokStatus.textContent = cfg.access_token_configured
+    ? "Token set. Leave blank to keep it; type 'clear' to remove."
+    : "No token set.";
+  // ADC takes precedence; hide token + SA fields when ADC is on.
+  const adc = !!cfg.use_adc;
+  const saGroup = $("#settings-swarm-sa-group");
+  if (saGroup) saGroup.style.display = adc ? "none" : "";
+  const tokGroup = $("#settings-swarm-token-group");
+  if (tokGroup) tokGroup.style.display = adc ? "none" : "";
+}
+
+function renderSwarmInstances(instances, image) {
+  const imgEl = $("#swarm-image-status");
+  if (imgEl) {
+    imgEl.textContent = image && image.name
+      ? `Image: ${image.name} (built ${image.built_at ? new Date(image.built_at * 1000).toLocaleString() : "?"})`
+      : "No image built yet.";
+  }
+  const rows = $("#swarm-instance-rows");
+  const empty = $("#swarm-no-instances");
+  if (!rows) return;
+  if (!instances || !instances.length) {
+    rows.innerHTML = "";
+    if (empty) empty.classList.remove("hidden");
+    return;
+  }
+  if (empty) empty.classList.add("hidden");
+  rows.innerHTML = instances.map((inst) => {
+    const running = inst.status === "running";
+    const startStop = running
+      ? `<button class="btn-ghost btn-sm swarm-act" data-act="stop" data-name="${esc(inst.name)}">Stop</button>`
+      : `<button class="btn-ghost btn-sm swarm-act" data-act="start" data-name="${esc(inst.name)}">Start</button>`;
+    return `<tr>
+      <td>${esc(inst.name)}</td>
+      <td><span class="badge badge-${running ? "solving" : "pending"}">${esc(inst.status || "?")}</span></td>
+      <td>${esc(inst.external_ip || "—")}</td>
+      <td>${esc(inst.machine_type || "?")}</td>
+      <td>${esc(inst.challenge_name || inst.challenge_id || "—")}</td>
+      <td class="swarm-actions">
+        ${startStop}
+        <button class="btn-ghost btn-sm swarm-act" data-act="sync-credentials" data-name="${esc(inst.name)}">Sync creds</button>
+        <button class="btn-ghost btn-sm swarm-act" data-act="delete" data-name="${esc(inst.name)}">Delete</button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+async function loadSwarm() {
+  const res = await api("/api/swarm");
+  if (!res || !res.ok) return;
+  const data = await res.json();
+  renderSwarmConfig(data.config || {});
+  renderSwarmInstances(data.instances || [], data.image || {});
+  renderSwarmLog(data.log || []);
+}
+
+function swarmConfigBody() {
+  return {
+    service_account: $("#settings-swarm-sa").value.trim(),
+    access_token: $("#settings-swarm-token").value.trim(),
+    project: $("#settings-swarm-project").value.trim(),
+    zone: $("#settings-swarm-zone").value.trim(),
+    default_machine_type: $("#settings-swarm-machine").value.trim(),
+    default_disk_size_gb: parseInt($("#settings-swarm-disk").value, 10) || 100,
+    idle_stop_minutes: parseInt($("#settings-swarm-idle").value, 10) || 0,
+    vpn_route: $("#settings-swarm-vpn").checked,
+    use_adc: $("#settings-swarm-adc").checked,
+  };
+}
+
+async function saveSwarmConfig() {
+  const res = await api("/api/swarm/config", {
+    method: "POST", body: JSON.stringify(swarmConfigBody()),
+  });
+  if (!res) return null;
+  const data = await res.json();
+  if (!res.ok) { showToast(data.error || "Save failed", "error"); return null; }
+  $("#settings-swarm-sa").value = "";
+  $("#settings-swarm-token").value = "";
+  renderSwarmConfig(data.config || {});
+  return data;
+}
+
+$("#btn-swarm-save").addEventListener("click", async () => {
+  if (await saveSwarmConfig()) showToast("Swarm config saved", "success");
+});
+
+$("#settings-swarm-adc").addEventListener("change", (e) => {
+  const hide = e.target.checked ? "none" : "";
+  const saGroup = $("#settings-swarm-sa-group");
+  if (saGroup) saGroup.style.display = hide;
+  const tokGroup = $("#settings-swarm-token-group");
+  if (tokGroup) tokGroup.style.display = hide;
+});
+
+$("#btn-swarm-test").addEventListener("click", async () => {
+  const out = $("#swarm-test-result");
+  out.textContent = "Saving & testing…";
+  // Persist the current form first so the test reflects what you typed.
+  if (!(await saveSwarmConfig())) { out.textContent = "Save failed"; return; }
+  const res = await api("/api/swarm/test", { method: "POST" });
+  const data = res ? await res.json() : null;
+  if (res && res.ok && data.ok) {
+    out.textContent = `OK — project ${data.info?.project || "?"}, zone ${data.info?.zone || "?"}`;
+  } else {
+    out.textContent = (data && data.error) || "Connection failed";
+  }
+});
+
+$("#btn-swarm-build-image").addEventListener("click", async () => {
+  if (!confirm("Build/rebuild the golden image? This provisions a base VM and takes ~10–15 min.")) return;
+  const res = await api("/api/swarm/image/build", { method: "POST" });
+  const data = res ? await res.json() : null;
+  if (res && res.ok) swarmLog("Image build started…");
+  else showToast((data && data.error) || "Build failed to start", "error");
+});
+
+$("#btn-swarm-spinup").addEventListener("click", async () => {
+  const body = {
+    count: parseInt($("#settings-swarm-count").value, 10) || 1,
+    machine_type: $("#settings-swarm-spinup-machine").value.trim(),
+  };
+  const res = await api("/api/swarm/instances", { method: "POST", body: JSON.stringify(body) });
+  const data = res ? await res.json() : null;
+  if (res && res.ok) swarmLog(`Spinning up ${data.count} worker(s)…`);
+  else showToast((data && data.error) || "Spin up failed", "error");
+});
+
+$("#btn-swarm-refresh").addEventListener("click", async () => {
+  const res = await api("/api/swarm/refresh", { method: "POST" });
+  if (res && res.ok) loadSwarm();
+});
+
+const SWARM_ACT_LABELS = {
+  start: "Starting", stop: "Stopping", "sync-credentials": "Syncing creds",
+  delete: "Deleting",
+};
+
+$("#swarm-instance-rows").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".swarm-act");
+  if (!btn) return;
+  const name = btn.dataset.name;
+  const act = btn.dataset.act;
+  if (act === "delete" &&
+      !confirm(`Delete instance ${name}? Its workspace is destroyed (logs stay here).`)) {
+    return;
+  }
+  // In-flight feedback: GCP stop/delete can take 30–60s. Disable the row's
+  // buttons, mark the active one, and log immediately so it doesn't look dead.
+  const label = SWARM_ACT_LABELS[act] || act;
+  const row = btn.closest("tr");
+  const rowBtns = row ? row.querySelectorAll(".swarm-act") : [btn];
+  rowBtns.forEach((b) => { b.disabled = true; });
+  const orig = btn.textContent;
+  btn.textContent = `${label}…`;
+  swarmLog(`${label} ${name}…`);
+
+  const url = `/api/swarm/instances/${encodeURIComponent(name)}` +
+    (act === "delete" ? "" : `/${act}`);
+  const res = await api(url, { method: act === "delete" ? "DELETE" : "POST" });
+  const data = res ? await res.json() : null;
+
+  if (res && res.ok) {
+    // The server records the persistent "done" line; loadSwarm re-renders the
+    // table + the persisted log (resetting button state).
+    loadSwarm();
+  } else {
+    btn.textContent = orig;
+    rowBtns.forEach((b) => { b.disabled = false; });
+    const msg = (data && data.error) || `${label} failed`;
+    showToast(msg, "error");  // server also logs the failure persistently
+  }
 });
 
 $("#btn-settings-skill-upload").addEventListener("click", uploadSettingsSkill);
