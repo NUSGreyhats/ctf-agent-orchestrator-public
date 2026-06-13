@@ -42,10 +42,76 @@ Agents are effective out of the box, but get better with **skills** — structur
 - **One-command deploy** via Terraform to **Hetzner Cloud, DigitalOcean, or GCP**.
 - **Swarm** — dispatch a challenge to a dedicated, disposable GCP worker VM cloned from a golden image, isolating heavy CPU/RAM/disk work from the controller. See [SWARM.md](SWARM.md).
 - **WireGuard VPN** — built-in management for challenges that need network access to CTF infrastructure, with reverse routing to client-side internal CIDRs.
-- **Integrated tooling** — a persistent GDB MCP server (Claude + Codex) and headless IDA Pro analysis via the `analyze-with-ida-domain-api` skill.
+- **Integrated tooling** — a persistent GDB MCP server (Claude + Codex) and headless IDA Pro analysis via the `analyze-with-ida-domain-api` skill (bring your own licensed IDA).
 - **Discord bot** (optional) — per-challenge threads/channels, real-time notifications, flag review, and slash commands for team coordination.
 
 > For internals — collaboration model, filesystem layout, solve lifecycle, security model, persistence, and settings reference — see **[DESIGN.md](DESIGN.md)**.
+
+<details>
+<summary><b>Full feature list</b> (click to expand)</summary>
+
+**Agents & models**
+- Claude Code (via `claude-agent-sdk`) and Codex (via `codex app-server`, JSON-RPC over stdio)
+- Per-agent model selection — Claude: Opus 4.8/4.7/4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5, Fable 5 (default Opus 4.6 1M); Codex: discovered from local cache/config
+- Per-agent reasoning effort — Claude low/medium/high/max; Codex discovered (default XHigh), compatibility-guarded so unsupported combos fall back instead of failing
+- Per-provider session resume (Claude session id, Codex thread id) and a persistent default-agent toggle
+
+**Solving & collaboration**
+- Single and parallel solving modes; race multiple agents on one challenge, or add runs to an existing challenge (promotes single → parallel)
+- Isolated per-run workspace with a symlinked `challenge_files/` view of the original files
+- Working notes per agent, cross-symlinked so teammates can read them
+- `notify_teammates` tool for validated breakthroughs (Claude in-process MCP tool, Codex dynamic tool), injected into teammates' sessions
+- User broadcast to all running agents (web or Discord)
+- Steer a running agent mid-solve; stop one run or all runs; Resume, Retry, Mark Solved, Unsolve
+- Auto-stop sibling runs when one solves or submits a correct flag
+
+**Web UI**
+- Real-time WebSocket streaming of thinking, tool calls, tool results, text, and raw output
+- Syntax highlighting, collapsible tool sections, copy buttons, subagent tabs, split or tabbed multi-agent layout, per-event elapsed timestamps, user prompts as chat bubbles
+- Flag detection for `flag{}`/`CTF{}`/`HTB{}`/`picoCTF{}`/custom formats with neutral → correct/rejected states that persist
+- Silent `ctfgrep` preflight that surfaces flag candidates before the agent starts; auto-submit detected flags to the connected platform
+- File browser for original files and per-run workspaces (image/text/hex), auto-refreshing, with safe server-side path resolution
+- Per-challenge statistics (input/output/cache tokens, cost, duration, API time, turns, tool calls, per-model breakdown, aggregate)
+- Usage dashboards (Claude auth/plan/org + token usage + daily chart; Codex auth status; per-agent challenge totals)
+- Per-challenge Advisor agent (configurable provider/model) that reads solver transcripts, answers questions, researches online, and relays hints
+- Markdown export reports + bulk export index; global cross-challenge toast notifications; keyboard shortcuts; responsive collapsible sidebar; dark/light theme
+
+**Challenges & platforms**
+- Create single challenges or bulk-upload `.zip`/`.7z` archives (preview/edit metadata before import)
+- Import from CTFd, rCTF, Hack The Box CTF, CDDC, Cywaria/Cympire, SAS CTF, and GPN (auto-discovered plugin registry)
+- Saved platform connections with re-sync for new challenges and points/solves updates
+- On-demand Docker/machine instances started at solve time (HTB, Cywaria, SAS); connection info injected into the prompt
+- HTB multi-answer (`flagsInfo`) support with a `submit_answer.py` helper
+- Per-challenge import size cap; TLS verification on by default with an explicit insecure-TLS opt-out
+
+**Skills**
+- Repo skills (forensics and tool-specific) plus external [ljagiello/ctf-skills](https://github.com/ljagiello/ctf-skills), compiled into the `all-skills/` catalog
+- Selected skills symlinked into each run's `.claude/skills` and `.codex/skills`; Codex also receives them as structured skill inputs
+- Global default skills, challenge-level skills locked at creation, per-run skill overrides applied mid-run (stop → refresh symlinks → resume)
+- Upload new skills from Settings as a `.zip` bundle or a single `SKILL.md`
+
+**Infrastructure & tooling**
+- One-command Terraform deploy to Hetzner Cloud, DigitalOcean, or GCP
+- Runtime-allowlist deploy sync that preserves `challenges/` and `state/` on the VM
+- Swarm: dispatch a challenge to a disposable GCP worker cloned from a golden image — per-challenge pinning, start/stop/delete, idle auto-stop (default 30 min), credential sync, a Local | Swarm (auto) | Swarm:\<instance\> run-target selector, live SSH file browse, and hub-and-spoke VPN routing
+- WireGuard VPN management: server control, generated Linux client config, reverse routing to client-side internal CIDRs, optional `dnsmasq` DNS forwarding, status (handshake age + transfer)
+- Persistent GDB MCP server (registered for Claude and Codex); headless IDA Pro analysis via the `analyze-with-ida-domain-api` skill (bring your own licensed IDA)
+- Rich preinstalled toolchain (reverse engineering, disk/memory/network/file forensics, crypto, pwn, web)
+- uv-based Python installs; dependency-aware parallel provisioning (`INSTALL_SCRIPTS_PARALLEL`); end-of-setup validation
+
+**Discord (optional)**
+- Per-challenge destination as a thread or a category-matched channel
+- Notifications for starts, stops, solves, flag detections, breakthroughs, and completions
+- Flag-review buttons (submit / reject / mark correct / broadcast) and challenge action buttons (status, stats, tail, flags, submit, solved, stop, resume)
+- Slash commands: `/broadcast` `/ctf` `/files` `/flags` `/help` `/resume` `/solved` `/stats` `/status` `/steer` `/stop` `/submit` `/tail`
+- Live settings reconcile (gateway starts/stops/restarts on config change)
+
+**Persistence & security**
+- Challenge metadata, run history, detected flags, per-run JSONL logs, platform connections, and settings persisted under `state/` and `challenges/`; stale `solving` runs reset on restart
+- HTTP Basic/session auth, CSRF on state-changing routes, authenticated WebSockets with Origin validation
+- Browser hardening headers (CSP, `nosniff`, Referrer-Policy, X-Frame-Options, Permissions-Policy, COOP, HSTS over TLS)
+
+</details>
 
 ## Supported Agents
 
