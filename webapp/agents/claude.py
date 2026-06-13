@@ -671,7 +671,7 @@ provider = AgentProvider(
     label="Claude",
     models=(
         ("", "Provider default"),
-        ("claude-fable-5", "Fable 5"),
+        ("claude-fable-5", "Fable 5.0"),
         ("claude-opus-4-8", "Opus 4.8"),
         ("claude-opus-4-7", "Opus 4.7"),
         ("claude-sonnet-4-6", "Sonnet 4.6"),
@@ -681,7 +681,7 @@ provider = AgentProvider(
         ("claude-haiku-4-5-20251001", "Haiku 4.5"),
         ("claude-sonnet-4-5-20250929", "Sonnet 4.5"),
     ),
-    default_model="claude-opus-4-6",
+    default_model="claude-opus-4-6[1m]",
     auth_connect_command="claude auth login",
     badge_mode="model",
     build_command=_build_command,
