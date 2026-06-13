@@ -112,7 +112,7 @@ terraform destroy
 
 Skills are structured workflows that steer how agents approach challenge types. They come from two sources, both compiled into the runtime `all-skills/` catalog during setup:
 
-- **This repo** (`skills/`) — CTF methodology, forensics (disk, memory, pcap, stego/repair), and tool-specific skills (IDA, apk analysis, kernel GEF debugging, angrop ROP chains).
+- **This repo** (`skills/`) — forensics (disk, memory, pcap, stego/repair) and tool-specific skills (IDA, apk analysis, kernel GEF debugging, angrop ROP chains).
 - **[ljagiello/ctf-skills](https://github.com/ljagiello/ctf-skills)** — category skills for pwn, web, crypto, rev, misc, osint, malware, and AI/ML.
 
 The webapp symlinks selected skills into each run's `.claude/skills` and `.codex/skills`. You can also upload a `.zip` bundle or single `SKILL.md` from **Settings**. See [skills/README.md](skills/README.md) for the full catalog.
@@ -128,7 +128,7 @@ webapp/           Starlette/ASGI app — challenge management + agent streaming
   swarm*.py       Remote GCP worker dispatch (manager, runner, exec)
   static/         Frontend (vanilla JS, CSS)
 mcps/             MCP servers (GDB debugger)
-skills/           Repo-owned agent skills (methodology, forensics, tools)
+skills/           Repo-owned agent skills (forensics, tools)
 ```
 
 Runtime-only directories created on the VM: `all-skills/` (compiled skill catalog), `challenges/` (uploaded files, workspaces, settings), and `state/` (challenge metadata, per-run JSONL logs, platform connections). These are preserved across deploy syncs.

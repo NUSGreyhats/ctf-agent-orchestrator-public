@@ -2063,7 +2063,7 @@ def skill_catalog_by_name() -> dict[str, dict]:
 
 # Skills enabled by default for new challenges (when the operator has not
 # customized the set in Settings). Tool/forensics skills that should always be
-# available; methodology/category/tool-specific skills like the ROP and crypto
+# available; category/tool-specific skills like the ROP and crypto
 # skills are left off so they load on demand via their triggers.
 DEFAULT_ENABLED_SKILLS = [
     "kernel-gef-debugging",
@@ -4331,11 +4331,7 @@ async def get_challenge_prompt_template(request: Request) -> JSONResponse:
     body, json_err = await read_json_object(request)
     if json_err:
         return json_err
-    enabled_skills = normalize_enabled_skills(
-        body.get("enabled_skills"),
-        default=challenge_enabled_skills(challenge),
-    )
-    prompt = build_add_run_prompt_template(challenge, enabled_skills)
+    prompt = build_add_run_prompt_template(challenge)
     return JSONResponse({
         "prompt": prompt,
         "placeholders": [
@@ -6390,7 +6386,6 @@ def _build_standard_prompt(
     run: dict,
     instance_info: dict | None = None,
     *,
-    enabled_skills: list[str] | None = None,
     notes_path: str | None = None,
     team_placeholder: bool = False,
     remote_placeholder: bool = False,
@@ -6409,15 +6404,9 @@ def _build_standard_prompt(
     notes_path = notes_path or (
         str(run_cwd / notes_file) if run_cwd else notes_file
     )
-    enabled_skill_set = set(
-        enabled_skills if enabled_skills is not None else run_enabled_skills(challenge, run)
-    )
-
     parts = [
         "You are solving a CTF challenge.",
     ]
-    if "ctf-methodology" in enabled_skill_set:
-        parts.append("Follow ctf-methodology and solve the CTF challenge")
     parts.extend(_enabled_hook_prompt_lines())
 
     parts.extend([
@@ -6522,7 +6511,6 @@ def _build_standard_prompt(
 
 def build_add_run_prompt_template(
     challenge: dict,
-    enabled_skills: list[str],
 ) -> str:
     template_run = make_run(
         run_id="{{RUN_ID}}",
@@ -6535,7 +6523,6 @@ def build_add_run_prompt_template(
     return _build_standard_prompt(
         template_challenge,
         template_run,
-        enabled_skills=enabled_skills,
         notes_path="{{WORKING_NOTES_PATH}}",
         team_placeholder=True,
         remote_placeholder=True,

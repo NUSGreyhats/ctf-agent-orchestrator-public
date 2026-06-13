@@ -67,7 +67,6 @@ check_cmd docker docker --version
 
 check_cmd claude claude --version
 check_cmd codex codex --version
-check_path "$APP_ROOT/all-skills/ctf-methodology/SKILL.md"
 
 check_cmd apktool apktool --version
 check_cmd jadx jadx --version
