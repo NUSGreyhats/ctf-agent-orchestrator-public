@@ -1,4 +1,4 @@
-# ctf-agent-wrapper
+# ctf-agent-orchestrator
 
 An AI-powered CTF solving workstation. It provisions a cloud VM pre-loaded with reverse-engineering, forensics, crypto, pwn, and web tooling, then lets you throw CTF challenges at one or more AI agents — **Claude Code** and **Codex** — through a web UI. Run a single agent, race several in parallel, or fan challenges out to a fleet of disposable worker VMs.
 
